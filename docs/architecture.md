@@ -25,15 +25,18 @@ Backend ────────────────► Execution Instance
 
 The specification and lock are platform-independent where possible. The
 published environment identity includes platform and build-profile inputs.
-Execution identity additionally includes the environment, input digest,
-operation, and requested policy.
+Each execution attempt has a unique history identity. A separate stable request
+digest includes the environment, input digest, operation, and requested policy.
 
 ## Public identities
 
-Only two identities are central to the ordinary API:
+Two lifecycle identities are central to the ordinary API:
 
 - `environment_id`: exact lock plus platform/build inputs;
-- `execution_id`: environment plus submitted input, operation, and policy.
+- `execution_id`: one concrete execution attempt.
+
+`request_digest` is a stable comparison key for identical logical requests. It
+does not name a mutable history record.
 
 Inspection also exposes `spec_digest` and `lock_id` for auditing. They remain
 lower-level identities rather than separate lifecycle objects users must name.
@@ -97,6 +100,8 @@ Names are atomic JSON pointers to environment identities. Updating a name does
 not mutate either old or new environments. Garbage collection removes only
 old environments that are not reachable through an alias; locks and source
 snapshots are conservatively retained by store schema 1.
+Last-use records prevent recently opened or executed unnamed environments from
+being collected, and execution cloning shares the environment's deletion lock.
 
 ## Trust boundary
 
@@ -105,4 +110,3 @@ supply-chain identity, but packages can still execute code during Lake
 configuration or builds. Network isolation is therefore not advertised by the
 local backend. The `Backend` interface exists so container and remote workers
 can enforce stronger policies later.
-

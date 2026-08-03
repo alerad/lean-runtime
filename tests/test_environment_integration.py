@@ -99,6 +99,12 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     assert first.lock_id == lock.lock_id
     assert first.provenance is not None
     assert first.provenance.packages[0].revision == revision
+    repeated = environment.check(source)
+    assert repeated.execution_id != first.execution_id
+    assert repeated.provenance is not None
+    assert repeated.provenance.request_digest == first.provenance.request_digest
+    assert (runtime.store.executions / f"{first.execution_id}.json").is_file()
+    assert (runtime.store.executions / f"{repeated.execution_id}.json").is_file()
     assert runtime.open("demo").id == environment.id
     capture_path = tmp_path / "execution.capture.json"
     environment.capture(source, expected_ok=True).write(capture_path)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -120,7 +121,7 @@ class EnvironmentSpec:
     def __post_init__(self) -> None:
         object.__setattr__(self, "toolchain", normalize_toolchain(self.toolchain))
         names = [package.name for package in self.packages]
-        duplicates = sorted({name for name in names if names.count(name) > 1})
+        duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
         if duplicates:
             raise SpecificationError("duplicate direct package names: " + ", ".join(duplicates))
 

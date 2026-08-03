@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from lean_runtime import Runtime, ToolchainError
+from lean_runtime import ExecutionJob, Runtime, ToolchainError
 
 
 class FakeToolchains:
@@ -40,6 +40,21 @@ def test_check_accepts_source(tmp_path: Path) -> None:
     assert result.ok
     assert result.exit_code == 0
     assert result.toolchain == "leanprover/lean4:v4.32.0"
+
+
+def test_repeated_requests_have_unique_execution_history_ids(tmp_path: Path) -> None:
+    runtime = Runtime(toolchains=FakeToolchains(tmp_path))  # type: ignore[arg-type]
+    first = runtime.check("example : True := by trivial", toolchain="4.32.0")
+    second = runtime.check("example : True := by trivial", toolchain="4.32.0")
+    assert first.execution_id != second.execution_id
+    assert first.provenance is not None and second.provenance is not None
+    assert first.provenance.request_digest == second.provenance.request_digest
+
+
+def test_finished_job_cannot_be_cancelled() -> None:
+    job = ExecutionJob(lambda _cancel: 42)
+    assert job.result() == 42
+    assert not job.cancel()
 
 
 def test_check_returns_structured_rejection(tmp_path: Path) -> None:

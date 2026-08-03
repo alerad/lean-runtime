@@ -219,15 +219,26 @@ class Runtime:
         policy: ExecutionPolicy,
     ) -> ExecutionResult:
         started_at = datetime.now(timezone.utc).isoformat()
-        execution_id = sha256_id(
-            "execution",
+        logical_command = list(command[3:])
+        if source_digest != sha256_text("") and logical_command:
+            logical_command[-1] = Path(logical_command[-1]).name
+        request_digest = sha256_id(
+            "request",
             {
                 "environment_id": None,
                 "toolchain": toolchain,
-                "command": list(command[3:]),
+                "command": logical_command,
                 "source_digest": source_digest,
                 "policy": policy.to_dict(),
                 "backend": self.backend.name,
+            },
+        )
+        execution_id = sha256_id(
+            "execution",
+            {
+                "request_digest": request_digest,
+                "started_at": started_at,
+                "nonce": os.urandom(16).hex(),
             },
         )
         raw = self.backend.execute(
@@ -243,6 +254,7 @@ class Runtime:
         provenance = ExecutionProvenance(
             environment_id=None,
             execution_id=execution_id,
+            request_digest=request_digest,
             lock_id=None,
             toolchain=toolchain,
             packages=(),

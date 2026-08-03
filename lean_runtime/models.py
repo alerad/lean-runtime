@@ -31,6 +31,7 @@ class PackageProvenance:
 class ExecutionProvenance:
     environment_id: str | None
     execution_id: str
+    request_digest: str
     lock_id: str | None
     toolchain: str
     packages: tuple[PackageProvenance, ...]

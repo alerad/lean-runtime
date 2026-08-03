@@ -139,6 +139,8 @@ class ExecutionJob(Generic[T]):
         self._future: Future[T] = self._executor.submit(function, self._cancel)
 
     def cancel(self) -> bool:
+        if self._future.done():
+            return False
         self._cancel.set()
         return True
 
@@ -279,8 +281,8 @@ class Environment:
         cancel: threading.Event | None,
     ) -> ExecutionResult:
         source_digest = sha256_text(source)
-        execution_id = sha256_id(
-            "execution",
+        request_digest = sha256_id(
+            "request",
             {
                 "schema": EXECUTION_SCHEMA,
                 "environment_id": self.id,
@@ -293,11 +295,21 @@ class Environment:
             },
         )
         started_at = _now()
+        execution_id = sha256_id(
+            "execution",
+            {
+                "request_digest": request_digest,
+                "started_at": started_at,
+                "nonce": uuid.uuid4().hex,
+            },
+        )
         job_parent = self.manager.store.jobs / execution_id
         job_parent.mkdir(parents=True, exist_ok=True)
         instance = job_parent / f"instance-{uuid.uuid4().hex}"
         try:
-            clone_tree(self.workspace, instance)
+            with FileLock(self.manager.store.lock_dir / f"{self.id}.lock"):
+                self.manager.store.touch_environment(self.id)
+                clone_tree(self.workspace, instance)
             if operation == "check":
                 source_path = instance / filename
                 source_path.write_text(source, encoding="utf-8")
@@ -320,6 +332,7 @@ class Environment:
                 command=command,
                 cwd=instance,
                 execution_id=execution_id,
+                request_digest=request_digest,
                 source_digest=source_digest,
                 started_at=started_at,
                 policy=policy,
@@ -339,6 +352,7 @@ class Environment:
         command: Sequence[str],
         cwd: Path,
         execution_id: str,
+        request_digest: str,
         source_digest: str,
         started_at: str,
         policy: ExecutionPolicy,
@@ -352,6 +366,7 @@ class Environment:
         provenance = ExecutionProvenance(
             environment_id=self.id,
             execution_id=execution_id,
+            request_digest=request_digest,
             lock_id=self.lock.lock_id,
             toolchain=self.lock.toolchain,
             packages=tuple(
@@ -441,6 +456,7 @@ class EnvironmentManager:
             raise EnvironmentError(f"environment identity mismatch: {environment_id}")
         if not (root / "workspace" / ".lake" / "build").is_dir():
             raise EnvironmentError(f"environment build artifacts are missing: {environment_id}")
+        self.store.touch_environment(environment_id)
         return Environment(self, environment_id, lock, root, record)
 
     def _materialize(

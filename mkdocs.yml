@@ -1,0 +1,53 @@
+site_name: Lean Runtime
+site_description: Content-addressed execution environments for Lean 4
+site_url: https://alerad.github.io/lean-runtime/
+repo_url: https://github.com/alerad/lean-runtime
+repo_name: alerad/lean-runtime
+copyright: Copyright © Alejandro Radisic
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.top
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/weather-night
+        name: Use dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/weather-sunny
+        name: Use light mode
+
+nav:
+  - Overview: index.md
+  - Getting started: getting-started.md
+  - Guides:
+      - Environments: environments.md
+      - Python API: python-api.md
+      - CLI: cli.md
+      - Execution captures: captures.md
+  - Concepts:
+      - Architecture: architecture.md
+      - Trust and limitations: trust-and-limitations.md
+  - Development: development.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - toc:
+      permalink: true
+
+strict: true

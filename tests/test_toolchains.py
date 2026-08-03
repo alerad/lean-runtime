@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
 
@@ -51,3 +52,11 @@ def test_elan_override_preserves_symlink(tmp_path: Path, monkeypatch: pytest.Mon
     link.symlink_to(target)
     monkeypatch.setenv("LEAN_RUNTIME_ELAN", str(link))
     assert ToolchainManager(tmp_path / "runtime").elan_path() == link.absolute()
+
+
+def test_elan_bootstrap_rejects_installer_with_wrong_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: io.BytesIO(b"bad"))
+    with pytest.raises(ToolchainError, match="integrity check"):
+        ToolchainManager(tmp_path / "runtime").bootstrap_elan()

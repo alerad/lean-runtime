@@ -18,6 +18,9 @@ results, and replayable provenance above them.
 > are implemented. Local execution is an orchestration boundary, not a security
 > sandbox.
 
+Full guides, API examples, architecture, and the trust model live in the
+[documentation](https://alerad.github.io/lean-runtime/).
+
 ## Installation
 
 ```bash
@@ -69,6 +72,7 @@ result = environment.check(
 assert result.ok
 print(result.environment_id)
 print(result.execution_id)
+print(result.provenance.request_digest)
 print(result.provenance.packages)
 ```
 
@@ -107,6 +111,9 @@ tree identity.
 package's Lean artifacts are built. `artifact_command` is an optional explicit
 package-supported hydration step; it is useful for Mathlib's cache command
 without introducing a premature artifact-provider framework.
+
+Artifact commands run from the generated root workspace. Locks, packages, and
+artifact commands must be trusted; schema validation is not a security sandbox.
 
 ## CLI
 

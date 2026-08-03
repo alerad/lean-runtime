@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import subprocess
@@ -11,7 +12,9 @@ from pathlib import Path
 
 from .errors import ToolchainError
 
-ELAN_INIT_URL = "https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh"
+ELAN_VERSION = "4.2.3"
+ELAN_INIT_URL = f"https://raw.githubusercontent.com/leanprover/elan/v{ELAN_VERSION}/elan-init.sh"
+ELAN_INIT_SHA256 = "a620ff1641616222c8d37c54845492004bb84d6877cdbc944dd65c1aa685bf53"
 
 
 def default_runtime_home() -> Path:
@@ -100,9 +103,13 @@ class ToolchainManager:
             script = Path(raw) / "elan-init.sh"
             try:
                 with urllib.request.urlopen(ELAN_INIT_URL, timeout=30) as response:
-                    script.write_bytes(response.read())
+                    installer = response.read()
             except OSError as exc:
                 raise ToolchainError(f"could not download Elan installer: {exc}") from exc
+            observed = hashlib.sha256(installer).hexdigest()
+            if observed != ELAN_INIT_SHA256:
+                raise ToolchainError("downloaded Elan installer failed its SHA-256 integrity check")
+            script.write_bytes(installer)
             script.chmod(script.stat().st_mode | stat.S_IXUSR)
             env = self.environment
             process = subprocess.run(

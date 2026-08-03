@@ -21,6 +21,9 @@ from .serialization import sha256_id, write_json_atomic
 
 STORE_SCHEMA = "lean-runtime-store/1"
 _ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_ENVIRONMENT_ID = re.compile(r"env_[0-9a-f]{64}")
+ALIAS_SCHEMA = "lean-runtime-environment-alias/1"
+SUPPORTED_BUILD_PROFILE = "release"
 
 
 def platform_record() -> dict[str, str]:
@@ -32,6 +35,10 @@ def platform_record() -> dict[str, str]:
 
 
 def environment_identity(lock: EnvironmentLock, build_profile: str = "release") -> str:
+    if build_profile != SUPPORTED_BUILD_PROFILE:
+        raise EnvironmentError(
+            f"unsupported build profile {build_profile!r}; only 'release' is implemented"
+        )
     return sha256_id(
         "env",
         {
@@ -96,6 +103,7 @@ class EnvironmentStore:
         self.names = home / "names"
         self.jobs = home / "jobs"
         self.executions = home / "executions"
+        self.usage = home / "usage"
         self.lock_dir = home / ".locks"
         for path in (
             self.sources,
@@ -104,6 +112,7 @@ class EnvironmentStore:
             self.names,
             self.jobs,
             self.executions,
+            self.usage,
             self.lock_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
@@ -198,6 +207,18 @@ class EnvironmentStore:
     def environment_path(self, environment_id: str) -> Path:
         return self.environments / environment_id
 
+    def validate_environment_id(self, environment_id: str) -> str:
+        if _ENVIRONMENT_ID.fullmatch(environment_id) is None:
+            raise EnvironmentError(f"invalid environment identity: {environment_id!r}")
+        return environment_id
+
+    def touch_environment(self, environment_id: str) -> None:
+        self.validate_environment_id(environment_id)
+        write_json_atomic(
+            self.usage / f"{environment_id}.json",
+            {"environment_id": environment_id, "last_used_at": time.time()},
+        )
+
     def validate_alias(self, name: str) -> str:
         if _ALIAS.fullmatch(name) is None:
             raise EnvironmentError(f"invalid environment name: {name!r}")
@@ -205,8 +226,9 @@ class EnvironmentStore:
 
     def set_alias(self, name: str, environment_id: str) -> None:
         self.validate_alias(name)
+        self.validate_environment_id(environment_id)
         record = {
-            "schema": "lean-runtime-environment-alias/1",
+            "schema": ALIAS_SCHEMA,
             "name": name,
             "environment_id": environment_id,
         }
@@ -214,27 +236,38 @@ class EnvironmentStore:
             write_json_atomic(self.names / f"{name}.json", record)
 
     def resolve_identifier(self, identifier: str) -> str:
-        direct = self.environment_path(identifier)
-        if direct.is_dir():
-            return identifier
+        if _ENVIRONMENT_ID.fullmatch(identifier) is not None:
+            direct = self.environment_path(identifier)
+            if direct.is_dir():
+                return identifier
         alias_path = self.names / f"{self.validate_alias(identifier)}.json"
         if not alias_path.is_file():
             raise EnvironmentError(f"unknown environment: {identifier}")
-        value = json.loads(alias_path.read_text(encoding="utf-8"))
-        environment_id = value.get("environment_id")
-        if (
-            not isinstance(environment_id, str)
-            or not self.environment_path(environment_id).is_dir()
-        ):
+        environment_id = self._read_alias(alias_path, expected_name=identifier)
+        if not self.environment_path(environment_id).is_dir():
             raise EnvironmentError(f"environment alias is dangling: {identifier}")
         return environment_id
+
+    def _read_alias(self, path: Path, *, expected_name: str | None = None) -> str:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise EnvironmentError(f"invalid environment alias record: {path.name}") from exc
+        if not isinstance(value, dict) or value.get("schema") != ALIAS_SCHEMA:
+            raise EnvironmentError(f"invalid environment alias record: {path.name}")
+        name = value.get("name")
+        environment_id = value.get("environment_id")
+        if not isinstance(name, str) or name != path.stem or name != (expected_name or name):
+            raise EnvironmentError(f"environment alias name mismatch: {path.name}")
+        self.validate_alias(name)
+        if not isinstance(environment_id, str):
+            raise EnvironmentError(f"environment alias has no identity: {name}")
+        return self.validate_environment_id(environment_id)
 
     def aliases(self) -> dict[str, str]:
         result: dict[str, str] = {}
         for path in sorted(self.names.glob("*.json")):
-            value = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(value.get("name"), str) and isinstance(value.get("environment_id"), str):
-                result[value["name"]] = value["environment_id"]
+            result[path.stem] = self._read_alias(path)
         return result
 
     def gc(
@@ -251,12 +284,25 @@ class EnvironmentStore:
         removed: list[str] = []
         with FileLock(self.lock_dir / "gc.lock"):
             for path in sorted(self.environments.glob("env_*")):
-                age = now - path.stat().st_mtime
+                if _ENVIRONMENT_ID.fullmatch(path.name) is None:
+                    retained.append(path.name)
+                    continue
+                usage = self.usage / f"{path.name}.json"
+                age = now - (usage.stat().st_mtime if usage.exists() else path.stat().st_mtime)
                 if path.name in referenced or age < minimum_age_seconds:
                     retained.append(path.name)
                     continue
                 candidates.append(path.name)
                 if not dry_run:
-                    shutil.rmtree(path)
-                    removed.append(path.name)
+                    with FileLock(self.lock_dir / f"{path.name}.lock"):
+                        referenced = set(self.aliases().values())
+                        age = now - (
+                            usage.stat().st_mtime if usage.exists() else path.stat().st_mtime
+                        )
+                        if path.name in referenced or age < minimum_age_seconds:
+                            retained.append(path.name)
+                            continue
+                        shutil.rmtree(path)
+                        usage.unlink(missing_ok=True)
+                        removed.append(path.name)
         return GarbageCollectionReport(tuple(candidates), tuple(removed), tuple(retained), dry_run)

@@ -11,7 +11,7 @@ from lean_runtime import EnvironmentError, EnvironmentLock, LockedPackage
 def sample_lock() -> EnvironmentLock:
     return EnvironmentLock(
         toolchain="leanprover/lean4:v4.32.0",
-        spec_digest="spec_abc",
+        spec_digest="spec_" + "c" * 64,
         root_lakefile='name = "test"\n',
         root_module="/- root -/\n",
         manifest={"version": "1.1.0", "packages": []},
@@ -20,7 +20,7 @@ def sample_lock() -> EnvironmentLock:
                 name="sample",
                 url="https://example.test/sample",
                 revision="a" * 40,
-                source_id="source_abc",
+                source_id="source_" + "d" * 64,
                 tree_hash="b" * 40,
             ),
         ),
@@ -44,3 +44,21 @@ def test_lock_tampering_is_detected(tmp_path: Path) -> None:
     path.write_text(json.dumps(payload))
     with pytest.raises(EnvironmentError, match="identity mismatch"):
         EnvironmentLock.load(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("subdir", "../../escape", "unsafe package subdir"),
+        ("artifact_command", ["lake", 7], "array of strings"),
+        ("source_id", "source_not-a-digest", "source identity"),
+        ("root_module", "Bad/Module", "root module"),
+    ],
+)
+def test_untrusted_locked_package_fields_are_validated(
+    field: str, value: object, message: str
+) -> None:
+    payload = sample_lock().to_dict()
+    payload["packages"][0][field] = value
+    with pytest.raises(EnvironmentError, match=message):
+        EnvironmentLock.from_dict(payload)
