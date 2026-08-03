@@ -24,7 +24,7 @@ Full guides, API examples, architecture, and the trust model live in the
 ## Installation
 
 ```bash
-python -m pip install .
+python -m pip install lean-runtime
 ```
 
 For development:
