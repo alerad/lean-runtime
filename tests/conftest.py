@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
@@ -16,4 +17,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[object]):
         path, line, _ = item.location
         message = str(call.excinfo.getrepr(style="short")).replace("%", "%25")
         message = message.replace("\r", "%0D").replace("\n", "%0A")
-        print(f"::error file={path},line={line + 1},title=pytest failure::{message}")
+        sys.__stdout__.write(
+            f"::error file={path},line={line + 1},title=pytest failure::{message}\n"
+        )
+        sys.__stdout__.flush()
