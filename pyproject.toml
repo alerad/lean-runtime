@@ -24,8 +24,15 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "tomli>=2"]
 docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5"]
+
+[project.urls]
+Homepage = "https://github.com/alerad/lean-runtime"
+Documentation = "https://alerad.github.io/lean-runtime/"
+Repository = "https://github.com/alerad/lean-runtime.git"
+Issues = "https://github.com/alerad/lean-runtime/issues"
+Changelog = "https://github.com/alerad/lean-runtime/blob/main/CHANGELOG.md"
 
 [project.scripts]
 lean-runtime = "lean_runtime.cli:main"

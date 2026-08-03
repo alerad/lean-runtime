@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
-try:
-    import tomllib  # type: ignore[import-not-found]
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib  # type: ignore[import-not-found]
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover - exercised by the Python 3.10 CI job
+    import tomli as tomllib
 
 from .errors import SpecificationError
 from .serialization import sha256_id
