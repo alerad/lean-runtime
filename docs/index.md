@@ -7,7 +7,7 @@ runs Lean with structured results and exact provenance.
 ```text
 EnvironmentSpec ──resolve──> EnvironmentLock ──ensure──> Environment
                                                            │
-                                                     check / build
+                                              check / build / execute
                                                            │
                                                            ▼
                                                   ExecutionResult
@@ -23,12 +23,12 @@ It deliberately does not replace the official tools:
 
 ## Current scope
 
-Version 0.4 supports exact Git locks, commit-or-tag specifications, ergonomic
+Version 0.5 supports exact Git locks, commit-or-tag specifications, ergonomic
 GitHub package references, retained Lake manifests, immutable published
 environments, mutable aliases, offline reopening, disposable execution
 workspaces, structured diagnostics, resource policies, cancellation, multi-file
-and batch checking, asyncio, progress events, health inspection, and replayable
-JSON captures.
+and batch checking, asyncio, one-shot target execution, managed interactive
+processes, progress events, health inspection, and replayable JSON captures.
 
 The local backend executes **trusted inputs only**. Lean packages and Lake
 configuration can run native programs and arbitrary build commands; the local

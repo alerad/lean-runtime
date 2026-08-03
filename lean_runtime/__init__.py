@@ -1,6 +1,12 @@
 """Content-addressed execution environments for Lean 4."""
 
-from .environments import Environment, EnvironmentInfo, ExecutionCapture, ExecutionJob
+from .environments import (
+    Environment,
+    EnvironmentInfo,
+    ExecutionCapture,
+    ExecutionJob,
+    InteractiveSession,
+)
 from .errors import (
     EnvironmentError,
     LeanRuntimeError,
@@ -34,6 +40,7 @@ __all__ = [
     "EnvironmentSpec",
     "ExecutionCapture",
     "ExecutionJob",
+    "InteractiveSession",
     "ExecutionPolicy",
     "ExecutionProvenance",
     "ExecutionResult",

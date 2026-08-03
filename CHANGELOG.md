@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0
+
+- Add `Environment.execute()` for generic commands such as `lake exe`.
+- Add managed `InteractiveSession` processes with live UTF-8 standard-I/O pipes.
+- Run interactive tools in disposable environment clones with exact provenance.
+- Enforce local timeout, memory, CPU, and bounded-transcript policies for sessions.
+- Gracefully close sessions with stdin EOF before process-group termination.
+- Persist final interactive `ExecutionResult` records and clean up instances.
+
 ## 0.4.0
 
 - Add `github:owner/repository@tag-or-commit` package references.

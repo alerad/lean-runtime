@@ -2,12 +2,17 @@
 
 ## Trusted local execution
 
-Lean Runtime 0.4 orchestrates trusted code. It is not a sandbox.
+Lean Runtime 0.5 orchestrates trusted code. It is not a sandbox.
 
 Lake configurations are executable, dependencies may contain native code and
 custom build targets, and explicit artifact commands run subprocesses. Lockfile
 schema validation prevents malformed paths and command values, but validation
 does not make an untrusted lock safe to execute.
+
+This also applies to `Environment.execute()` and `spawn_interactive()`: command
+targets and protocol inputs must be trusted. Interactive sessions enforce the
+same local resource controls as one-shot execution, but they do not turn local
+Lake tools into isolated untrusted services.
 
 Do not submit untrusted packages, locks, captures, Lean source, or artifact
 commands to the local backend. A future container backend can provide a stronger

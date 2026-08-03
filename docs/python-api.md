@@ -45,6 +45,7 @@ result = environment.check(source)
 result = environment.check_files(files, entrypoint="Main.lean")
 results = environment.check_many(sources, concurrency=8)
 build = environment.build(("RuntimeEnvironment",))
+command = environment.execute(["lake", "exe", "my_tool", "--flag"])
 info = environment.inspect()
 capture = environment.capture(source, expected_ok=True)
 ```
@@ -68,6 +69,42 @@ result = await environment.check_async(source)
 result = await environment.check_files_async(files, entrypoint="Main.lean")
 results = await environment.check_many_async(sources, concurrency=8)
 ```
+
+## Interactive sessions
+
+`spawn_interactive()` keeps a tool alive inside one disposable instance and
+exposes line-buffered UTF-8 pipes. This supports NDJSON bridges, REPLs, language
+servers, and other processes where startup cost should be paid once:
+
+```python
+import json
+
+from lean_runtime import ExecutionPolicy
+
+with environment.spawn_interactive(
+    ["lake", "exe", "lean_bridge"],
+    policy=ExecutionPolicy(timeout_seconds=3600, memory_mb=4096),
+) as session:
+    request = {"id": 1, "method": "get_info", "params": {}}
+    session.stdin.write(json.dumps(request) + "\n")
+    session.stdin.flush()
+    response = json.loads(session.stdout.readline())
+    assert session.running
+
+result = session.close()
+assert result.execution_id == session.execution_id
+```
+
+`close()` is idempotent. It closes stdin first so cooperative servers can exit
+on EOF, waits briefly, then terminates and finally kills the process group if
+needed. The disposable instance is removed and the final `ExecutionResult` is
+persisted even when `close()` is called by the context manager during exception
+unwinding.
+
+`stdout` and `stderr` reads are mirrored into one bounded transcript budget;
+the original text is still returned to the caller. Callers of tools that emit
+substantial data on both streams should drain both streams to avoid ordinary
+subprocess pipe backpressure.
 
 ## Progress events
 

@@ -11,17 +11,17 @@ import subprocess
 import tempfile
 import threading
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TextIO, TypeVar, cast
 
-from .backends import Backend, BackendResult
+from .backends import Backend, BackendResult, InteractiveProcess, InteractiveTextReader
 from .diagnostics import error_diagnostic, parse_diagnostics
-from .errors import EnvironmentError, MaterializationError
+from .errors import EnvironmentError, MaterializationError, PolicyError
 from .events import EventEmitter
 from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock
@@ -71,6 +71,15 @@ def _source_files(files: Mapping[str, str]) -> dict[str, str]:
             raise EnvironmentError(f"duplicate normalized Lean source path: {normalized}")
         result[normalized] = source
     return result
+
+
+def _execution_command(command: Sequence[str]) -> tuple[str, ...]:
+    if not command:
+        raise EnvironmentError("an execution command must not be empty")
+    normalized = tuple(command)
+    if any(not isinstance(part, str) or not part or "\0" in part for part in normalized):
+        raise EnvironmentError("execution command elements must be non-empty strings without NULs")
+    return normalized
 
 
 def _module_name(path: str) -> str:
@@ -256,6 +265,66 @@ class ExecutionJob(Generic[T]):
                 self._executor.shutdown(wait=False)
 
 
+class InteractiveSession:
+    """One live process inside a disposable environment instance."""
+
+    def __init__(
+        self,
+        *,
+        process: InteractiveProcess,
+        execution_id: str,
+        finalize: Callable[[BackendResult], ExecutionResult],
+        cleanup: Callable[[], None],
+    ) -> None:
+        self._process = process
+        self._execution_id = execution_id
+        self._finalize = finalize
+        self._cleanup = cleanup
+        self._result: ExecutionResult | None = None
+        self._closing = threading.Lock()
+
+    @property
+    def stdin(self) -> TextIO:
+        return self._process.stdin
+
+    @property
+    def stdout(self) -> InteractiveTextReader:
+        return self._process.stdout
+
+    @property
+    def stderr(self) -> InteractiveTextReader:
+        return self._process.stderr
+
+    @property
+    def execution_id(self) -> str:
+        return self._execution_id
+
+    @property
+    def running(self) -> bool:
+        return self._result is None and self._process.poll() is None
+
+    def poll(self) -> int | None:
+        """Return the process exit code, or ``None`` while it is running."""
+        return self._process.poll()
+
+    def close(self) -> ExecutionResult:
+        """Send EOF, stop if necessary, persist provenance, and remove the instance."""
+        with self._closing:
+            if self._result is not None:
+                return self._result
+            try:
+                self._result = self._finalize(self._process.finish())
+                return self._result
+            finally:
+                self._cleanup()
+
+    def __enter__(self) -> InteractiveSession:
+        return self
+
+    def __exit__(self, _exc_type: object, _exc_value: object, _traceback: object) -> None:
+        self.close()
+
+
 class Environment:
     """A lightweight handle to one published, content-addressed environment."""
 
@@ -326,6 +395,7 @@ class Environment:
             files=normalized,
             entrypoint=selected_entrypoint,
             targets=(),
+            requested_command=(),
             policy=policy or ExecutionPolicy(),
             cancel=cancel,
         )
@@ -420,8 +490,120 @@ class Environment:
             files={},
             entrypoint=None,
             targets=tuple(targets),
+            requested_command=(),
             policy=policy or ExecutionPolicy(timeout_seconds=900, max_output_bytes=10_000_000),
             cancel=cancel,
+        )
+
+    def execute(
+        self,
+        command: Sequence[str],
+        *,
+        policy: ExecutionPolicy | None = None,
+        cancel: threading.Event | None = None,
+    ) -> ExecutionResult:
+        """Run a command, such as ``lake exe TARGET``, in a disposable instance."""
+        return self._execute_in_instance(
+            operation="execute",
+            files={},
+            entrypoint=None,
+            targets=(),
+            requested_command=_execution_command(command),
+            policy=policy or ExecutionPolicy(),
+            cancel=cancel,
+        )
+
+    def spawn_interactive(
+        self,
+        command: Sequence[str],
+        *,
+        policy: ExecutionPolicy | None = None,
+    ) -> InteractiveSession:
+        """Start a long-running command with live text pipes in a disposable instance."""
+        requested_command = _execution_command(command)
+        selected_policy = policy or ExecutionPolicy()
+        source_digest = sha256_id("files", {})
+        request_digest = sha256_id(
+            "request",
+            {
+                "schema": EXECUTION_SCHEMA,
+                "environment_id": self.id,
+                "operation": "interactive",
+                "source_digest": source_digest,
+                "command": list(requested_command),
+                "policy": selected_policy.to_dict(),
+                "backend": self.manager.backend.name,
+            },
+        )
+        started_at = _now()
+        execution_id = sha256_id(
+            "execution",
+            {
+                "request_digest": request_digest,
+                "started_at": started_at,
+                "nonce": uuid.uuid4().hex,
+            },
+        )
+        job_parent = self.manager.store.jobs / execution_id
+        job_parent.mkdir(parents=True, exist_ok=True)
+        instance = job_parent / f"instance-{uuid.uuid4().hex}"
+
+        def cleanup() -> None:
+            if instance.exists():
+                shutil.rmtree(instance)
+            with suppress(OSError):
+                job_parent.rmdir()
+
+        try:
+            with self.manager.store.execution_lease(self.id):
+                clone_tree(self.workspace, instance)
+            resolved_command = self.manager.toolchains.command(
+                self.lock.toolchain, requested_command[0], *requested_command[1:]
+            )
+            spawn = getattr(self.manager.backend, "spawn_interactive", None)
+            if not callable(spawn):
+                raise PolicyError(
+                    f"backend {self.manager.backend.name!r} does not support interactive execution"
+                )
+            process = cast(
+                InteractiveProcess,
+                spawn(
+                    resolved_command,
+                    cwd=instance,
+                    environment=self.manager.toolchains.environment,
+                    policy=selected_policy,
+                ),
+            )
+        except BaseException:
+            cleanup()
+            raise
+
+        def finalize(raw: BackendResult) -> ExecutionResult:
+            result = self._result(
+                raw,
+                command=resolved_command,
+                cwd=instance,
+                execution_id=execution_id,
+                request_digest=request_digest,
+                source_digest=source_digest,
+                started_at=started_at,
+                policy=selected_policy,
+            )
+            self._record_execution(
+                result,
+                "interactive",
+                (),
+                None,
+                (),
+                requested_command,
+            )
+            return result
+
+        return InteractiveSession(
+            process=process,
+            execution_id=execution_id,
+            finalize=finalize,
+            cleanup=cleanup,
         )
 
     def capture(
@@ -471,6 +653,7 @@ class Environment:
         files: dict[str, str],
         entrypoint: str | None,
         targets: tuple[str, ...],
+        requested_command: tuple[str, ...],
         policy: ExecutionPolicy,
         cancel: threading.Event | None,
     ) -> ExecutionResult:
@@ -484,6 +667,7 @@ class Environment:
                 "source_digest": source_digest,
                 "entrypoint": entrypoint,
                 "targets": list(targets),
+                "command": list(requested_command),
                 "policy": policy.to_dict(),
                 "backend": self.manager.backend.name,
             },
@@ -534,7 +718,14 @@ class Environment:
                             started_at=started_at,
                             policy=policy,
                         )
-                        self._record_execution(result, operation, targets, entrypoint, tuple(files))
+                        self._record_execution(
+                            result,
+                            operation,
+                            targets,
+                            entrypoint,
+                            tuple(files),
+                            requested_command,
+                        )
                         return result
                 for support in _support_order(files, entrypoint):
                     support_path = instance / support
@@ -572,15 +763,26 @@ class Environment:
                             started_at=started_at,
                             policy=policy,
                         )
-                        self._record_execution(result, operation, targets, entrypoint, tuple(files))
+                        self._record_execution(
+                            result,
+                            operation,
+                            targets,
+                            entrypoint,
+                            tuple(files),
+                            requested_command,
+                        )
                         return result
                 source_path = instance / entrypoint
                 command = self.manager.toolchains.command(
                     self.lock.toolchain, "lake", "env", "lean", str(source_path)
                 )
-            else:
+            elif operation == "build":
                 command = self.manager.toolchains.command(
                     self.lock.toolchain, "lake", "build", *targets
+                )
+            else:
+                command = self.manager.toolchains.command(
+                    self.lock.toolchain, requested_command[0], *requested_command[1:]
                 )
             raw = self.manager.backend.execute(
                 command,
@@ -612,7 +814,14 @@ class Environment:
                 started_at=started_at,
                 policy=policy,
             )
-            self._record_execution(result, operation, targets, entrypoint, tuple(files))
+            self._record_execution(
+                result,
+                operation,
+                targets,
+                entrypoint,
+                tuple(files),
+                requested_command,
+            )
             return result
         finally:
             if instance.exists():
@@ -678,6 +887,7 @@ class Environment:
         targets: tuple[str, ...],
         entrypoint: str | None,
         files: tuple[str, ...],
+        requested_command: tuple[str, ...],
     ) -> None:
         assert result.execution_id is not None
         write_json_atomic(
@@ -688,6 +898,7 @@ class Environment:
                 "targets": list(targets),
                 "entrypoint": entrypoint,
                 "files": list(files),
+                "command": list(requested_command),
                 "result": result.to_dict(),
             },
         )

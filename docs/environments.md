@@ -52,7 +52,7 @@ through the locked toolchain.
 ## Identity
 
 The environment identity includes the complete lock, host platform, and the
-implemented build profile. Version 0.4 supports only the `release` profile;
+implemented build profile. Version 0.5 supports only the `release` profile;
 other values are rejected rather than producing misleadingly distinct IDs for
 identical builds.
 

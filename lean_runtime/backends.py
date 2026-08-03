@@ -7,10 +7,11 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import Any, BinaryIO, Protocol, TextIO, cast
 
 from .errors import PolicyError
 from .policies import ExecutionPolicy
@@ -42,6 +43,31 @@ class Backend(Protocol):
     ) -> BackendResult: ...
 
 
+class InteractiveTextReader(Protocol):
+    @property
+    def closed(self) -> bool: ...
+
+    def read(self, size: int = -1) -> str: ...
+
+    def readline(self, size: int = -1) -> str: ...
+
+    def fileno(self) -> int: ...
+
+    def close(self) -> None: ...
+
+
+class InteractiveProcess(Protocol):
+    """Live standard-I/O streams plus managed process finalization."""
+
+    stdin: TextIO
+    stdout: InteractiveTextReader
+    stderr: InteractiveTextReader
+
+    def poll(self) -> int | None: ...
+
+    def finish(self) -> BackendResult: ...
+
+
 class _OutputBudget:
     def __init__(self, limit: int) -> None:
         self.remaining = limit
@@ -67,20 +93,135 @@ def _drain(stream: BinaryIO, budget: _OutputBudget, chunks: list[bytes]) -> None
             chunks.append(kept)
 
 
+class _TranscriptReader:
+    """Mirror caller-consumed text into the bounded execution transcript."""
+
+    def __init__(self, stream: TextIO, budget: _OutputBudget, chunks: list[bytes]) -> None:
+        self._stream = stream
+        self._budget = budget
+        self._chunks = chunks
+
+    @property
+    def closed(self) -> bool:
+        return self._stream.closed
+
+    def fileno(self) -> int:
+        return self._stream.fileno()
+
+    def _record(self, value: str) -> str:
+        if value:
+            kept = self._budget.take(value.encode("utf-8"))
+            if kept:
+                self._chunks.append(kept)
+        return value
+
+    def read(self, size: int = -1) -> str:
+        return self._record(self._stream.read(size))
+
+    def readline(self, size: int = -1) -> str:
+        return self._record(self._stream.readline(size))
+
+    def close(self) -> None:
+        self._stream.close()
+
+
+class _LocalInteractiveProcess:
+    def __init__(
+        self,
+        process: subprocess.Popen[str],
+        *,
+        policy: ExecutionPolicy,
+        enforced_policy_fields: tuple[str, ...],
+    ) -> None:
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        self._process = process
+        self._policy = policy
+        self._enforced_policy_fields = enforced_policy_fields
+        self._started = time.monotonic()
+        self._timed_out = threading.Event()
+        self._finished = threading.Event()
+        self._budget = _OutputBudget(policy.max_output_bytes)
+        self._stdout_chunks: list[bytes] = []
+        self._stderr_chunks: list[bytes] = []
+        self.stdin = cast(TextIO, process.stdin)
+        self.stdout: InteractiveTextReader = _TranscriptReader(
+            cast(TextIO, process.stdout), self._budget, self._stdout_chunks
+        )
+        self.stderr: InteractiveTextReader = _TranscriptReader(
+            cast(TextIO, process.stderr), self._budget, self._stderr_chunks
+        )
+        self._monitor = threading.Thread(
+            target=self._enforce_timeout,
+            name=f"lean-runtime-process-{process.pid}",
+            daemon=True,
+        )
+        self._monitor.start()
+
+    def _enforce_timeout(self) -> None:
+        remaining = self._policy.timeout_seconds - (time.monotonic() - self._started)
+        if remaining > 0 and self._finished.wait(remaining):
+            return
+        if self._process.poll() is not None:
+            return
+        self._timed_out.set()
+        LocalBackend._stop(self._process)
+        try:
+            self._process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            LocalBackend._kill(self._process)
+
+    def poll(self) -> int | None:
+        return self._process.poll()
+
+    @staticmethod
+    def _remaining(reader: InteractiveTextReader) -> None:
+        with suppress(OSError, ValueError):
+            reader.read()
+
+    def finish(self) -> BackendResult:
+        if not self.stdin.closed:
+            self.stdin.close()
+        cancelled = False
+        try:
+            self._process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            cancelled = True
+            LocalBackend._stop(self._process)
+            try:
+                self._process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                LocalBackend._kill(self._process)
+                self._process.wait()
+        self._finished.set()
+        self._monitor.join(timeout=3)
+        self._remaining(self.stdout)
+        self._remaining(self.stderr)
+        self.stdout.close()
+        self.stderr.close()
+        timed_out = self._timed_out.is_set()
+        return BackendResult(
+            exit_code=124 if timed_out else 130 if cancelled else int(self._process.returncode),
+            stdout=b"".join(self._stdout_chunks).decode("utf-8", errors="replace"),
+            stderr=b"".join(self._stderr_chunks).decode("utf-8", errors="replace"),
+            elapsed_seconds=time.monotonic() - self._started,
+            timed_out=timed_out,
+            cancelled=cancelled and not timed_out,
+            output_truncated=self._budget.truncated,
+            enforced_policy_fields=self._enforced_policy_fields,
+        )
+
+
 class LocalBackend:
     """Trusted local subprocess execution with bounded captured output."""
 
     name = "local"
 
-    def execute(
-        self,
-        command: Sequence[str],
-        *,
-        cwd: Path,
-        environment: Mapping[str, str],
+    @staticmethod
+    def _process_options(
         policy: ExecutionPolicy,
-        cancel: threading.Event | None = None,
-    ) -> BackendResult:
+    ) -> tuple[list[str], Callable[[], object] | None, int]:
         if policy.network == "disabled":
             raise PolicyError("the local backend cannot enforce network isolation")
         enforced = ["timeout_seconds", "max_output_bytes"]
@@ -111,9 +252,52 @@ class LocalBackend:
                 enforced.append("cpu_seconds")
         elif os.name == "nt" and (policy.memory_mb or policy.cpu_seconds):
             raise PolicyError("the local Windows backend cannot enforce memory or CPU limits")
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+        return enforced, preexec, creationflags
+
+    def spawn_interactive(
+        self,
+        command: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        policy: ExecutionPolicy,
+    ) -> InteractiveProcess:
+        """Spawn a trusted local process with live text pipes."""
+        enforced, preexec, creationflags = self._process_options(policy)
+        process = subprocess.Popen(
+            list(command),
+            cwd=cwd,
+            env=dict(environment),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            start_new_session=os.name != "nt",
+            creationflags=creationflags,
+            preexec_fn=preexec,
+        )
+        return _LocalInteractiveProcess(
+            process,
+            policy=policy,
+            enforced_policy_fields=tuple(enforced),
+        )
+
+    def execute(
+        self,
+        command: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        policy: ExecutionPolicy,
+        cancel: threading.Event | None = None,
+    ) -> BackendResult:
+        enforced, preexec, creationflags = self._process_options(policy)
 
         started = time.monotonic()
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
         process = subprocess.Popen(
             list(command),
             cwd=cwd,
@@ -166,7 +350,7 @@ class LocalBackend:
         )
 
     @staticmethod
-    def _stop(process: subprocess.Popen[bytes]) -> None:
+    def _stop(process: subprocess.Popen[Any]) -> None:
         try:
             if os.name == "nt":
                 process.terminate()
@@ -176,7 +360,7 @@ class LocalBackend:
             pass
 
     @staticmethod
-    def _kill(process: subprocess.Popen[bytes]) -> None:
+    def _kill(process: subprocess.Popen[Any]) -> None:
         try:
             if os.name == "nt":
                 process.kill()

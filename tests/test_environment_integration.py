@@ -126,6 +126,19 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     assert repeated.provenance.request_digest == first.provenance.request_digest
     assert (runtime.store.executions / f"{first.execution_id}.json").is_file()
     assert (runtime.store.executions / f"{repeated.execution_id}.json").is_file()
+    version = environment.execute(["lean", "--version"])
+    assert version.ok
+    assert "Lean (version 4.32.0" in version.stdout
+    bridge_script = "import sys\nfor line in sys.stdin:\n print(line.strip().upper(), flush=True)"
+    with environment.spawn_interactive(
+        ["lake", "env", sys.executable, "-u", "-c", bridge_script]
+    ) as session:
+        session.stdin.write("stateful\n")
+        session.stdin.flush()
+        assert session.stdout.readline() == "STATEFUL\n"
+    interactive = session.close()
+    assert interactive.ok
+    assert interactive.environment_id == environment.id
     files = {
         "Support/Defs.lean": "import Sample\ndef answer : Nat := sampleValue + 1\n",
         "Main.lean": "import Support.Defs\nexample : answer = 42 := by rfl\n",

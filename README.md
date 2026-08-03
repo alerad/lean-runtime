@@ -14,7 +14,7 @@ Lake remains authoritative for dependency resolution and builds. Lean Runtime
 adds immutable identities, lifecycle management, reuse, structured Python
 results, and replayable provenance above them.
 
-> **Status:** `0.4` alpha. Exact Git environments and trusted local execution
+> **Status:** `0.5` alpha. Exact Git environments and trusted local execution
 > are implemented. Local execution is an orchestration boundary, not a security
 > sandbox.
 
@@ -114,6 +114,37 @@ The convenience form compiles and reuses the environment automatically:
 ```python
 result = runtime.check(source, environment=spec)
 ```
+
+## Long-running Lean tools
+
+Generic commands and stateful protocols run in the same disposable,
+content-addressed execution model:
+
+```python
+import json
+
+from lean_runtime import ExecutionPolicy
+
+environment = runtime.ensure_references(
+    ["github:alerad/leancert@v4.32.2.4"],
+    name="leancert-4.32.2.4",
+)
+
+with environment.spawn_interactive(
+    ["lake", "exe", "lean_bridge"],
+    policy=ExecutionPolicy(timeout_seconds=3600, memory_mb=4096),
+) as session:
+    session.stdin.write(json.dumps({"id": 1, "method": "get_info", "params": {}}) + "\n")
+    session.stdin.flush()
+    response = json.loads(session.stdout.readline())
+
+result = session.close()  # idempotent after context-manager cleanup
+assert result.execution_id == session.execution_id
+```
+
+`Environment.execute(["lake", "exe", "target"])` provides the corresponding
+one-shot path. Both APIs retain the exact environment, policy, command,
+transcript, duration, and final exit status.
 
 ## Package revision policy
 
