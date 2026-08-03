@@ -39,3 +39,29 @@ The decisive invariant is:
 > own history record.
 
 Apache-2.0 covers the Python package and repository source.
+
+## Publishing to PyPI
+
+Releases use PyPI trusted publishing; no long-lived API token is stored in
+GitHub. Before the first release, create a **pending publisher** from the
+Publishing page of the maintainer's PyPI account with:
+
+- PyPI project name: `lean-runtime`
+- GitHub owner: `alerad`
+- GitHub repository: `lean-runtime`
+- Workflow: `release.yml`
+- Environment: `pypi`
+
+In the GitHub repository, create the `pypi` environment under **Settings →
+Environments**. An approval rule for that environment is recommended.
+
+To publish, update the version and changelog, merge a green CI revision, and
+create a GitHub release whose tag is exactly `v<version>`—for example,
+`v0.3.0`. The release workflow verifies that the tag matches
+`project.version`, builds both distributions, and publishes through OpenID
+Connect. The first successful publication converts the pending publisher into
+a normal publisher and creates the PyPI project.
+
+PyPI does not permit replacing files for an already published version. If a
+release needs a correction, increment the version rather than recreating the
+tag.
