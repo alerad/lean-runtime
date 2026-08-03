@@ -45,6 +45,7 @@ def test_explicit_elan_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert ToolchainManager(tmp_path / "runtime").elan_path() == executable.absolute()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows runners may not permit symlink creation")
 def test_elan_override_preserves_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     target = tmp_path / "elan-init"
     target.write_text("")
