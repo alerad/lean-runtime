@@ -104,7 +104,11 @@ class Runtime:
                 f"Discovering {reference.display}",
                 reference=reference.display,
             )
-            package = discover_package(reference, directory=discovery_root)
+            package = discover_package(
+                reference,
+                directory=discovery_root,
+                toolchains=self.toolchains,
+            )
             discovered.append(package)
             self.events.emit(
                 "package_reference.resolved",

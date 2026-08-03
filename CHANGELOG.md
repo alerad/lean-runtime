@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0
+
+- Discover packages declared with either `lakefile.toml` or `lakefile.lean`.
+- Translate Lake DSL configurations through the package's exact declared Lean
+  toolchain instead of parsing Lean source or guessing package metadata.
+
 ## 0.5.0
 
 - Add `Environment.execute()` for generic commands such as `lake exe`.

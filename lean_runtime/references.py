@@ -18,7 +18,7 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
 
 from .errors import ResolutionError, SpecificationError
 from .specs import GitPackage
-from .toolchains import normalize_toolchain
+from .toolchains import ToolchainManager, normalize_toolchain
 
 _GITHUB = re.compile(
     r"github:(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/"
@@ -115,24 +115,20 @@ def _run_git(arguments: list[str], *, cwd: Path | None = None, timeout: float = 
     return process.stdout.strip()
 
 
-def _lake_metadata(checkout: Path) -> tuple[str, str]:
-    lakefile = checkout / "lakefile.toml"
-    if not lakefile.is_file():
-        raise SpecificationError(
-            "package-reference discovery currently requires a root lakefile.toml"
-        )
+def _read_lake_metadata(lakefile: Path) -> tuple[str, str]:
+    """Read the declarative Lake metadata needed by environment resolution."""
     try:
         value = tomllib.loads(lakefile.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise SpecificationError(f"could not read package lakefile.toml: {exc}") from exc
+        raise SpecificationError(f"could not read package metadata {lakefile.name}: {exc}") from exc
     if not isinstance(value, dict):
-        raise SpecificationError("package lakefile.toml is not a TOML object")
+        raise SpecificationError(f"package metadata {lakefile.name} is not a TOML object")
     name = value.get("name")
     if not isinstance(name, str) or not name:
-        raise SpecificationError("package lakefile.toml has no package name")
+        raise SpecificationError(f"package metadata {lakefile.name} has no package name")
     libraries = value.get("lean_lib")
     if not isinstance(libraries, list) or not libraries:
-        raise SpecificationError("package lakefile.toml declares no [[lean_lib]]")
+        raise SpecificationError(f"package metadata {lakefile.name} declares no [[lean_lib]]")
     first = libraries[0]
     if not isinstance(first, dict):
         raise SpecificationError("package's first [[lean_lib]] is malformed")
@@ -143,7 +139,72 @@ def _lake_metadata(checkout: Path) -> tuple[str, str]:
     return name, root_module
 
 
-def discover_package(reference: PackageReference, *, directory: Path) -> DiscoveredPackage:
+def _lake_metadata(
+    checkout: Path,
+    *,
+    toolchain: str,
+    toolchains: ToolchainManager,
+) -> tuple[str, str]:
+    lakefile = checkout / "lakefile.toml"
+    if lakefile.is_file():
+        return _read_lake_metadata(lakefile)
+
+    lakefile_lean = checkout / "lakefile.lean"
+    if not lakefile_lean.is_file():
+        raise SpecificationError(
+            "referenced package has neither a root lakefile.toml nor lakefile.lean"
+        )
+    translated = checkout / ".lean-runtime-lakefile.toml"
+    try:
+        command = toolchains.command(
+            toolchain,
+            "lake",
+            "translate-config",
+            "toml",
+            str(translated),
+        )
+        process = subprocess.run(
+            command,
+            cwd=checkout,
+            env=toolchains.environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=120,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ResolutionError(
+            "Lake package-metadata translation timed out",
+            phase="package-discovery",
+            command=tuple(command),
+            exit_code=124,
+            output=str(exc.stdout or "") + str(exc.stderr or ""),
+        ) from exc
+    if process.returncode:
+        raise ResolutionError(
+            "Lake could not translate package metadata",
+            phase="package-discovery",
+            command=tuple(command),
+            exit_code=process.returncode,
+            output=process.stdout,
+        )
+    if not translated.is_file():
+        raise ResolutionError(
+            "Lake completed without producing translated package metadata",
+            phase="package-discovery",
+            command=tuple(command),
+            output=process.stdout,
+        )
+    return _read_lake_metadata(translated)
+
+
+def discover_package(
+    reference: PackageReference,
+    *,
+    directory: Path,
+    toolchains: ToolchainManager | None = None,
+) -> DiscoveredPackage:
     """Acquire a shallow checkout and compile its metadata into an exact package."""
     directory.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="package-", dir=directory) as raw:
@@ -167,7 +228,12 @@ def discover_package(reference: PackageReference, *, directory: Path) -> Discove
         if not toolchain_path.is_file():
             raise SpecificationError("referenced package has no lean-toolchain file")
         toolchain = normalize_toolchain(toolchain_path.read_text(encoding="utf-8"))
-        name, root_module = _lake_metadata(checkout)
+        manager = toolchains or ToolchainManager(directory.parent)
+        name, root_module = _lake_metadata(
+            checkout,
+            toolchain=toolchain,
+            toolchains=manager,
+        )
         package = GitPackage.git(name, reference.url, revision, root_module=root_module)
         return DiscoveredPackage(reference=reference, toolchain=toolchain, package=package)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,50 @@ def _commit_package(path: Path) -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=path, text=True).strip()
 
 
+def _commit_lean_dsl_package(path: Path) -> str:
+    path.mkdir()
+    (path / "lean-toolchain").write_text("leanprover/lean4:v4.32.2\n")
+    (path / "lakefile.lean").write_text(
+        "import Lake\nopen Lake DSL\npackage SamplePackage\nlean_lib Sample\n"
+    )
+    (path / "Sample.lean").write_text("def sample := 42\n")
+    subprocess.run(["git", "init", "--quiet"], cwd=path, check=True)
+    subprocess.run(["git", "add", "."], cwd=path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            "package",
+        ],
+        cwd=path,
+        check=True,
+    )
+    subprocess.run(["git", "tag", "v1.0.0"], cwd=path, check=True)
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=path, text=True).strip()
+
+
+class _TranslatingToolchains:
+    environment: dict[str, str] = {}
+
+    def command(self, toolchain: str, executable: str, *args: str) -> list[str]:
+        assert toolchain == "leanprover/lean4:v4.32.2"
+        assert executable == "lake"
+        assert args[:2] == ("translate-config", "toml")
+        output = args[2]
+        source = (
+            "from pathlib import Path; "
+            f"Path({output!r}).write_text("
+            '\'name = \\"SamplePackage\\"\\n\\n[[lean_lib]]\\nname = \\"Sample\\"\\n\')'
+        )
+        return [sys.executable, "-c", source]
+
+
 def test_github_reference_is_canonical() -> None:
     reference = PackageReference.parse("github:alerad/leancert@v4.32.2.4")
     assert reference.url == "https://github.com/alerad/leancert.git"
@@ -75,6 +120,21 @@ def test_package_discovery_pins_and_reads_lake_metadata(tmp_path: Path) -> None:
     assert discovered.package.module == "Sample"
 
 
+def test_package_discovery_translates_lake_dsl_with_declared_toolchain(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    revision = _commit_lean_dsl_package(repository)
+    reference = PackageReference.git(repository.as_uri(), "v1.0.0")
+    discovered = discover_package(
+        reference,
+        directory=tmp_path / "discovery",
+        toolchains=_TranslatingToolchains(),  # type: ignore[arg-type]
+    )
+    assert discovered.toolchain == "leanprover/lean4:v4.32.2"
+    assert discovered.package.name == "SamplePackage"
+    assert discovered.package.rev == revision
+    assert discovered.package.module == "Sample"
+
+
 def test_reference_toolchains_must_agree_without_an_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -83,8 +143,10 @@ def test_reference_toolchains_must_agree_without_an_override(
         PackageReference.git("https://example.com/two.git", "v2"),
     ]
 
-    def discover(reference: PackageReference, *, directory: Path) -> DiscoveredPackage:
-        del directory
+    def discover(
+        reference: PackageReference, *, directory: Path, toolchains: object
+    ) -> DiscoveredPackage:
+        del directory, toolchains
         index = references.index(reference) + 1
         return DiscoveredPackage(
             reference,
