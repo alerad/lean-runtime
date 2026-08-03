@@ -21,3 +21,9 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[object]):
             f"::error file={path},line={line + 1},title=pytest failure::{message}\n"
         )
         sys.__stdout__.flush()
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            with open(summary, "a", encoding="utf-8") as handle:
+                handle.write(f"### `{item.nodeid}` failed\n\n```text\n")
+                handle.write(str(call.excinfo.getrepr(style="short")))
+                handle.write("\n```\n")
