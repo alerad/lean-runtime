@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -10,6 +11,8 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +27,36 @@ _ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _ENVIRONMENT_ID = re.compile(r"env_[0-9a-f]{64}")
 ALIAS_SCHEMA = "lean-runtime-environment-alias/1"
 SUPPORTED_BUILD_PROFILE = "release"
+
+
+def _snapshot_digest(root: Path) -> str:
+    """Hash checked-out content while excluding Git and runtime metadata."""
+    digest = hashlib.sha256()
+    for directory, directories, filenames in os.walk(root, followlinks=False):
+        current = Path(directory)
+        symlink_directories = [name for name in directories if (current / name).is_symlink()]
+        directories[:] = sorted(
+            name
+            for name in directories
+            if name not in {".git", ".lake"} and name not in symlink_directories
+        )
+        for name in sorted([*filenames, *symlink_directories]):
+            path = current / name
+            relative = path.relative_to(root)
+            if relative.as_posix() == ".lean-runtime-source.json":
+                continue
+            if path.is_symlink():
+                digest.update(b"link\0" + relative.as_posix().encode() + b"\0")
+                digest.update(os.readlink(path).encode())
+            elif path.is_file():
+                mode = path.stat().st_mode & 0o111
+                digest.update(
+                    b"file\0" + relative.as_posix().encode() + b"\0" + str(mode).encode() + b"\0"
+                )
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
 
 
 def platform_record() -> dict[str, str]:
@@ -92,6 +125,30 @@ class GarbageCollectionReport:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class StoreStatus:
+    home: str
+    environments: int
+    locks: int
+    sources: int
+    executions: int
+    aliases: int
+    bytes_used: int
+    bytes_free: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "home": self.home,
+            "environments": self.environments,
+            "locks": self.locks,
+            "sources": self.sources,
+            "executions": self.executions,
+            "aliases": self.aliases,
+            "bytes_used": self.bytes_used,
+            "bytes_free": self.bytes_free,
+        }
+
+
 class EnvironmentStore:
     """Filesystem-backed, atomically published content-addressed store."""
 
@@ -104,6 +161,7 @@ class EnvironmentStore:
         self.jobs = home / "jobs"
         self.executions = home / "executions"
         self.usage = home / "usage"
+        self.leases = home / "leases"
         self.lock_dir = home / ".locks"
         for path in (
             self.sources,
@@ -113,6 +171,7 @@ class EnvironmentStore:
             self.jobs,
             self.executions,
             self.usage,
+            self.leases,
             self.lock_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
@@ -160,6 +219,9 @@ class EnvironmentStore:
         }
         if any(metadata.get(key) != value for key, value in expected.items()):
             raise EnvironmentError(f"immutable source metadata mismatch: {source_id}")
+        content_hash = metadata.get("content_hash")
+        if isinstance(content_hash, str) and _snapshot_digest(source) != content_hash:
+            raise EnvironmentError(f"immutable source content was modified: {source_id}")
         commands = (("rev-parse", "HEAD"), ("rev-parse", "HEAD^{tree}"))
         observed = []
         for arguments in commands:
@@ -191,13 +253,51 @@ class EnvironmentStore:
             parent.mkdir(parents=True, exist_ok=True)
             stage = parent / f".staging-{os.getpid()}-{uuid.uuid4().hex}"
             try:
-                shutil.copytree(
-                    checkout,
-                    stage,
-                    symlinks=True,
-                    ignore=shutil.ignore_patterns(".lake"),
+                command = [
+                    "git",
+                    "clone",
+                    "--quiet",
+                    "--no-local",
+                    "--depth",
+                    "1",
+                    "--no-tags",
+                    checkout.resolve().as_uri(),
+                    str(stage),
+                ]
+                process = subprocess.run(
+                    command,
+                    text=True,
+                    capture_output=True,
+                    check=False,
                 )
-                write_json_atomic(stage / ".lean-runtime-source.json", metadata)
+                if process.returncode:
+                    raise EnvironmentError(
+                        f"could not create compact source snapshot {source_id}: "
+                        + process.stdout
+                        + process.stderr
+                    )
+                remote = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(stage),
+                        "remote",
+                        "set-url",
+                        "origin",
+                        str(metadata["url"]),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if remote.returncode:
+                    raise EnvironmentError(
+                        f"could not normalize source remote {source_id}: "
+                        + remote.stdout
+                        + remote.stderr
+                    )
+                snapshot_metadata = {**metadata, "content_hash": _snapshot_digest(stage)}
+                write_json_atomic(stage / ".lean-runtime-source.json", snapshot_metadata)
                 stage.replace(destination)
             finally:
                 if stage.exists():
@@ -218,6 +318,33 @@ class EnvironmentStore:
             self.usage / f"{environment_id}.json",
             {"environment_id": environment_id, "last_used_at": time.time()},
         )
+
+    @contextmanager
+    def execution_lease(self, environment_id: str) -> Iterator[None]:
+        """Prevent GC during a clone without serializing concurrent clones."""
+        self.validate_environment_id(environment_id)
+        lease_directory = self.leases / environment_id
+        lease = lease_directory / f"{os.getpid()}-{uuid.uuid4().hex}.json"
+        with FileLock(self.lock_dir / f"{environment_id}.lock"):
+            if not self.environment_path(environment_id).is_dir():
+                raise EnvironmentError(
+                    f"environment disappeared before execution: {environment_id}"
+                )
+            lease_directory.mkdir(parents=True, exist_ok=True)
+            self.touch_environment(environment_id)
+            write_json_atomic(
+                lease,
+                {"environment_id": environment_id, "pid": os.getpid(), "created_at": time.time()},
+            )
+        try:
+            yield None
+        finally:
+            lease.unlink(missing_ok=True)
+            with suppress(OSError):
+                lease_directory.rmdir()
+
+    def has_execution_leases(self, environment_id: str) -> bool:
+        return any((self.leases / environment_id).glob("*.json"))
 
     def validate_alias(self, name: str) -> str:
         if _ALIAS.fullmatch(name) is None:
@@ -270,6 +397,25 @@ class EnvironmentStore:
             result[path.stem] = self._read_alias(path)
         return result
 
+    def status(self) -> StoreStatus:
+        bytes_used = 0
+        for path in self.home.rglob("*"):
+            try:
+                if path.is_file() and not path.is_symlink():
+                    bytes_used += path.stat().st_size
+            except OSError:
+                continue
+        return StoreStatus(
+            home=str(self.home),
+            environments=sum(1 for path in self.environments.glob("env_*") if path.is_dir()),
+            locks=sum(1 for path in self.locks.glob("lock_*") if path.is_dir()),
+            sources=sum(1 for path in self.sources.glob("source_*") if path.is_dir()),
+            executions=sum(1 for path in self.executions.glob("execution_*.json")),
+            aliases=len(self.aliases()),
+            bytes_used=bytes_used,
+            bytes_free=shutil.disk_usage(self.home).free,
+        )
+
     def gc(
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
     ) -> GarbageCollectionReport:
@@ -289,7 +435,11 @@ class EnvironmentStore:
                     continue
                 usage = self.usage / f"{path.name}.json"
                 age = now - (usage.stat().st_mtime if usage.exists() else path.stat().st_mtime)
-                if path.name in referenced or age < minimum_age_seconds:
+                if (
+                    path.name in referenced
+                    or age < minimum_age_seconds
+                    or self.has_execution_leases(path.name)
+                ):
                     retained.append(path.name)
                     continue
                 candidates.append(path.name)
@@ -299,7 +449,11 @@ class EnvironmentStore:
                         age = now - (
                             usage.stat().st_mtime if usage.exists() else path.stat().st_mtime
                         )
-                        if path.name in referenced or age < minimum_age_seconds:
+                        if (
+                            path.name in referenced
+                            or age < minimum_age_seconds
+                            or self.has_execution_leases(path.name)
+                        ):
                             retained.append(path.name)
                             continue
                         shutil.rmtree(path)

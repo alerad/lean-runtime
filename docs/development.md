@@ -23,6 +23,13 @@ materializes the lock concurrently from two processes, checks Lean, removes the
 original repository, replays a capture offline, and opens the environment from
 a second process.
 
+The scheduled ecosystem suite resolves Mathlib and independently checks its
+major transitive libraries:
+
+```bash
+python scripts/run_compatibility.py compatibility/mathlib-4.32.2.json
+```
+
 ## Release focus
 
 The decisive invariant is:

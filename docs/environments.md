@@ -26,7 +26,8 @@ GitPackage(
 
 - `name` is the Lake package identity.
 - `url` is a Git remote.
-- `rev` must be a full commit hash in the initial schema.
+- `rev` is a full commit hash; `GitPackage.tag(...)` and TOML `tag = "..."`
+  provide a friendly input that resolution converts to an exact commit.
 - `root_module` is imported by the synthetic root library, ensuring the
   dependency's Lean artifacts are built.
 - `subdir` records a safe relative package subdirectory.
@@ -40,7 +41,7 @@ through the locked toolchain.
 ## Identity
 
 The environment identity includes the complete lock, host platform, and the
-implemented build profile. Version 0.2 supports only the `release` profile;
+implemented build profile. Version 0.3 supports only the `release` profile;
 other values are rejected rather than producing misleadingly distinct IDs for
 identical builds.
 
@@ -58,10 +59,16 @@ The default cache is `~/Library/Caches/lean-runtime` on macOS and
 `~/.cache/lean-runtime` on Linux. Override it with `LEAN_RUNTIME_HOME` or the
 `Runtime(home=...)` argument.
 
+Source snapshots use shallow, one-commit Git repositories rather than copying a
+resolver checkout's complete history. A content digest detects modifications to
+the checked-out files. This keeps large dependency universes practical while
+preserving the exact commit and Git tree identity required by Lake.
+
 Garbage collection only considers unnamed environments and uses last-opened or
 last-executed usage records, rather than directory modification time alone.
-Deletion and execution cloning share a per-environment lock. Locks and source
-snapshots remain retained in the current store schema.
+Short-lived execution leases prevent deletion during cloning without
+serializing concurrent checks. Locks and source snapshots remain retained in
+the current store schema.
 
 ```python
 report = runtime.gc(dry_run=True)

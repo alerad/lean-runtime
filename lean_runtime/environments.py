@@ -2,24 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import threading
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Generic, TypeVar
 
 from .backends import Backend, BackendResult
 from .diagnostics import error_diagnostic, parse_diagnostics
 from .errors import EnvironmentError, MaterializationError
+from .events import EventEmitter
 from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock
 from .locking import FileLock
@@ -29,7 +32,7 @@ from .models import (
     PackageProvenance,
 )
 from .policies import ExecutionPolicy
-from .serialization import sha256_id, sha256_text, write_json_atomic
+from .serialization import sha256_id, write_json_atomic
 from .store import EnvironmentStore, clone_tree, environment_identity, platform_record
 from .toolchains import ToolchainManager
 
@@ -37,10 +40,92 @@ ENVIRONMENT_SCHEMA = "lean-runtime-published-environment/1"
 EXECUTION_SCHEMA = "lean-runtime-execution/1"
 CAPTURE_SCHEMA = "lean-runtime-execution-capture/1"
 T = TypeVar("T")
+_IMPORT = re.compile(r"^\s*import\s+(.+?)\s*$", re.MULTILINE)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _lean_path(value: str) -> str:
+    normalized = PurePosixPath(value.replace("\\", "/"))
+    if (
+        not value
+        or normalized.is_absolute()
+        or ".." in normalized.parts
+        or normalized.suffix != ".lean"
+    ):
+        raise EnvironmentError(f"unsafe Lean source path: {value!r}")
+    return normalized.as_posix()
+
+
+def _source_files(files: Mapping[str, str]) -> dict[str, str]:
+    if not files:
+        raise EnvironmentError("a check requires at least one Lean source file")
+    result: dict[str, str] = {}
+    for name, source in files.items():
+        if not isinstance(name, str) or not isinstance(source, str):
+            raise EnvironmentError("Lean source files must map paths to strings")
+        normalized = _lean_path(name)
+        if normalized in result:
+            raise EnvironmentError(f"duplicate normalized Lean source path: {normalized}")
+        result[normalized] = source
+    return result
+
+
+def _module_name(path: str) -> str:
+    return path.removesuffix(".lean").replace("/", ".")
+
+
+def _support_order(files: Mapping[str, str], entrypoint: str) -> tuple[str, ...]:
+    """Topologically order submitted modules needed before the entrypoint."""
+    paths_by_module = {_module_name(path): path for path in files}
+    dependencies: dict[str, set[str]] = {}
+    for path, source in files.items():
+        imported: set[str] = set()
+        for match in _IMPORT.finditer(source):
+            for module in match.group(1).split():
+                if module in paths_by_module:
+                    imported.add(paths_by_module[module])
+        dependencies[path] = imported
+
+    ordered: list[str] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(path: str) -> None:
+        if path in visited:
+            return
+        if path in visiting:
+            raise EnvironmentError(f"submitted Lean sources contain an import cycle at {path}")
+        visiting.add(path)
+        for dependency in sorted(dependencies[path]):
+            visit(dependency)
+        visiting.remove(path)
+        visited.add(path)
+        ordered.append(path)
+
+    visit(entrypoint)
+    return tuple(path for path in ordered if path != entrypoint)
+
+
+def _package_import_targets(files: Mapping[str, str], lock: EnvironmentLock) -> tuple[str, ...]:
+    """Find imported package roots whose artifacts Lake may need on demand."""
+    package_names = {package.name.lower() for package in lock.packages}
+    package_names.update(
+        package.root_module.split(".", 1)[0].lower()
+        for package in lock.packages
+        if package.root_module
+    )
+    local_modules = {_module_name(path) for path in files}
+    targets: set[str] = set()
+    for source in files.values():
+        for match in _IMPORT.finditer(source):
+            for module in match.group(1).split():
+                root = module.split(".", 1)[0]
+                if module not in local_modules and root.lower() in package_names:
+                    targets.add(root)
+    return tuple(sorted(targets))
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +150,7 @@ class ExecutionCapture:
     lock: EnvironmentLock
     operation: str
     files: dict[str, str]
+    entrypoint: str
     policy: ExecutionPolicy
     expected_ok: bool | None = None
 
@@ -83,6 +169,7 @@ class ExecutionCapture:
             "lock": self.lock.to_dict(),
             "operation": self.operation,
             "files": dict(sorted(self.files.items())),
+            "entrypoint": self.entrypoint,
             "policy": self.policy.to_dict(),
             "expected_ok": self.expected_ok,
         }
@@ -100,9 +187,22 @@ class ExecutionCapture:
             raise EnvironmentError("execution capture files must be a non-empty object")
         normalized_files: dict[str, str] = {}
         for name, source in files.items():
-            if not isinstance(name, str) or Path(name).name != name or not isinstance(source, str):
+            if not isinstance(name, str) or not isinstance(source, str):
                 raise EnvironmentError("execution capture contains an unsafe file entry")
-            normalized_files[name] = source
+            normalized = _lean_path(name)
+            if normalized in normalized_files:
+                raise EnvironmentError(
+                    f"execution capture contains duplicate source path: {normalized}"
+                )
+            normalized_files[normalized] = source
+        entrypoint_value = value.get("entrypoint")
+        if entrypoint_value is None and len(normalized_files) == 1:
+            entrypoint_value = next(iter(normalized_files))
+        if not isinstance(entrypoint_value, str):
+            raise EnvironmentError("execution capture entrypoint must be a Lean source path")
+        entrypoint = _lean_path(entrypoint_value)
+        if entrypoint not in normalized_files:
+            raise EnvironmentError("execution capture entrypoint is not present in files")
         policy_value = value.get("policy")
         if not isinstance(policy_value, dict):
             raise EnvironmentError("execution capture policy must be an object")
@@ -114,6 +214,7 @@ class ExecutionCapture:
             lock=EnvironmentLock.from_dict(dict(value["lock"])),
             operation=str(value["operation"]),
             files=normalized_files,
+            entrypoint=entrypoint,
             policy=ExecutionPolicy(**policy_value),
             expected_ok=expected_ok,
         )
@@ -197,16 +298,35 @@ class Environment:
         policy: ExecutionPolicy | None = None,
         cancel: threading.Event | None = None,
     ) -> ExecutionResult:
-        selected_policy = policy or ExecutionPolicy()
         safe_filename = Path(filename).name
         if not safe_filename.endswith(".lean"):
             safe_filename += ".lean"
+        return self.check_files(
+            {safe_filename: source},
+            entrypoint=safe_filename,
+            policy=policy,
+            cancel=cancel,
+        )
+
+    def check_files(
+        self,
+        files: Mapping[str, str],
+        *,
+        entrypoint: str = "Main.lean",
+        policy: ExecutionPolicy | None = None,
+        cancel: threading.Event | None = None,
+    ) -> ExecutionResult:
+        """Check a safe relative tree of Lean files through one entrypoint."""
+        normalized = _source_files(files)
+        selected_entrypoint = _lean_path(entrypoint)
+        if selected_entrypoint not in normalized:
+            raise EnvironmentError(f"entrypoint is not present in files: {selected_entrypoint}")
         return self._execute_in_instance(
             operation="check",
-            source=source,
-            filename=safe_filename,
+            files=normalized,
+            entrypoint=selected_entrypoint,
             targets=(),
-            policy=selected_policy,
+            policy=policy or ExecutionPolicy(),
             cancel=cancel,
         )
 
@@ -221,6 +341,43 @@ class Environment:
             lambda cancel: self.check(source, filename=filename, policy=policy, cancel=cancel)
         )
 
+    async def check_async(
+        self,
+        source: str,
+        *,
+        filename: str = "Main.lean",
+        policy: ExecutionPolicy | None = None,
+    ) -> ExecutionResult:
+        """Check source without blocking an asyncio event loop."""
+        job = self.start_check(source, filename=filename, policy=policy)
+        return await self._await_job(job)
+
+    async def check_files_async(
+        self,
+        files: Mapping[str, str],
+        *,
+        entrypoint: str = "Main.lean",
+        policy: ExecutionPolicy | None = None,
+    ) -> ExecutionResult:
+        """Check a multi-file request and propagate coroutine cancellation."""
+        job: ExecutionJob[ExecutionResult] = ExecutionJob(
+            lambda cancel: self.check_files(
+                files, entrypoint=entrypoint, policy=policy, cancel=cancel
+            )
+        )
+        return await self._await_job(job)
+
+    @staticmethod
+    async def _await_job(job: ExecutionJob[ExecutionResult]) -> ExecutionResult:
+        try:
+            return await asyncio.to_thread(job.result)
+        except asyncio.CancelledError:
+            job.cancel()
+            while not job.done():
+                await asyncio.sleep(0.01)
+            job.result()
+            raise
+
     def check_many(
         self,
         sources: Sequence[str],
@@ -234,6 +391,23 @@ class Environment:
             futures = [executor.submit(self.check, source, policy=policy) for source in sources]
             return tuple(future.result() for future in futures)
 
+    async def check_many_async(
+        self,
+        sources: Sequence[str],
+        *,
+        concurrency: int = 4,
+        policy: ExecutionPolicy | None = None,
+    ) -> tuple[ExecutionResult, ...]:
+        if concurrency < 1:
+            raise ValueError("concurrency must be positive")
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def check_one(source: str) -> ExecutionResult:
+            async with semaphore:
+                return await self.check_async(source, policy=policy)
+
+        return tuple(await asyncio.gather(*(check_one(source) for source in sources)))
+
     def build(
         self,
         targets: Sequence[str] = (),
@@ -243,8 +417,8 @@ class Environment:
     ) -> ExecutionResult:
         return self._execute_in_instance(
             operation="build",
-            source="",
-            filename="",
+            files={},
+            entrypoint=None,
             targets=tuple(targets),
             policy=policy or ExecutionPolicy(timeout_seconds=900, max_output_bytes=10_000_000),
             cancel=cancel,
@@ -261,11 +435,31 @@ class Environment:
         safe_filename = Path(filename).name
         if not safe_filename.endswith(".lean"):
             safe_filename += ".lean"
+        return self.capture_files(
+            {safe_filename: source},
+            entrypoint=safe_filename,
+            policy=policy,
+            expected_ok=expected_ok,
+        )
+
+    def capture_files(
+        self,
+        files: Mapping[str, str],
+        *,
+        entrypoint: str = "Main.lean",
+        policy: ExecutionPolicy | None = None,
+        expected_ok: bool | None = None,
+    ) -> ExecutionCapture:
+        normalized = _source_files(files)
+        selected_entrypoint = _lean_path(entrypoint)
+        if selected_entrypoint not in normalized:
+            raise EnvironmentError(f"entrypoint is not present in files: {selected_entrypoint}")
         return ExecutionCapture(
             environment_id=self.id,
             lock=self.lock,
             operation="check",
-            files={safe_filename: source},
+            files=normalized,
+            entrypoint=selected_entrypoint,
             policy=policy or ExecutionPolicy(),
             expected_ok=expected_ok,
         )
@@ -274,13 +468,13 @@ class Environment:
         self,
         *,
         operation: str,
-        source: str,
-        filename: str,
+        files: dict[str, str],
+        entrypoint: str | None,
         targets: tuple[str, ...],
         policy: ExecutionPolicy,
         cancel: threading.Event | None,
     ) -> ExecutionResult:
-        source_digest = sha256_text(source)
+        source_digest = sha256_id("files", dict(sorted(files.items())))
         request_digest = sha256_id(
             "request",
             {
@@ -288,7 +482,7 @@ class Environment:
                 "environment_id": self.id,
                 "operation": operation,
                 "source_digest": source_digest,
-                "filename": filename,
+                "entrypoint": entrypoint,
                 "targets": list(targets),
                 "policy": policy.to_dict(),
                 "backend": self.manager.backend.name,
@@ -307,12 +501,80 @@ class Environment:
         job_parent.mkdir(parents=True, exist_ok=True)
         instance = job_parent / f"instance-{uuid.uuid4().hex}"
         try:
-            with FileLock(self.manager.store.lock_dir / f"{self.id}.lock"):
-                self.manager.store.touch_environment(self.id)
+            with self.manager.store.execution_lease(self.id):
                 clone_tree(self.workspace, instance)
+            preliminary: list[BackendResult] = []
             if operation == "check":
-                source_path = instance / filename
-                source_path.write_text(source, encoding="utf-8")
+                assert entrypoint is not None
+                for name, source in files.items():
+                    source_path = instance / name
+                    source_path.parent.mkdir(parents=True, exist_ok=True)
+                    source_path.write_text(source, encoding="utf-8")
+                import_targets = _package_import_targets(files, self.lock)
+                if import_targets:
+                    import_command = self.manager.toolchains.command(
+                        self.lock.toolchain, "lake", "build", *import_targets
+                    )
+                    import_result = self.manager.backend.execute(
+                        import_command,
+                        cwd=instance,
+                        environment=self.manager.toolchains.environment,
+                        policy=policy,
+                        cancel=cancel,
+                    )
+                    preliminary.append(import_result)
+                    if import_result.exit_code:
+                        result = self._result(
+                            import_result,
+                            command=import_command,
+                            cwd=instance,
+                            execution_id=execution_id,
+                            request_digest=request_digest,
+                            source_digest=source_digest,
+                            started_at=started_at,
+                            policy=policy,
+                        )
+                        self._record_execution(result, operation, targets, entrypoint, tuple(files))
+                        return result
+                for support in _support_order(files, entrypoint):
+                    support_path = instance / support
+                    output_path = (
+                        instance / ".lake" / "build" / "lib" / "lean" / support
+                    ).with_suffix(".olean")
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    support_command = self.manager.toolchains.command(
+                        self.lock.toolchain,
+                        "lake",
+                        "env",
+                        "lean",
+                        "-R",
+                        str(instance),
+                        "-o",
+                        str(output_path),
+                        str(support_path),
+                    )
+                    support_result = self.manager.backend.execute(
+                        support_command,
+                        cwd=instance,
+                        environment=self.manager.toolchains.environment,
+                        policy=policy,
+                        cancel=cancel,
+                    )
+                    preliminary.append(support_result)
+                    if support_result.exit_code:
+                        result = self._result(
+                            support_result,
+                            command=support_command,
+                            cwd=instance,
+                            execution_id=execution_id,
+                            request_digest=request_digest,
+                            source_digest=source_digest,
+                            started_at=started_at,
+                            policy=policy,
+                        )
+                        self._record_execution(result, operation, targets, entrypoint, tuple(files))
+                        return result
+                source_path = instance / entrypoint
                 command = self.manager.toolchains.command(
                     self.lock.toolchain, "lake", "env", "lean", str(source_path)
                 )
@@ -327,6 +589,19 @@ class Environment:
                 policy=policy,
                 cancel=cancel,
             )
+            if operation == "check" and preliminary:
+                raw = BackendResult(
+                    exit_code=raw.exit_code,
+                    stdout="".join([item.stdout for item in preliminary] + [raw.stdout]),
+                    stderr="".join([item.stderr for item in preliminary] + [raw.stderr]),
+                    elapsed_seconds=sum(item.elapsed_seconds for item in preliminary)
+                    + raw.elapsed_seconds,
+                    timed_out=raw.timed_out or any(item.timed_out for item in preliminary),
+                    cancelled=raw.cancelled or any(item.cancelled for item in preliminary),
+                    output_truncated=raw.output_truncated
+                    or any(item.output_truncated for item in preliminary),
+                    enforced_policy_fields=raw.enforced_policy_fields,
+                )
             result = self._result(
                 raw,
                 command=command,
@@ -337,7 +612,7 @@ class Environment:
                 started_at=started_at,
                 policy=policy,
             )
-            self._record_execution(result, operation, targets)
+            self._record_execution(result, operation, targets, entrypoint, tuple(files))
             return result
         finally:
             if instance.exists():
@@ -397,7 +672,12 @@ class Environment:
         )
 
     def _record_execution(
-        self, result: ExecutionResult, operation: str, targets: tuple[str, ...]
+        self,
+        result: ExecutionResult,
+        operation: str,
+        targets: tuple[str, ...],
+        entrypoint: str | None,
+        files: tuple[str, ...],
     ) -> None:
         assert result.execution_id is not None
         write_json_atomic(
@@ -406,6 +686,8 @@ class Environment:
                 "schema": EXECUTION_SCHEMA,
                 "operation": operation,
                 "targets": list(targets),
+                "entrypoint": entrypoint,
+                "files": list(files),
                 "result": result.to_dict(),
             },
         )
@@ -417,10 +699,12 @@ class EnvironmentManager:
         store: EnvironmentStore,
         toolchains: ToolchainManager,
         backend: Backend,
+        events: EventEmitter | None = None,
     ) -> None:
         self.store = store
         self.toolchains = toolchains
         self.backend = backend
+        self.events = events or EventEmitter()
 
     def ensure(
         self,
@@ -432,13 +716,30 @@ class EnvironmentManager:
         self.store.publish_lock(lock)
         environment_id = environment_identity(lock, build_profile)
         destination = self.store.environment_path(environment_id)
+        self.events.emit(
+            "environment.ensure_started",
+            "Ensuring published environment",
+            environment_id=environment_id,
+        )
         with FileLock(self.store.lock_dir / f"{environment_id}.lock", timeout=1800):
             if not destination.is_dir():
                 self._ensure_sources(lock)
                 self._materialize(lock, environment_id, destination, build_profile)
+            else:
+                self.events.emit(
+                    "environment.cache_hit",
+                    "Reusing published environment",
+                    environment_id=environment_id,
+                )
         environment = self.open(environment_id)
         if name:
             self.store.set_alias(name, environment_id)
+        self.events.emit(
+            "environment.ready",
+            "Environment is ready",
+            environment_id=environment_id,
+            name=name,
+        )
         return environment
 
     def open(self, identifier: str) -> Environment:
@@ -469,6 +770,11 @@ class EnvironmentManager:
         stage = self.store.environments / f".staging-{os.getpid()}-{uuid.uuid4().hex}"
         workspace = stage / "workspace"
         try:
+            self.events.emit(
+                "environment.build_started",
+                "Building environment",
+                environment_id=environment_id,
+            )
             workspace.mkdir(parents=True)
             (workspace / "lean-toolchain").write_text(lock.toolchain + "\n", encoding="utf-8")
             (workspace / "lakefile.toml").write_text(lock.root_lakefile, encoding="utf-8")
@@ -489,6 +795,11 @@ class EnvironmentManager:
             for package in lock.packages:
                 if not package.artifact_command:
                     continue
+                self.events.emit(
+                    "artifact.hydration_started",
+                    f"Hydrating artifacts for {package.name}",
+                    package=package.name,
+                )
                 command = list(package.artifact_command)
                 if command[0] in {"lake", "lean"}:
                     command = self.toolchains.command(lock.toolchain, command[0], *command[1:])
@@ -548,6 +859,11 @@ class EnvironmentManager:
             }
             write_json_atomic(stage / "metadata.json", metadata)
             stage.replace(destination)
+            self.events.emit(
+                "environment.published",
+                "Published built environment",
+                environment_id=environment_id,
+            )
         finally:
             if stage.exists():
                 shutil.rmtree(stage)
@@ -564,7 +880,19 @@ class EnvironmentManager:
                     revision=package.revision,
                     tree_hash=package.tree_hash,
                 )
+                self.events.emit(
+                    "source.cache_hit",
+                    f"Reusing source for {package.name}",
+                    package=package.name,
+                    source_id=package.source_id,
+                )
                 continue
+            self.events.emit(
+                "source.fetch_started",
+                f"Fetching {package.name}",
+                package=package.name,
+                revision=package.revision,
+            )
             with tempfile.TemporaryDirectory(
                 prefix=f"{package.name}-", dir=acquisition_root
             ) as raw:

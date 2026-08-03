@@ -25,6 +25,25 @@ def test_package_requires_exact_commit() -> None:
         GitPackage("mathlib", "https://example.test/mathlib", "main")
 
 
+def test_explicit_tag_is_allowed_and_canonical() -> None:
+    package = GitPackage.tag("mathlib", "https://example.test/mathlib", "v4.32.0")
+    assert package.revision_kind == "tag"
+    assert package.rev == "v4.32.0"
+    restored = GitPackage.from_dict(
+        {
+            "name": "mathlib",
+            "url": "https://example.test/mathlib",
+            "tag": "v4.32.0",
+        }
+    )
+    assert restored == package
+
+
+def test_unsafe_tag_is_rejected() -> None:
+    with pytest.raises(SpecificationError, match="invalid Git tag"):
+        GitPackage.tag("mathlib", "https://example.test/mathlib", "refs/heads/main^{}")
+
+
 def test_duplicate_direct_names_are_rejected() -> None:
     package = GitPackage("same", "https://example.test/same", REV_A)
     with pytest.raises(SpecificationError, match="duplicate"):

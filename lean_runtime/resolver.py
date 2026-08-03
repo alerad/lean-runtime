@@ -6,10 +6,12 @@ import json
 import re
 import subprocess
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from .errors import ResolutionError
+from .events import EventEmitter
 from .lake import ROOT_MODULE, generate_lakefile, generate_root_module
 from .lockfiles import EnvironmentLock, LockedPackage
 from .serialization import sha256_id
@@ -39,13 +41,27 @@ def _git(path: Path, *arguments: str) -> str:
 
 
 class EnvironmentResolver:
-    def __init__(self, toolchains: ToolchainManager, store: EnvironmentStore) -> None:
+    def __init__(
+        self,
+        toolchains: ToolchainManager,
+        store: EnvironmentStore,
+        events: EventEmitter | None = None,
+    ) -> None:
         self.toolchains = toolchains
         self.store = store
+        self.events = events or EventEmitter()
 
     def resolve(self, spec: EnvironmentSpec, *, timeout: float = 900) -> EnvironmentLock:
+        self.events.emit(
+            "resolution.started",
+            "Resolving environment",
+            toolchain=spec.toolchain,
+            packages=len(spec.packages),
+        )
         toolchain = self.toolchains.ensure(spec.toolchain)
-        root_lakefile = generate_lakefile(spec)
+        self.events.emit("toolchain.ready", "Lean toolchain is ready", toolchain=toolchain)
+        pinned_spec = self._pin_tags(spec)
+        root_lakefile = generate_lakefile(pinned_spec)
         root_module = generate_root_module(spec)
         resolution_root = self.store.home / "resolution"
         resolution_root.mkdir(parents=True, exist_ok=True)
@@ -55,6 +71,7 @@ class EnvironmentResolver:
             (workspace / "lakefile.toml").write_text(root_lakefile, encoding="utf-8")
             (workspace / f"{ROOT_MODULE}.lean").write_text(root_module, encoding="utf-8")
             command = self.toolchains.command(toolchain, "lake", "update")
+            self.events.emit("resolution.lake_started", "Lake dependency resolution started")
             try:
                 process = subprocess.run(
                     command,
@@ -95,7 +112,69 @@ class EnvironmentResolver:
                 packages=packages,
             )
             self.store.publish_lock(lock)
+            self.events.emit(
+                "resolution.completed",
+                "Environment lock published",
+                lock_id=lock.lock_id,
+                packages=len(packages),
+            )
             return lock
+
+    def _pin_tags(self, spec: EnvironmentSpec) -> EnvironmentSpec:
+        pinned: list[GitPackage] = []
+        for package in spec.packages:
+            if package.revision_kind == "commit":
+                pinned.append(package)
+                continue
+            reference = f"refs/tags/{package.rev}"
+            command = ["git", "ls-remote", package.url, reference, f"{reference}^{{}}"]
+            try:
+                process = subprocess.run(
+                    command,
+                    text=True,
+                    capture_output=True,
+                    timeout=60,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ResolutionError(
+                    f"tag lookup timed out for package {package.name!r}",
+                    phase="tag-resolution",
+                    command=tuple(command),
+                    exit_code=124,
+                    output=str(exc.stdout or "") + str(exc.stderr or ""),
+                ) from exc
+            if process.returncode:
+                raise ResolutionError(
+                    f"could not resolve tag {package.rev!r} for package {package.name!r}",
+                    phase="tag-resolution",
+                    command=tuple(command),
+                    exit_code=process.returncode,
+                    output=process.stdout + process.stderr,
+                )
+            candidates: dict[str, str] = {}
+            for line in process.stdout.splitlines():
+                fields = line.split(maxsplit=1)
+                if len(fields) == 2:
+                    candidates[fields[1]] = fields[0].lower()
+            revision = candidates.get(f"{reference}^{{}}", candidates.get(reference, ""))
+            if _COMMIT.fullmatch(revision) is None:
+                raise ResolutionError(
+                    f"Git tag {package.rev!r} was not found for package {package.name!r}",
+                    phase="tag-resolution",
+                    command=tuple(command),
+                    exit_code=1,
+                    output=process.stdout + process.stderr,
+                )
+            pinned.append(replace(package, rev=revision, revision_kind="commit"))
+            self.events.emit(
+                "tag.resolved",
+                f"Resolved {package.rev} for {package.name}",
+                package=package.name,
+                tag=package.rev,
+                revision=revision,
+            )
+        return EnvironmentSpec(spec.toolchain, tuple(pinned))
 
     def _lock_packages(
         self,
@@ -139,15 +218,19 @@ class EnvironmentResolver:
             subdir = value.get("subDir")
             if isinstance(subdir, str) and subdir:
                 package_root /= subdir
+            requested = direct.get(name)
             declared_toolchain = package_root / "lean-toolchain"
             if declared_toolchain.is_file():
                 declared = declared_toolchain.read_text(encoding="utf-8").strip()
                 if declared and normalize_toolchain(declared) != toolchain:
-                    raise ResolutionError(
-                        f"package {name!r} declares {declared}, not {toolchain}",
-                        phase="compatibility",
+                    self.events.emit(
+                        "compatibility.toolchain_difference",
+                        f"{name} declares {declared}; compatibility will be tested by the build",
+                        package=name,
+                        declared_toolchain=declared,
+                        environment_toolchain=toolchain,
+                        direct=requested is not None,
                     )
-            requested = direct.get(name)
             url = str(value.get("url", ""))
             source_id = sha256_id(
                 "source", {"source": "git", "url": url, "revision": revision, "tree": tree}
@@ -161,12 +244,25 @@ class EnvironmentResolver:
                 "tree_hash": tree,
             }
             self.store.publish_source(checkout, source_id, metadata)
+            self.events.emit(
+                "source.locked",
+                f"Locked {name}",
+                package=name,
+                revision=revision,
+                source_id=source_id,
+            )
             locked.append(
                 LockedPackage(
                     name=name,
                     url=url,
                     requested_revision=(
-                        requested.rev.lower() if requested else value.get("inputRev")
+                        (
+                            requested.rev.lower()
+                            if requested.revision_kind == "commit"
+                            else requested.rev
+                        )
+                        if requested
+                        else value.get("inputRev")
                     ),
                     revision=revision,
                     tree_hash=tree,

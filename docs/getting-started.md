@@ -15,7 +15,8 @@ executable.
 
 ## Create an environment
 
-Dependencies use exact 40-character Git commits:
+Dependencies may use exact commits or friendly tags. Locks always contain exact
+commits:
 
 ```python
 from lean_runtime import EnvironmentSpec, GitPackage, Runtime
@@ -24,10 +25,10 @@ runtime = Runtime()
 spec = EnvironmentSpec(
     toolchain="4.32.2",
     packages=(
-        GitPackage(
+        GitPackage.tag(
             name="mathlib",
             url="https://github.com/leanprover-community/mathlib4.git",
-            rev="905b95818eb32af7874a58b427f50c1711a5e96c",
+            tag="v4.32.2",
             root_module="Mathlib",
             artifact_command=("lake", "exe", "cache", "get"),
         ),
@@ -60,6 +61,18 @@ print(result.provenance.request_digest)
 
 Each run has a unique `execution_id`, so repeated checks do not overwrite
 history. Identical logical requests share a stable `request_digest`.
+
+For generated projects, submit a complete relative source tree:
+
+```python
+result = environment.check_files(
+    {
+        "Support/Defs.lean": "def answer : Nat := 42",
+        "Main.lean": "import Support.Defs\nexample : answer = 42 := by rfl",
+    },
+    entrypoint="Main.lean",
+)
+```
 
 ## Reopen offline
 

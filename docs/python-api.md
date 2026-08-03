@@ -25,6 +25,7 @@ runtime.build("./existing-project", targets=("MyLibrary",))
 
 ```python
 result = environment.check(source)
+result = environment.check_files(files, entrypoint="Main.lean")
 results = environment.check_many(sources, concurrency=8)
 build = environment.build(("RuntimeEnvironment",))
 info = environment.inspect()
@@ -42,6 +43,24 @@ result = job.result()
 
 `cancel()` returns `False` once the job has already completed. Cancellation is
 cooperative at the runtime boundary and terminates the local child process.
+
+Native asyncio helpers preserve that cancellation behavior:
+
+```python
+result = await environment.check_async(source)
+result = await environment.check_files_async(files, entrypoint="Main.lean")
+results = await environment.check_many_async(sources, concurrency=8)
+```
+
+## Progress events
+
+```python
+runtime = Runtime(on_event=lambda event: print(event.kind, event.data))
+```
+
+Events describe toolchain readiness, Lake resolution, source locking/cache
+hits, artifact hydration, builds, publication, and environment reuse. They are
+typed `RuntimeEvent` values rather than parsed log lines.
 
 ## Execution policy
 
@@ -76,3 +95,7 @@ Provenance includes:
 
 Diagnostic extraction is explicitly best-effort. The original stdout and
 stderr remain authoritative.
+
+Before checking, the environment asks Lake to build imported roots matching
+locked packages. This makes transitive package modules available on demand even
+when the synthetic environment root did not originally require them.

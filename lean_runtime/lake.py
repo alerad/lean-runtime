@@ -22,12 +22,13 @@ def generate_lakefile(spec: EnvironmentSpec) -> str:
         "",
     ]
     for package in sorted(spec.packages, key=lambda item: item.name):
+        revision = package.rev.lower() if package.revision_kind == "commit" else package.rev
         lines.extend(
             [
                 "[[require]]",
                 f"name = {_quote(package.name)}",
                 f"git = {_quote(package.url)}",
-                f"rev = {_quote(package.rev.lower())}",
+                f"rev = {_quote(revision)}",
             ]
         )
         if package.subdir:

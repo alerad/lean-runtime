@@ -14,7 +14,7 @@ Lake remains authoritative for dependency resolution and builds. Lean Runtime
 adds immutable identities, lifecycle management, reuse, structured Python
 results, and replayable provenance above them.
 
-> **Status:** `0.2` alpha. Exact Git environments and trusted local execution
+> **Status:** `0.3` alpha. Exact Git environments and trusted local execution
 > are implemented. Local execution is an orchestration boundary, not a security
 > sandbox.
 
@@ -89,9 +89,9 @@ The convenience form compiles and reuses the environment automatically:
 result = runtime.check(source, environment=spec)
 ```
 
-## Exact package policy
+## Package revision policy
 
-The first lock schema accepts only exact Git commits:
+Specifications accept exact Git commits or explicitly marked tags:
 
 ```python
 GitPackage(
@@ -100,12 +100,18 @@ GitPackage(
     rev="0123456789abcdef0123456789abcdef01234567",
     root_module="Sample",
 )
+
+GitPackage.tag(
+    name="mathlib",
+    url="https://github.com/leanprover-community/mathlib4.git",
+    tag="v4.32.2",
+    root_module="Mathlib",
+)
 ```
 
-Tags, branches, semantic versions, editable dependencies, and path packages are
-intentionally not part of the initial model. Lake may resolve transitive Git
-inputs, but every package in the resulting lock records its full commit and Git
-tree identity.
+Tags are convenience inputs: resolution records their exact commit and Git tree
+identity in the lock. Floating branches, semantic versions, editable
+dependencies, and path packages are intentionally not part of the model.
 
 `root_module` tells the generated environment root what to import so the
 package's Lean artifacts are built. `artifact_command` is an optional explicit
@@ -168,6 +174,22 @@ job.cancel()
 result = job.result()
 
 results = environment.check_many(sources, concurrency=8)
+```
+
+Multi-file and asyncio requests are first-class:
+
+```python
+result = environment.check_files(
+    {"Support/Defs.lean": defs, "Main.lean": main},
+    entrypoint="Main.lean",
+)
+result = await environment.check_async(source)
+```
+
+Long operations can emit structured progress events:
+
+```python
+runtime = Runtime(on_event=lambda event: print(event.kind, event.message))
 ```
 
 ## Captures

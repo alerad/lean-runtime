@@ -1,5 +1,7 @@
-include LICENSE README.md
+include CHANGELOG.md LICENSE README.md
 include mkdocs.yml
 recursive-include docs *.md
 recursive-include examples *.toml
+recursive-include compatibility *.json *.md *.toml
+recursive-include scripts *.py
 recursive-include tests *.py

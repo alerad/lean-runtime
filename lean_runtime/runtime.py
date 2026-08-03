@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,13 +14,15 @@ from .backends import Backend, LocalBackend
 from .diagnostics import error_diagnostic, parse_diagnostics
 from .environments import Environment, EnvironmentManager, ExecutionCapture
 from .errors import ProjectError, ToolchainError
+from .events import EventCallback, EventEmitter
+from .health import DoctorReport, diagnose
 from .lockfiles import EnvironmentLock
 from .models import ExecutionProvenance, ExecutionResult
 from .policies import ExecutionPolicy
 from .resolver import EnvironmentResolver
 from .serialization import sha256_id, sha256_text
 from .specs import EnvironmentSpec, GitPackage
-from .store import EnvironmentStore, GarbageCollectionReport, platform_record
+from .store import EnvironmentStore, GarbageCollectionReport, StoreStatus, platform_record
 from .toolchains import ToolchainManager, normalize_toolchain
 
 EnvironmentReference = Environment | EnvironmentSpec | EnvironmentLock | str
@@ -43,13 +46,17 @@ class Runtime:
         home: str | os.PathLike[str] | None = None,
         toolchains: ToolchainManager | None = None,
         backend: Backend | None = None,
+        on_event: EventCallback | None = None,
     ) -> None:
         self.toolchains = toolchains or ToolchainManager(home)
         self.home = self.toolchains.home
         self.backend = backend or LocalBackend()
+        self.events = EventEmitter(on_event)
         self.store = EnvironmentStore(self.home)
-        self.resolver = EnvironmentResolver(self.toolchains, self.store)
-        self.environments = EnvironmentManager(self.store, self.toolchains, self.backend)
+        self.resolver = EnvironmentResolver(self.toolchains, self.store, self.events)
+        self.environments = EnvironmentManager(
+            self.store, self.toolchains, self.backend, self.events
+        )
 
     def resolve(self, spec: EnvironmentSpec, *, timeout: float = 900) -> EnvironmentLock:
         return self.resolver.resolve(spec, timeout=timeout)
@@ -125,6 +132,19 @@ class Runtime:
             policy=policy,
         )
 
+    def check_files(
+        self,
+        files: Mapping[str, str],
+        *,
+        entrypoint: str = "Main.lean",
+        environment: EnvironmentReference,
+        policy: ExecutionPolicy | None = None,
+    ) -> ExecutionResult:
+        """Check a multi-file request in a managed environment."""
+        return self._environment(environment).check_files(
+            files, entrypoint=entrypoint, policy=policy
+        )
+
     def build(
         self,
         project: str | os.PathLike[str],
@@ -152,16 +172,51 @@ class Runtime:
     ) -> GarbageCollectionReport:
         return self.store.gc(dry_run=dry_run, minimum_age_seconds=minimum_age_seconds)
 
+    def doctor(self) -> DoctorReport:
+        return diagnose(self.toolchains, self.store)
+
+    def store_status(self) -> StoreStatus:
+        return self.store.status()
+
+    def list_environments(self) -> tuple[dict[str, object], ...]:
+        aliases = self.store.aliases()
+        names_by_id: dict[str, list[str]] = {}
+        for name, environment_id in aliases.items():
+            names_by_id.setdefault(environment_id, []).append(name)
+        records: list[dict[str, object]] = []
+        for path in sorted(self.store.environments.glob("env_*")):
+            metadata_path = path / "metadata.json"
+            if not metadata_path.is_file():
+                continue
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            records.append(
+                {
+                    "environment_id": path.name,
+                    "lock_id": metadata.get("lock_id"),
+                    "toolchain": metadata.get("toolchain"),
+                    "created_at": metadata.get("created_at"),
+                    "status": metadata.get("status"),
+                    "names": sorted(names_by_id.get(path.name, [])),
+                }
+            )
+        return tuple(records)
+
     def replay_capture(self, capture: ExecutionCapture | str | os.PathLike[str]) -> ExecutionResult:
         """Materialize a capture's lock if needed and replay its check request."""
         resolved = (
             ExecutionCapture.load(capture) if isinstance(capture, (str, os.PathLike)) else capture
         )
-        if resolved.operation != "check" or len(resolved.files) != 1:
-            raise ProjectError("the initial replay API supports one-file check captures")
+        if resolved.operation != "check":
+            raise ProjectError(f"unsupported capture operation: {resolved.operation}")
         environment = self.ensure(resolved.lock)
-        filename, source = next(iter(resolved.files.items()))
-        return environment.check(source, filename=filename, policy=resolved.policy)
+        return environment.check_files(
+            resolved.files,
+            entrypoint=resolved.entrypoint,
+            policy=resolved.policy,
+        )
 
     def _environment(self, value: EnvironmentReference) -> Environment:
         if isinstance(value, Environment):

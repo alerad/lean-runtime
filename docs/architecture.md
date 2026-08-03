@@ -46,7 +46,7 @@ lower-level identities rather than separate lifecycle objects users must name.
 Resolution:
 
 1. normalizes and installs the selected toolchain;
-2. validates exact direct Git commits and unique package names;
+2. validates exact direct Git commits or explicit tags and unique package names;
 3. generates a minimal Lake root;
 4. invokes that toolchain's `lake update`;
 5. retains the resulting manifest;
@@ -54,6 +54,14 @@ Resolution:
 7. records each Git tree identity;
 8. rejects declared package toolchains that disagree with the specification;
 9. atomically publishes exact source snapshots and the canonical lock.
+
+Tags exist only at the specification boundary. The lock and all subsequent
+identities contain the resolved full commit and Git tree.
+
+Packages may intentionally declare an earlier toolchain while remaining
+compatible with the selected environment. Direct and transitive differences
+emit compatibility events; the actual environment build remains authoritative
+instead of treating a package's development pin as a version constraint.
 
 Lean Runtime does not interpret semantic-version constraints or invent a
 second dependency solver.

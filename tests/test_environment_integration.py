@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -36,6 +37,7 @@ def _sample_package(path: Path) -> str:
         cwd=path,
         check=True,
     )
+    subprocess.run(["git", "tag", "v1.0.0"], cwd=path, check=True)
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=path,
@@ -59,12 +61,23 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     revision = _sample_package(package)
     resolver_home = tmp_path / "resolver-runtime"
     runtime_home = tmp_path / "consumer-runtime"
-    runtime = Runtime(home=resolver_home)
+    events = []
+    runtime = Runtime(home=resolver_home, on_event=events.append)
     spec = EnvironmentSpec(
         "4.32.0",
-        (GitPackage("sample", package.as_uri(), revision, root_module="Sample"),),
+        (GitPackage.tag("sample", package.as_uri(), "v1.0.0", root_module="Sample"),),
     )
     lock = runtime.resolve(spec)
+    assert lock.packages[0].requested_revision == "v1.0.0"
+    assert lock.packages[0].revision == revision
+    assert revision in lock.root_lakefile
+    assert "v1.0.0" not in lock.root_lakefile
+    assert {event.kind for event in events} >= {
+        "resolution.started",
+        "tag.resolved",
+        "source.locked",
+        "resolution.completed",
+    }
     lock_path = tmp_path / "environment.lock.json"
     lock.write(lock_path)
     child_environment = os.environ.copy()
@@ -105,9 +118,17 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     assert repeated.provenance.request_digest == first.provenance.request_digest
     assert (runtime.store.executions / f"{first.execution_id}.json").is_file()
     assert (runtime.store.executions / f"{repeated.execution_id}.json").is_file()
+    files = {
+        "Support/Defs.lean": "import Sample\ndef answer : Nat := sampleValue + 1\n",
+        "Main.lean": "import Support.Defs\nexample : answer = 42 := by rfl\n",
+    }
+    multi = environment.check_files(files)
+    assert multi.ok
+    asynchronous = asyncio.run(environment.check_files_async(files))
+    assert asynchronous.ok
     assert runtime.open("demo").id == environment.id
     capture_path = tmp_path / "execution.capture.json"
-    environment.capture(source, expected_ok=True).write(capture_path)
+    environment.capture_files(files, expected_ok=True).write(capture_path)
 
     shutil.rmtree(package)
     replayed = runtime.replay_capture(capture_path)

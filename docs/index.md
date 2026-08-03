@@ -23,10 +23,11 @@ It deliberately does not replace the official tools:
 
 ## Current scope
 
-Version 0.2 supports exact Git dependencies, retained Lake manifests, immutable
+Version 0.3 supports exact Git locks, commit-or-tag specifications, retained Lake manifests, immutable
 published environments, mutable aliases, offline reopening, disposable
 execution workspaces, structured diagnostics, resource policies, cancellation,
-batch checking, and replayable JSON captures.
+multi-file and batch checking, asyncio, progress events, health inspection, and
+replayable JSON captures.
 
 The local backend executes **trusted inputs only**. Lean packages and Lake
 configuration can run native programs and arbitrary build commands; the local

@@ -1,0 +1,15 @@
+{
+  "name": "mathlib-4.32.2",
+  "spec": "mathlib-4.32.2.toml",
+  "imports": [
+    "Mathlib",
+    "Batteries",
+    "Aesop",
+    "Qq",
+    "ProofWidgets",
+    "ImportGraph",
+    "LeanSearchClient",
+    "Plausible",
+    "Cli"
+  ]
+}

@@ -10,6 +10,7 @@ from typing import Any
 
 from .environments import ExecutionCapture
 from .errors import LeanRuntimeError, MaterializationError, ResolutionError
+from .events import RuntimeEvent
 from .lockfiles import EnvironmentLock
 from .models import ExecutionResult
 from .policies import ExecutionPolicy
@@ -19,6 +20,17 @@ from .specs import EnvironmentSpec
 
 def _json(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _progress(event: RuntimeEvent) -> None:
+    package = f" [{event.data['package']}]" if "package" in event.data else ""
+    print(f"lean-runtime: {event.kind}{package}: {event.message}", file=sys.stderr)
+
+
+def _cli_source_name(path: Path) -> str:
+    if path.is_absolute():
+        return path.name
+    return path.as_posix()
 
 
 def _emit_result(result: ExecutionResult, as_json: bool) -> None:
@@ -58,6 +70,7 @@ def _add_policy(parser: argparse.ArgumentParser, *, timeout: float = 120) -> Non
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="lean-runtime")
     root.add_argument("--home", help="runtime store root")
+    root.add_argument("--quiet", action="store_true", help="suppress progress events")
     commands = root.add_subparsers(dest="command", required=True)
 
     resolve = commands.add_parser("resolve", help="compile a TOML/JSON spec into a lock")
@@ -72,11 +85,19 @@ def parser() -> argparse.ArgumentParser:
     check = commands.add_parser("check", help="check a file in a published environment")
     check.add_argument("environment")
     check.add_argument("file", type=Path, help="Lean source file, or - for stdin")
+    check.add_argument(
+        "--include", action="append", default=[], type=Path, help="additional Lean source file"
+    )
     check.add_argument("--json", action="store_true")
     _add_policy(check)
 
     inspect = commands.add_parser("inspect", help="inspect a published environment")
     inspect.add_argument("environment")
+    inspect.add_argument("--packages", action="store_true", help="include exact package locks")
+
+    commands.add_parser("env-list", help="list published environments")
+    commands.add_parser("cache-status", help="show cache counts and disk usage")
+    commands.add_parser("doctor", help="check local prerequisites and cache health")
 
     replay = commands.add_parser("replay", help="replay a canonical execution capture")
     replay.add_argument("capture", type=Path)
@@ -107,7 +128,7 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    runtime = Runtime(home=args.home)
+    runtime = Runtime(home=args.home, on_event=None if args.quiet else _progress)
     try:
         if args.command == "install":
             print(runtime.toolchains.ensure(args.toolchain))
@@ -125,8 +146,24 @@ def main(argv: list[str] | None = None) -> int:
             _json(environment.inspect().to_dict())
             return 0
         if args.command == "inspect":
-            _json(runtime.open(args.environment).inspect().to_dict())
+            environment = runtime.open(args.environment)
+            payload = environment.inspect().to_dict()
+            if args.packages:
+                payload["package_locks"] = [
+                    package.to_dict() for package in environment.lock.packages
+                ]
+            _json(payload)
             return 0
+        if args.command == "env-list":
+            _json(list(runtime.list_environments()))
+            return 0
+        if args.command == "cache-status":
+            _json(runtime.store_status().to_dict())
+            return 0
+        if args.command == "doctor":
+            doctor_report = runtime.doctor()
+            _json(doctor_report.to_dict())
+            return 0 if doctor_report.ok else 2
         if args.command == "replay":
             capture = ExecutionCapture.load(args.capture)
             result = runtime.replay_capture(capture)
@@ -135,15 +172,27 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             return 0 if result.ok else 1
         if args.command == "gc":
-            report = runtime.gc(
+            gc_report = runtime.gc(
                 dry_run=not args.execute,
                 minimum_age_seconds=args.minimum_age_hours * 3600,
             )
-            _json(report.to_dict())
+            _json(gc_report.to_dict())
             return 0
         if args.command == "check":
-            source = sys.stdin.read() if str(args.file) == "-" else args.file.read_text()
-            result = runtime.open(args.environment).check(source, policy=_policy(args))
+            if str(args.file) == "-":
+                if args.include:
+                    raise ValueError("stdin entrypoints cannot be combined with --include")
+                result = runtime.open(args.environment).check(
+                    sys.stdin.read(), policy=_policy(args)
+                )
+            else:
+                source_paths = [args.file, *args.include]
+                files = {_cli_source_name(path): path.read_text() for path in source_paths}
+                result = runtime.open(args.environment).check_files(
+                    files,
+                    entrypoint=_cli_source_name(args.file),
+                    policy=_policy(args),
+                )
         elif args.command == "raw-check":
             source = sys.stdin.read() if str(args.file) == "-" else args.file.read_text()
             result = runtime.check(

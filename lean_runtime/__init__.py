@@ -11,16 +11,20 @@ from .errors import (
     SpecificationError,
     ToolchainError,
 )
+from .events import EventCallback, RuntimeEvent
+from .health import DoctorCheck, DoctorReport
 from .lockfiles import EnvironmentLock, LockedPackage
 from .models import Diagnostic, ExecutionProvenance, ExecutionResult, PackageProvenance
 from .policies import ExecutionPolicy
 from .runtime import Runtime, project_toolchain
 from .specs import EnvironmentSpec, GitPackage, Package
-from .store import GarbageCollectionReport
+from .store import GarbageCollectionReport, StoreStatus
 from .toolchains import ToolchainManager, normalize_toolchain
 
 __all__ = [
     "Diagnostic",
+    "DoctorCheck",
+    "DoctorReport",
     "Environment",
     "EnvironmentError",
     "EnvironmentInfo",
@@ -31,6 +35,7 @@ __all__ = [
     "ExecutionPolicy",
     "ExecutionProvenance",
     "ExecutionResult",
+    "EventCallback",
     "GarbageCollectionReport",
     "GitPackage",
     "LeanRuntimeError",
@@ -42,7 +47,9 @@ __all__ = [
     "ProjectError",
     "ResolutionError",
     "Runtime",
+    "RuntimeEvent",
     "SpecificationError",
+    "StoreStatus",
     "ToolchainError",
     "ToolchainManager",
     "normalize_toolchain",

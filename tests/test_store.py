@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,18 @@ def test_recent_usage_retains_an_unnamed_environment(tmp_path: Path) -> None:
     assert CANDIDATE in report.retained
 
 
+def test_execution_lease_prevents_collection(tmp_path: Path) -> None:
+    store = EnvironmentStore(tmp_path)
+    environment = store.environment_path(CANDIDATE)
+    environment.mkdir()
+    with store.execution_lease(CANDIDATE):
+        report = store.gc(dry_run=True, minimum_age_seconds=0)
+        assert CANDIDATE in report.retained
+        assert CANDIDATE not in report.candidates
+    report = store.gc(dry_run=True, minimum_age_seconds=0)
+    assert CANDIDATE in report.candidates
+
+
 def test_alias_record_is_validated(tmp_path: Path) -> None:
     store = EnvironmentStore(tmp_path)
     store.environment_path(FIRST).mkdir()
@@ -90,3 +103,61 @@ def test_alias_record_is_validated(tmp_path: Path) -> None:
 def test_only_implemented_build_profile_is_accepted() -> None:
     with pytest.raises(EnvironmentError, match="only 'release'"):
         environment_identity(_sample_lock(), "debug")
+
+
+def test_source_snapshot_is_shallow_and_detects_content_changes(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "Sample.lean").write_text("def value := 1\n")
+    subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+    subprocess.run(["git", "add", "."], cwd=checkout, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "snapshot",
+        ],
+        cwd=checkout,
+        check=True,
+    )
+    revision = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
+    ).strip()
+    tree_hash = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=checkout, text=True
+    ).strip()
+    source_id = "source_" + "1" * 64
+    metadata = {
+        "source_id": source_id,
+        "url": checkout.as_uri(),
+        "revision": revision,
+        "tree_hash": tree_hash,
+    }
+    store = EnvironmentStore(tmp_path / "store")
+    source = store.publish_source(checkout, source_id, metadata)
+    assert (
+        subprocess.check_output(
+            ["git", "remote", "get-url", "origin"], cwd=source, text=True
+        ).strip()
+        == checkout.as_uri()
+    )
+    assert (
+        store.validate_source(
+            source_id, **{k: metadata[k] for k in ("url", "revision", "tree_hash")}
+        )
+        == source
+    )
+    (source / "Sample.lean").write_text("def value := 2\n")
+    with pytest.raises(EnvironmentError, match="content was modified"):
+        store.validate_source(
+            source_id,
+            url=metadata["url"],
+            revision=revision,
+            tree_hash=tree_hash,
+        )

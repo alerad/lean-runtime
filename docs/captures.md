@@ -1,11 +1,12 @@
 # Execution captures
 
 An execution capture is a canonical JSON replay manifest. It contains the
-complete environment lock, source files, execution policy, operation, and an
-optional expected result.
+complete environment lock, relative source tree, entrypoint, execution policy,
+operation, and an optional expected result.
 
 ```python
 capture = environment.capture(source, expected_ok=True)
+capture = environment.capture_files(files, entrypoint="Main.lean", expected_ok=True)
 capture.write("result.execution.json")
 
 result = Runtime().replay_capture("result.execution.json")

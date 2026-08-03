@@ -2,7 +2,7 @@
 
 ## Trusted local execution
 
-Lean Runtime 0.2 orchestrates trusted code. It is not a sandbox.
+Lean Runtime 0.3 orchestrates trusted code. It is not a sandbox.
 
 Lake configurations are executable, dependencies may contain native code and
 custom build targets, and explicit artifact commands run subprocesses. Lockfile
@@ -29,7 +29,7 @@ package scripts are not promised to be byte-for-byte deterministic.
 
 ## Deliberately deferred
 
-- semantic version solving, branches, and editable dependencies;
+- semantic version solving, floating branches, and editable dependencies;
 - portable source or binary environment archives;
 - signatures and remote attestations;
 - untrusted sandboxed execution;
