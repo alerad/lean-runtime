@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lean-runtime"
+version = "0.2.0"
+description = "Content-addressed execution environments for Lean 4"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["tomli>=2; python_version < '3.11'"]
+license = "Apache-2.0"
+authors = [{ name = "Alejandro Radisic" }]
+keywords = ["lean4", "theorem-prover", "formal-verification", "toolchain"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10"]
+
+[project.scripts]
+lean-runtime = "lean_runtime.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["lean_runtime*"]
+
+[tool.setuptools.package-data]
+lean_runtime = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -m 'not integration'"
+markers = ["integration: requires Git, network, and a real Lean toolchain"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
