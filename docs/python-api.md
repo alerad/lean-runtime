@@ -9,9 +9,26 @@ runtime.resolve(spec)  # -> EnvironmentLock
 runtime.ensure(lock, name="friendly-name")  # -> Environment
 runtime.open("friendly-name")  # -> Environment, offline
 runtime.check(source, environment=spec)  # convenience path
+runtime.check(source, packages=["github:owner/repository@v1.0.0"])
 runtime.replay_capture("run.json")  # replay a capture
 runtime.gc(dry_run=True)  # inspect reclaimable environments
 ```
+
+Package-reference discovery is also exposed in separable stages:
+
+```python
+spec = runtime.spec_from_references(["github:alerad/leancert@v4.32.2.4"])
+lock = runtime.resolve_references(["github:alerad/leancert@v4.32.2.4"])
+environment = runtime.ensure_references(
+    ["github:alerad/leancert@v4.32.2.4"],
+    name="leancert-4.32.2.4",
+)
+```
+
+Discovery requires a root `lean-toolchain`, a root `lakefile.toml`, and at
+least one `[[lean_lib]]`. The convenience specification contains the resolved
+commit, so all downstream identities retain the same exact semantics as a
+manually authored `EnvironmentSpec`.
 
 Raw helpers remain available for core-only snippets and existing Lake projects:
 

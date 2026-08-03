@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -61,3 +62,26 @@ def test_elan_bootstrap_rejects_installer_with_wrong_digest(
     monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: io.BytesIO(b"bad"))
     with pytest.raises(ToolchainError, match="integrity check"):
         ToolchainManager(tmp_path / "runtime").bootstrap_elan()
+
+
+def test_is_installed_lists_toolchains_without_running_lean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "elan"
+    executable.write_text("")
+    monkeypatch.setenv("LEAN_RUNTIME_ELAN", str(executable))
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            "leanprover/lean4:v4.32.0 (default)\nleanprover/lean4:v4.31.0\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+    manager = ToolchainManager(tmp_path / "runtime")
+    assert manager.is_installed("4.32.0")
+    assert not manager.is_installed("4.30.0")
+    assert all(command[1:] == ["toolchain", "list"] for command in calls)

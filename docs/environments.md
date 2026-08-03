@@ -11,6 +11,17 @@ Lean Runtime separates three states:
 The separation lets one process resolve a lock and another materialize it. A
 completed environment can subsequently be opened offline.
 
+Package references are an input compiler for `EnvironmentSpec`, not another
+environment type:
+
+```python
+spec = runtime.spec_from_references(["github:alerad/leancert@v4.32.2.4"])
+```
+
+The reference checkout supplies the package name, first importable library
+root, and declared toolchain. Its tag is pinned to a commit before the
+specification enters Lake resolution.
+
 ## Package fields
 
 ```python
@@ -41,7 +52,7 @@ through the locked toolchain.
 ## Identity
 
 The environment identity includes the complete lock, host platform, and the
-implemented build profile. Version 0.3 supports only the `release` profile;
+implemented build profile. Version 0.4 supports only the `release` profile;
 other values are rejected rather than producing misleadingly distinct IDs for
 identical builds.
 

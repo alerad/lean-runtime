@@ -57,7 +57,7 @@ Environments**. An approval rule for that environment is recommended.
 
 To publish, update the version and changelog, merge a green CI revision, and
 create a GitHub release whose tag is exactly `v<version>`—for example,
-`v0.3.0`. The release workflow verifies that the tag matches
+`v0.4.0`. The release workflow verifies that the tag matches
 `project.version`, builds both distributions, and publishes through OpenID
 Connect. The first successful publication converts the pending publisher into
 a normal publisher and creates the PyPI project.

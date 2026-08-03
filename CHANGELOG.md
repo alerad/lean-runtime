@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0
+
+- Add `github:owner/repository@tag-or-commit` package references.
+- Discover package identity, root module, and Lean toolchain from Lake projects.
+- Pin convenience references to exact commits before environment resolution.
+- Add one-shot `lean-runtime check FILE --with REFERENCE` execution.
+- Add `Runtime.spec_from_references()`, `resolve_references()`,
+  `ensure_references()`, and `Runtime.check(..., packages=[...])`.
+- Detect incompatible discovered toolchains across multi-package requests.
+- Avoid Elan's implicit toolchain installation during installation checks.
+
 ## 0.3.0
 
 - Add safe multi-file checking and replayable multi-file captures.

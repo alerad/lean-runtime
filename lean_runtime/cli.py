@@ -82,9 +82,23 @@ def parser() -> argparse.ArgumentParser:
     ensure.add_argument("lock", type=Path)
     ensure.add_argument("--name")
 
-    check = commands.add_parser("check", help="check a file in a published environment")
-    check.add_argument("environment")
-    check.add_argument("file", type=Path, help="Lean source file, or - for stdin")
+    check = commands.add_parser(
+        "check", help="check with --with packages or in a published environment"
+    )
+    check.add_argument(
+        "inputs",
+        nargs="+",
+        help="FILE with --with, otherwise ENVIRONMENT FILE; FILE may be - for stdin",
+    )
+    check.add_argument(
+        "--with",
+        dest="package_refs",
+        action="append",
+        default=[],
+        metavar="REFERENCE",
+        help="repeatable github:owner/repository@tag-or-commit package reference",
+    )
+    check.add_argument("--toolchain", help="override the toolchain discovered from --with packages")
     check.add_argument(
         "--include", action="append", default=[], type=Path, help="additional Lean source file"
     )
@@ -179,18 +193,28 @@ def main(argv: list[str] | None = None) -> int:
             _json(gc_report.to_dict())
             return 0
         if args.command == "check":
-            if str(args.file) == "-":
+            if args.package_refs:
+                if len(args.inputs) != 1:
+                    raise ValueError("check with --with expects exactly one FILE")
+                environment = runtime.ensure_references(args.package_refs, toolchain=args.toolchain)
+                source_file = Path(args.inputs[0])
+            else:
+                if len(args.inputs) != 2:
+                    raise ValueError("check expects ENVIRONMENT FILE, or FILE with --with")
+                if args.toolchain:
+                    raise ValueError("check --toolchain is only valid with --with")
+                environment = runtime.open(args.inputs[0])
+                source_file = Path(args.inputs[1])
+            if str(source_file) == "-":
                 if args.include:
                     raise ValueError("stdin entrypoints cannot be combined with --include")
-                result = runtime.open(args.environment).check(
-                    sys.stdin.read(), policy=_policy(args)
-                )
+                result = environment.check(sys.stdin.read(), policy=_policy(args))
             else:
-                source_paths = [args.file, *args.include]
+                source_paths = [source_file, *args.include]
                 files = {_cli_source_name(path): path.read_text() for path in source_paths}
-                result = runtime.open(args.environment).check_files(
+                result = environment.check_files(
                     files,
-                    entrypoint=_cli_source_name(args.file),
+                    entrypoint=_cli_source_name(source_file),
                     policy=_policy(args),
                 )
         elif args.command == "raw-check":

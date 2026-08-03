@@ -14,7 +14,7 @@ Lake remains authoritative for dependency resolution and builds. Lean Runtime
 adds immutable identities, lifecycle management, reuse, structured Python
 results, and replayable provenance above them.
 
-> **Status:** `0.3` alpha. Exact Git environments and trusted local execution
+> **Status:** `0.4` alpha. Exact Git environments and trusted local execution
 > are implemented. Local execution is an orchestration boundary, not a security
 > sandbox.
 
@@ -36,6 +36,32 @@ python -m pip install -e '.[dev]'
 Users do not need a separately managed Lean installation. On macOS and Linux,
 Lean Runtime bootstraps a private Elan installation and installs requested Lean
 versions into its own cache. Windows currently requires `LEAN_RUNTIME_ELAN`.
+
+## Check with a package
+
+The shortest reproducible path discovers a tagged Lake package, pins it to an
+exact commit, builds or reuses its environment, and checks the source:
+
+```bash
+lean-runtime check Main.lean \
+  --with github:alerad/leancert@v4.32.2.4
+```
+
+The corresponding Python API uses the identical resolver and store:
+
+```python
+from lean_runtime import Runtime
+
+result = Runtime().check(
+    "import LeanCert.Tactic\nexample : True := by trivial",
+    packages=["github:alerad/leancert@v4.32.2.4"],
+)
+```
+
+Package discovery reads the referenced root `lean-toolchain` and
+`lakefile.toml`, then records the exact commit in the environment lock. Multiple
+`--with` options are allowed when their discovered toolchains agree. An
+explicit `--toolchain` selects a compatibility build when they differ.
 
 ## Python API
 
@@ -127,6 +153,7 @@ An environment specification can be JSON or TOML. See
 [examples/mathlib.toml](examples/mathlib.toml).
 
 ```bash
+lean-runtime check Main.lean --with github:alerad/leancert@v4.32.2.4
 lean-runtime resolve environment.toml --output environment.lock.json
 lean-runtime ensure environment.lock.json --name research-stack
 lean-runtime check research-stack Main.lean --json

@@ -66,3 +66,45 @@ def test_managed_check_cli_accepts_supporting_files(monkeypatch, tmp_path: Path,
     assert observed["entrypoint"] == "Main.lean"
     assert observed["files"] == {"Main.lean": "import Defs", "Defs.lean": "def answer := 42"}
     assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_check_cli_discovers_with_packages(monkeypatch, tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("import LeanCert")
+    observed = {}
+    result = ExecutionResult(
+        ok=True,
+        exit_code=0,
+        toolchain="leanprover/lean4:v4.32.2",
+        command=("lean", "Main.lean"),
+        cwd=str(tmp_path),
+        stdout="",
+        stderr="",
+        elapsed_seconds=0.01,
+    )
+
+    class FakeEnvironment:
+        def check_files(self, files, *, entrypoint, policy):
+            observed.update(files=files, entrypoint=entrypoint, policy=policy)
+            return result
+
+    def ensure_references(_runtime, references, *, toolchain=None):
+        observed.update(references=references, toolchain=toolchain)
+        return FakeEnvironment()
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.ensure_references", ensure_references)
+    assert (
+        main(
+            [
+                "check",
+                str(source),
+                "--with",
+                "github:alerad/leancert@v4.32.2.4",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert observed["references"] == ["github:alerad/leancert@v4.32.2.4"]
+    assert observed["entrypoint"] == "Main.lean"
+    assert json.loads(capsys.readouterr().out)["ok"] is True

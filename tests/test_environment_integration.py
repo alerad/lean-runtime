@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from lean_runtime import EnvironmentSpec, GitPackage, Runtime
+from lean_runtime import PackageReference, Runtime
 
 
 def _sample_package(path: Path) -> str:
@@ -63,18 +63,18 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     runtime_home = tmp_path / "consumer-runtime"
     events = []
     runtime = Runtime(home=resolver_home, on_event=events.append)
-    spec = EnvironmentSpec(
-        "4.32.0",
-        (GitPackage.tag("sample", package.as_uri(), "v1.0.0", root_module="Sample"),),
-    )
+    spec = runtime.spec_from_references([PackageReference.git(package.as_uri(), "v1.0.0")])
+    assert spec.toolchain == "leanprover/lean4:v4.32.0"
+    assert spec.packages[0].rev == revision
+    assert spec.packages[0].module == "Sample"
     lock = runtime.resolve(spec)
-    assert lock.packages[0].requested_revision == "v1.0.0"
+    assert lock.packages[0].requested_revision == revision
     assert lock.packages[0].revision == revision
     assert revision in lock.root_lakefile
     assert "v1.0.0" not in lock.root_lakefile
     assert {event.kind for event in events} >= {
         "resolution.started",
-        "tag.resolved",
+        "package_reference.resolved",
         "source.locked",
         "resolution.completed",
     }
@@ -98,7 +98,15 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
         )
         for _ in range(2)
     ]
-    built = [builder.communicate(timeout=120) for builder in builders]
+    try:
+        # A completely cold cache may need to download and install the selected
+        # Lean toolchain before either contender can enter the build lock.
+        built = [builder.communicate(timeout=600) for builder in builders]
+    finally:
+        for builder in builders:
+            if builder.poll() is None:
+                builder.kill()
+                builder.communicate()
     assert all(builder.returncode == 0 for builder in builders), built
     identities = {stdout.strip() for stdout, _ in built}
     assert len(identities) == 1

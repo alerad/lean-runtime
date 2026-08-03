@@ -16,6 +16,7 @@ from .health import DoctorCheck, DoctorReport
 from .lockfiles import EnvironmentLock, LockedPackage
 from .models import Diagnostic, ExecutionProvenance, ExecutionResult, PackageProvenance
 from .policies import ExecutionPolicy
+from .references import DiscoveredPackage, PackageReference
 from .runtime import Runtime, project_toolchain
 from .specs import EnvironmentSpec, GitPackage, Package
 from .store import GarbageCollectionReport, StoreStatus
@@ -23,6 +24,7 @@ from .toolchains import ToolchainManager, normalize_toolchain
 
 __all__ = [
     "Diagnostic",
+    "DiscoveredPackage",
     "DoctorCheck",
     "DoctorReport",
     "Environment",
@@ -42,6 +44,7 @@ __all__ = [
     "LockedPackage",
     "MaterializationError",
     "Package",
+    "PackageReference",
     "PackageProvenance",
     "PolicyError",
     "ProjectError",

@@ -2,7 +2,7 @@
 
 ## Trusted local execution
 
-Lean Runtime 0.3 orchestrates trusted code. It is not a sandbox.
+Lean Runtime 0.4 orchestrates trusted code. It is not a sandbox.
 
 Lake configurations are executable, dependencies may contain native code and
 custom build targets, and explicit artifact commands run subprocesses. Lockfile

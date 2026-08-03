@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from lean_runtime import (
+    DiscoveredPackage,
+    GitPackage,
+    PackageReference,
+    Runtime,
+    SpecificationError,
+)
+from lean_runtime.references import discover_package
+
+
+def _commit_package(path: Path) -> str:
+    path.mkdir()
+    (path / "lean-toolchain").write_text("leanprover/lean4:v4.32.2\n")
+    (path / "lakefile.toml").write_text(
+        'name = "SamplePackage"\n\n'
+        "[[lean_lib]]\n"
+        'name = "InternalName"\n'
+        'roots = ["Sample", "Sample.Extra"]\n'
+    )
+    (path / "Sample.lean").write_text("def sample := 42\n")
+    subprocess.run(["git", "init", "--quiet"], cwd=path, check=True)
+    subprocess.run(["git", "add", "."], cwd=path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            "package",
+        ],
+        cwd=path,
+        check=True,
+    )
+    subprocess.run(["git", "tag", "v1.0.0"], cwd=path, check=True)
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=path, text=True).strip()
+
+
+def test_github_reference_is_canonical() -> None:
+    reference = PackageReference.parse("github:alerad/leancert@v4.32.2.4")
+    assert reference.url == "https://github.com/alerad/leancert.git"
+    assert reference.revision == "v4.32.2.4"
+    assert reference.revision_kind == "tag"
+    assert reference.display == "github:alerad/leancert@v4.32.2.4"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["alerad/leancert", "github:alerad/leancert", "github:/leancert@v1", "github:a/b@main^"],
+)
+def test_invalid_github_reference_is_rejected(value: str) -> None:
+    with pytest.raises(SpecificationError, match="package reference"):
+        PackageReference.parse(value)
+
+
+def test_package_discovery_pins_and_reads_lake_metadata(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    revision = _commit_package(repository)
+    reference = PackageReference.git(repository.as_uri(), "v1.0.0")
+    discovered = discover_package(reference, directory=tmp_path / "discovery")
+    assert discovered.toolchain == "leanprover/lean4:v4.32.2"
+    assert discovered.package.name == "SamplePackage"
+    assert discovered.package.rev == revision
+    assert discovered.package.revision_kind == "commit"
+    assert discovered.package.module == "Sample"
+
+
+def test_reference_toolchains_must_agree_without_an_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    references = [
+        PackageReference.git("https://example.com/one.git", "v1"),
+        PackageReference.git("https://example.com/two.git", "v2"),
+    ]
+
+    def discover(reference: PackageReference, *, directory: Path) -> DiscoveredPackage:
+        del directory
+        index = references.index(reference) + 1
+        return DiscoveredPackage(
+            reference,
+            f"leanprover/lean4:v4.3{index}.0",
+            GitPackage.git(
+                f"package{index}",
+                reference.url,
+                str(index) * 40,
+                root_module=f"Package{index}",
+            ),
+        )
+
+    monkeypatch.setattr("lean_runtime.runtime.discover_package", discover)
+    runtime = Runtime(home=tmp_path / "runtime")
+    with pytest.raises(SpecificationError, match="different Lean toolchains"):
+        runtime.spec_from_references(references)
+
+    spec = runtime.spec_from_references(references, toolchain="4.32.0")
+    assert spec.toolchain == "leanprover/lean4:v4.32.0"
+    assert [package.name for package in spec.packages] == ["package1", "package2"]

@@ -13,12 +13,13 @@ from pathlib import Path
 from .backends import Backend, LocalBackend
 from .diagnostics import error_diagnostic, parse_diagnostics
 from .environments import Environment, EnvironmentManager, ExecutionCapture
-from .errors import ProjectError, ToolchainError
+from .errors import ProjectError, SpecificationError, ToolchainError
 from .events import EventCallback, EventEmitter
 from .health import DoctorReport, diagnose
 from .lockfiles import EnvironmentLock
 from .models import ExecutionProvenance, ExecutionResult
 from .policies import ExecutionPolicy
+from .references import PackageReference, discover_package, normalize_references
 from .resolver import EnvironmentResolver
 from .serialization import sha256_id, sha256_text
 from .specs import EnvironmentSpec, GitPackage
@@ -85,11 +86,90 @@ class Runtime:
         spec = EnvironmentSpec(toolchain, tuple(packages))
         return self.ensure(self.resolve(spec, timeout=timeout), name=name)
 
+    def spec_from_references(
+        self,
+        packages: Sequence[str | PackageReference],
+        *,
+        toolchain: str | None = None,
+    ) -> EnvironmentSpec:
+        """Discover GitHub-style package references and return an exact specification."""
+        references = normalize_references(tuple(packages))
+        if not references:
+            raise SpecificationError("at least one package reference is required")
+        discovery_root = self.store.home / "resolution" / "references"
+        discovered = []
+        for reference in references:
+            self.events.emit(
+                "package_reference.started",
+                f"Discovering {reference.display}",
+                reference=reference.display,
+            )
+            package = discover_package(reference, directory=discovery_root)
+            discovered.append(package)
+            self.events.emit(
+                "package_reference.resolved",
+                f"Discovered {package.package.name}",
+                reference=reference.display,
+                package=package.package.name,
+                revision=package.package.rev,
+                toolchain=package.toolchain,
+                root_module=package.package.module,
+            )
+        declared_toolchains = {package.toolchain for package in discovered}
+        if toolchain is None:
+            if len(declared_toolchains) != 1:
+                details = ", ".join(
+                    f"{package.package.name}={package.toolchain}" for package in discovered
+                )
+                raise SpecificationError(
+                    "package references declare different Lean toolchains; "
+                    f"select one explicitly with toolchain=... ({details})"
+                )
+            selected = next(iter(declared_toolchains))
+        else:
+            selected = normalize_toolchain(toolchain)
+            for package in discovered:
+                if package.toolchain != selected:
+                    self.events.emit(
+                        "compatibility.toolchain_override",
+                        f"{package.package.name} declares {package.toolchain}; using {selected}",
+                        package=package.package.name,
+                        declared_toolchain=package.toolchain,
+                        environment_toolchain=selected,
+                    )
+        return EnvironmentSpec(selected, tuple(package.package for package in discovered))
+
+    def resolve_references(
+        self,
+        packages: Sequence[str | PackageReference],
+        *,
+        toolchain: str | None = None,
+        timeout: float = 900,
+    ) -> EnvironmentLock:
+        """Discover package references and resolve their exact Lake graph."""
+        return self.resolve(
+            self.spec_from_references(packages, toolchain=toolchain), timeout=timeout
+        )
+
+    def ensure_references(
+        self,
+        packages: Sequence[str | PackageReference],
+        *,
+        toolchain: str | None = None,
+        name: str | None = None,
+        timeout: float = 900,
+    ) -> Environment:
+        """Build or reopen the environment described by package references."""
+        return self.ensure(
+            self.resolve_references(packages, toolchain=toolchain, timeout=timeout), name=name
+        )
+
     def check(
         self,
         source: str,
         *,
         environment: EnvironmentReference | None = None,
+        packages: Sequence[str | PackageReference] = (),
         toolchain: str | None = None,
         project: str | os.PathLike[str] | None = None,
         filename: str = "Main.lean",
@@ -100,6 +180,13 @@ class Runtime:
         selected_policy = policy or ExecutionPolicy(timeout_seconds=timeout or 120)
         if timeout is not None and policy is not None:
             selected_policy = replace(policy, timeout_seconds=timeout)
+        if environment is not None and packages:
+            raise SpecificationError("check cannot combine environment= with packages=")
+        if project is not None and packages:
+            raise SpecificationError("check cannot combine project= with packages=")
+        if packages:
+            resolved = self.ensure_references(packages, toolchain=toolchain)
+            return resolved.check(source, filename=filename, policy=selected_policy)
         if environment is not None:
             resolved = self._environment(environment)
             return resolved.check(source, filename=filename, policy=selected_policy)
@@ -116,6 +203,7 @@ class Runtime:
         path: str | os.PathLike[str],
         *,
         environment: EnvironmentReference | None = None,
+        packages: Sequence[str | PackageReference] = (),
         toolchain: str | None = None,
         project: str | os.PathLike[str] | None = None,
         timeout: float | None = None,
@@ -126,6 +214,7 @@ class Runtime:
             source_path.read_text(encoding="utf-8"),
             filename=source_path.name,
             environment=environment,
+            packages=packages,
             toolchain=toolchain,
             project=project,
             timeout=timeout,

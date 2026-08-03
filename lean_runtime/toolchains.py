@@ -127,13 +127,19 @@ class ToolchainManager:
     def is_installed(self, toolchain: str) -> bool:
         name = normalize_toolchain(toolchain)
         process = subprocess.run(
-            [str(self.elan_path()), "run", name, "lean", "--version"],
+            [str(self.elan_path()), "toolchain", "list"],
             env=self.environment,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             check=False,
         )
-        return process.returncode == 0
+        if process.returncode:
+            raise ToolchainError(f"could not list installed Lean toolchains:\n{process.stdout}")
+        installed = {
+            fields[0] for line in process.stdout.splitlines() if (fields := line.split(maxsplit=1))
+        }
+        return name in installed
 
     def ensure(self, toolchain: str) -> str:
         """Install a toolchain if necessary and return its normalized name."""

@@ -13,6 +13,29 @@ demand. It does not modify the user's default Elan toolchain or shell profile.
 Windows users currently need to point `LEAN_RUNTIME_ELAN` at an existing Elan
 executable.
 
+## One-shot package checking
+
+For a tagged GitHub-hosted Lake library, no environment file is required:
+
+```bash
+lean-runtime check Main.lean \
+  --with github:alerad/leancert@v4.32.2.4
+```
+
+This is shorthand for metadata discovery, exact commit pinning, Lake
+resolution, materialization, and checking. Subsequent invocations reuse the
+content-addressed environment.
+
+```python
+from lean_runtime import Runtime
+
+result = Runtime().check(
+    "import LeanCert.Tactic\nexample : True := by trivial",
+    packages=["github:alerad/leancert@v4.32.2.4"],
+)
+assert result.ok
+```
+
 ## Create an environment
 
 Dependencies may use exact commits or friendly tags. Locks always contain exact

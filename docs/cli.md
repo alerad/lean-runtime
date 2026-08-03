@@ -2,6 +2,28 @@
 
 All commands accept `--home PATH` before the subcommand to select a store.
 
+## One-shot package workflow
+
+```bash
+lean-runtime check Main.lean \
+  --with github:alerad/leancert@v4.32.2.4
+```
+
+`--with` is repeatable. References use
+`github:OWNER/REPOSITORY@TAG-OR-COMMIT`. Package discovery reads the root
+`lean-toolchain` and `lakefile.toml`, pins the reference to a full commit, and
+then uses the normal lock and environment pipeline. Multiple discovered
+packages must declare the same toolchain unless `--toolchain` explicitly
+selects the compatibility build.
+
+Supporting files work here too:
+
+```bash
+lean-runtime check Main.lean \
+  --with github:alerad/leancert@v4.32.2.4 \
+  --include Support/Defs.lean
+```
+
 ## Environment workflow
 
 ```bash
@@ -37,9 +59,8 @@ lean-runtime project-build ./existing-project MyLibrary
 lean-runtime install 4.32.2
 ```
 
-The environment-aware `check` command requires an environment identifier. The
-`--toolchain` option belongs to `raw-check`; this split keeps reproducible
-environment execution distinct from ad hoc invocation.
+Without `--with`, the environment-aware `check` command requires an environment
+identifier. `raw-check` remains the explicitly unmanaged route.
 
 Add supporting source files with repeatable `--include` options:
 
