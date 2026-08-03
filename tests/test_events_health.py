@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from lean_runtime import Runtime
@@ -17,7 +18,6 @@ def test_event_emitter_is_structured() -> None:
 def test_doctor_and_empty_store_status_do_not_install_tools(tmp_path: Path) -> None:
     runtime = Runtime(home=tmp_path)
     report = runtime.doctor()
-    assert report.ok
     assert {check.name for check in report.checks} == {
         "git",
         "store",
@@ -25,6 +25,13 @@ def test_doctor_and_empty_store_status_do_not_install_tools(tmp_path: Path) -> N
         "elan",
         "staging",
     }
+    elan = next(check for check in report.checks if check.name == "elan")
+    if os.name == "nt":
+        assert not report.ok
+        assert elan.status == "fail"
+    else:
+        assert report.ok
+        assert elan.status in {"pass", "warning"}
     status = runtime.store_status()
     assert status.environments == 0
     assert status.sources == 0
