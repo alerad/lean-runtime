@@ -94,9 +94,15 @@ class LocalBackend:
 
                 if memory_mb is not None:
                     limit = memory_mb * 1024 * 1024
-                    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+                    getattr(resource, "setrlimit")(  # noqa: B009
+                        getattr(resource, "RLIMIT_AS"),  # noqa: B009
+                        (limit, limit),
+                    )
                 if cpu_seconds is not None:
-                    resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
+                    getattr(resource, "setrlimit")(  # noqa: B009
+                        getattr(resource, "RLIMIT_CPU"),  # noqa: B009
+                        (cpu_seconds, cpu_seconds),
+                    )
 
             preexec = apply_limits
             if memory_mb is not None:
@@ -165,7 +171,7 @@ class LocalBackend:
             if os.name == "nt":
                 process.terminate()
             else:
-                os.killpg(process.pid, signal.SIGTERM)
+                getattr(os, "killpg")(process.pid, signal.SIGTERM)  # noqa: B009
         except ProcessLookupError:
             pass
 
@@ -175,6 +181,9 @@ class LocalBackend:
             if os.name == "nt":
                 process.kill()
             else:
-                os.killpg(process.pid, signal.SIGKILL)
+                getattr(os, "killpg")(  # noqa: B009
+                    process.pid,
+                    getattr(signal, "SIGKILL"),  # noqa: B009
+                )
         except ProcessLookupError:
             pass

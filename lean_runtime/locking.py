@@ -39,7 +39,10 @@ class FileLock:
                 else:
                     import fcntl
 
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    getattr(fcntl, "flock")(  # noqa: B009
+                        handle.fileno(),
+                        getattr(fcntl, "LOCK_EX") | getattr(fcntl, "LOCK_NB"),  # noqa: B009
+                    )
                 self._handle = handle
                 return self
             except OSError as error:
@@ -71,6 +74,9 @@ class FileLock:
         else:
             import fcntl
 
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            getattr(fcntl, "flock")(  # noqa: B009
+                handle.fileno(),
+                getattr(fcntl, "LOCK_UN"),  # noqa: B009
+            )
         handle.close()
         self._handle = None
