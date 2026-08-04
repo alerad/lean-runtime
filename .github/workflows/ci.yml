@@ -35,6 +35,9 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install -e '.[dev]'
       - run: pytest -m integration -vv
+      - run: python -m pip install build
+      - run: python -m build
+      - run: python scripts/smoke_wheel.py dist/*.whl --lean
 
   package:
     runs-on: ubuntu-latest
@@ -45,6 +48,7 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install build
       - run: python -m build
+      - run: python scripts/smoke_wheel.py dist/*.whl
 
   docs:
     runs-on: ubuntu-latest

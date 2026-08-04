@@ -93,6 +93,9 @@ jobs:
           pattern: platform-*
           path: results
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: environment-lock
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -108,3 +111,15 @@ jobs:
             --repository oci://ghcr.io/alerad/lean-runtime-cache)
           if [[ -n "$ALIAS_TAG" ]]; then args+=(--tag "$ALIAS_TAG"); fi
           lean-runtime "${args[@]}"
+      - name: Verify a clean public-cache client
+        env:
+          LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
+          LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          acceptance_home="$RUNNER_TEMP/lean-runtime-cache-acceptance"
+          lean-runtime --home "$acceptance_home" \
+            --cache oci://ghcr.io/alerad/lean-runtime-cache \
+            --prebuilt require pull environment.lock.json --name acceptance
+          lean-runtime --home "$acceptance_home" verify acceptance --offline
+          printf 'import RuntimeEnvironment\n' > Main.lean
+          lean-runtime --home "$acceptance_home" check acceptance Main.lean

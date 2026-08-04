@@ -1,5 +1,7 @@
 """Content-addressed execution environments for Lean 4."""
 
+from importlib.metadata import version as _distribution_version
+
 from .bundles import BundleInfo
 from .decisions import Decision
 from .diffing import ContextDiff, DiffEntry
@@ -52,10 +54,13 @@ from .profiling import ProfileReport
 from .projects import ProjectContext, ProjectEnvironment, discover_project
 from .references import PACKAGE_ALIASES, DiscoveredPackage, PackageReference
 from .runtime import Runtime, project_toolchain
+from .schema_resources import SCHEMA_NAMES, schema_path
 from .specs import EnvironmentSpec, GitPackage, Package
 from .store import BlobGarbageCollectionReport, GarbageCollectionReport, StoreStatus
 from .toolchains import ToolchainManager, normalize_toolchain
 from .verification import VerificationCheck, VerificationReport
+
+__version__ = _distribution_version("lean-runtime")
 
 __all__ = [
     "Diagnostic",
@@ -107,6 +112,7 @@ __all__ = [
     "ProjectError",
     "ResolutionError",
     "Runtime",
+    "SCHEMA_NAMES",
     "RuntimeEvent",
     "OCIRepository",
     "SpecificationError",
@@ -115,6 +121,7 @@ __all__ = [
     "ToolchainManager",
     "VerificationCheck",
     "VerificationReport",
+    "__version__",
     "normalize_toolchain",
     "project_toolchain",
     "discover_project",
@@ -127,4 +134,5 @@ __all__ = [
     "parse_frontmatter",
     "replay",
     "setup",
+    "schema_path",
 ]

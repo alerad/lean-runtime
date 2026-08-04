@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lean-runtime"
-version = "0.6.0"
+version = "1.0.0"
 description = "Run Lean 4 proofs from Python or standalone files"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ license = "Apache-2.0"
 authors = [{ name = "Alejandro Radisic" }]
 keywords = ["lean4", "theorem-prover", "formal-verification", "toolchain"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
@@ -43,6 +43,9 @@ include = ["lean_runtime*"]
 
 [tool.setuptools.package-data]
 lean_runtime = ["py.typed"]
+
+[tool.setuptools.data-files]
+"share/lean-runtime/schemas" = ["schemas/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

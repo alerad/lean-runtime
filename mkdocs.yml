@@ -39,6 +39,7 @@ nav:
       - CLI: cli.md
       - Execution captures: captures.md
       - Verify, diff, profile, and matrix: v1-precision.md
+      - V1 release case study: case-study-v1.md
   - Concepts:
       - Architecture: architecture.md
       - Trust and limitations: trust-and-limitations.md

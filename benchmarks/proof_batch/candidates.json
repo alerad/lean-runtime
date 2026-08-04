@@ -1,0 +1,10 @@
+[
+  "import Mathlib\nexample : 2 + 2 = 4 := by norm_num",
+  "import Mathlib\nexample : (10 : Nat) < 20 := by norm_num",
+  "import Mathlib\nexample : List.reverse (List.reverse [1, 2, 3]) = [1, 2, 3] := by simp",
+  "import Mathlib\nexample : (3 : Int) + 4 = 7 := by norm_num",
+  "import Mathlib\nexample : False := by trivial",
+  "import Mathlib\nexample : Nat := by exact missing_name",
+  "import Mathlib\nexample : 1 + = 2 := by rfl",
+  "import Mathlib\nexample : (0 : Nat) = 0 := by rfl"
+]
