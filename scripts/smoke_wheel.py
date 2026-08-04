@@ -40,11 +40,13 @@ def main() -> int:
             environment=clean_environment,
         )
         probe = (
-            "import json, lean_runtime as lean; "
+            "import json; "
+            "from importlib.metadata import version; "
+            "import lean_runtime as lean; "
             "path=lean.schema_path('execution-v1.schema.json'); "
             "value=json.loads(path.read_text()); "
             "assert value['$id'].endswith('/execution-v1.schema.json'); "
-            "assert lean.__version__ == '1.0.0'"
+            "assert lean.__version__ == version('lean-runtime')"
         )
         _run([str(python), "-c", probe], cwd=root, environment=clean_environment)
         _run([str(scripts / "lean-runtime"), "--help"], cwd=root, environment=clean_environment)
