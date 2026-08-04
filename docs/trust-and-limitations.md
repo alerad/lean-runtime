@@ -27,9 +27,13 @@ signed software-supply-chain system.
 
 Local OCI bundle import verifies the complete blob digest chain, recomputes the
 lock and environment identities, verifies package Git commits and trees, and
-runs a Lean probe before publication. A bundle still contains trusted executable
-build output: these checks do not prove that its builder compiled the locked
-sources faithfully. Phase 1 does not provide signatures or remote attestations.
+runs a Lean probe before publication. Registry pulls apply the same checks.
+Ordinary availability failures may fall back to source in `auto` mode; integrity,
+lock, archive-safety, and probe failures do not. A bundle still contains trusted
+executable build output: these checks do not prove that its builder compiled the
+locked sources faithfully. Registry authentication is not a builder signature.
+Required Cosign policy authenticates an expected publisher workflow and index
+digest, but still trusts that workflow to compile the locked sources faithfully.
 
 ## Reproducibility boundary
 
@@ -41,9 +45,10 @@ package scripts are not promised to be byte-for-byte deterministic.
 ## Deliberately deferred
 
 - semantic version solving, floating branches, and editable dependencies;
-- signatures and remote attestations;
+- native in-process signature verification and rebuild attestations;
+- automatic garbage collection of unreferenced OCI blobs;
 - untrusted sandboxed execution;
-- remote workers and shared artifact services;
+- remote workers;
 - automatic package conflict explanations.
 
 Output capture is bounded and exposes `output_truncated`; the retained output

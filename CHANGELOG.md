@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add transparent OCI prebuilt-cache lookup with authenticated registry pulls,
+  disk-backed blob reuse, strict fallback policy, and explicit `pull` support.
+- Add deterministic OCI publishing through `build-and-push`, with blobs and the
+  platform manifest committed before the lock-level index tag.
+- Stream bundle layers and OCI archives through temporary files instead of
+  materializing multi-gigabyte package layers in memory.
 - Add deterministic OCI image-layout export and verified, atomic environment import.
 - Verify bundle digests, lock and environment identities, package Git trees,
   archive paths, host compatibility, and a Lean probe before publication.
