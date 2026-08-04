@@ -32,6 +32,7 @@ nav:
   - Getting started: getting-started.md
   - Guides:
       - Environments: environments.md
+      - Local Lake projects: local-projects.md
       - Environment bundles: bundles.md
       - Python API: python-api.md
       - CLI: cli.md

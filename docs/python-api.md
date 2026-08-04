@@ -45,13 +45,21 @@ least one `[[lean_lib]]`. The convenience specification contains the resolved
 commit, so all downstream identities retain the same exact semantics as a
 manually authored `EnvironmentSpec`.
 
-Raw helpers remain available for core-only snippets and existing Lake projects:
+Core-only snippets can select a toolchain directly. Existing Lake projects have
+a distinct mutable handle:
 
 ```python
 runtime.check(source, toolchain="4.32.2")
-runtime.check(source, project="./existing-project")
-runtime.build("./existing-project", targets=("MyLibrary",))
+project = runtime.project("./existing-project")
+project.build(("MyLibrary",))
+project.check_file("./existing-project/MyLibrary/Main.lean")
+project.check(source)
 ```
+
+`runtime.project()` also accepts a contained file and discovers the nearest
+pinned Lake root. `runtime.check_file(path)` performs this discovery
+automatically when no managed environment, packages, or toolchain are supplied.
+See [Local Lake projects](local-projects.md).
 
 ## Environment
 
@@ -161,6 +169,11 @@ Provenance includes:
 - exact package commits and Git tree hashes;
 - toolchain, platform, backend, and policy;
 - source digest and start timestamp.
+
+Mutable local-project results have no environment or lock identity. Instead,
+their provenance includes the canonical root, a workspace-content digest that
+excludes `.git` and `.lake`, Lake configuration and manifest digests, and Git
+revision/dirty state when available.
 
 Diagnostic extraction is explicitly best-effort. The original stdout and
 stderr remain authoritative.

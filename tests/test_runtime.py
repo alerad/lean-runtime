@@ -74,6 +74,7 @@ def test_check_requires_version_without_project(tmp_path: Path) -> None:
 
 def test_build_infers_project_toolchain(tmp_path: Path) -> None:
     (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.32.0\n")
+    (tmp_path / "lakefile.toml").write_text('name = "sample"\n')
     runtime = Runtime(toolchains=FakeToolchains(tmp_path / "cache"))  # type: ignore[arg-type]
     result = runtime.build(tmp_path, targets=["Example"])
     assert result.ok

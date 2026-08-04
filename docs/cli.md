@@ -63,13 +63,16 @@ environment can replay offline.
 
 ```bash
 lean-runtime raw-check Main.lean --toolchain 4.32.2
-lean-runtime raw-check Main.lean --project ./existing-project
+lean-runtime raw-check ./existing-project/MyProject/Main.lean
 lean-runtime project-build ./existing-project MyLibrary
 lean-runtime install 4.32.2
 ```
 
 Without `--with`, the environment-aware `check` command requires an environment
-identifier. `raw-check` remains the explicitly unmanaged route.
+identifier. `raw-check` remains the explicitly unmanaged route. When no
+`--project` or `--toolchain` is supplied, it discovers the nearest directory
+containing a Lake configuration and `lean-toolchain`, then passes the actual
+project-relative file to `lake env lean`.
 
 Add supporting source files with repeatable `--include` options:
 

@@ -26,7 +26,7 @@ from .errors import (
 from .events import EventCallback, EventEmitter
 from .health import DoctorReport, diagnose
 from .lockfiles import EnvironmentLock
-from .models import ExecutionProvenance, ExecutionResult
+from .models import ExecutionProvenance, ExecutionResult, ProjectProvenance
 from .oci import (
     DEFAULT_CACHE_REPOSITORIES,
     OCIEnvironmentCache,
@@ -35,6 +35,7 @@ from .oci import (
     PublishInfo,
 )
 from .policies import ExecutionPolicy
+from .projects import ProjectContext, ProjectEnvironment, discover_project
 from .references import PackageReference, discover_package, normalize_references
 from .resolver import EnvironmentResolver
 from .serialization import sha256_id, sha256_text
@@ -338,6 +339,8 @@ class Runtime:
             selected_policy = replace(policy, timeout_seconds=timeout)
         if environment is not None and packages:
             raise SpecificationError("check cannot combine environment= with packages=")
+        if environment is not None and project is not None:
+            raise SpecificationError("check cannot combine environment= with project=")
         if project is not None and packages:
             raise SpecificationError("check cannot combine project= with packages=")
         if packages:
@@ -346,6 +349,10 @@ class Runtime:
         if environment is not None:
             resolved = self._environment(environment)
             return resolved.check(source, filename=filename, policy=selected_policy)
+        if project is not None:
+            return self.project(project, toolchain=toolchain).check(
+                source, filename=filename, policy=selected_policy
+            )
         return self._raw_check(
             source,
             toolchain=toolchain,
@@ -366,6 +373,16 @@ class Runtime:
         policy: ExecutionPolicy | None = None,
     ) -> ExecutionResult:
         source_path = Path(path).expanduser().resolve()
+        selected_policy = policy or ExecutionPolicy(timeout_seconds=timeout or 120)
+        if timeout is not None and policy is not None:
+            selected_policy = replace(policy, timeout_seconds=timeout)
+        if environment is None and not packages:
+            if project is not None:
+                return self.project(project, toolchain=toolchain).check_file(
+                    source_path, policy=selected_policy
+                )
+            if toolchain is None:
+                return self.project(source_path).check_file(source_path, policy=selected_policy)
         return self.check(
             source_path.read_text(encoding="utf-8"),
             filename=source_path.name,
@@ -374,7 +391,7 @@ class Runtime:
             toolchain=toolchain,
             project=project,
             timeout=timeout,
-            policy=policy,
+            policy=selected_policy,
         )
 
     def check_files(
@@ -399,18 +416,26 @@ class Runtime:
         timeout: float = 900,
     ) -> ExecutionResult:
         """Build an existing trusted Lake project outside the environment store."""
-        root = Path(project).expanduser().resolve()
-        if not root.is_dir():
-            raise ProjectError(f"project directory does not exist: {root}")
-        selected = normalize_toolchain(toolchain) if toolchain else project_toolchain(root)
-        command = self.toolchains.command(selected, "lake", "build", *targets)
-        return self._raw_result(
-            command,
-            cwd=root,
-            toolchain=selected,
-            source_digest=sha256_text(""),
+        context = discover_project(project)
+        if toolchain is not None:
+            context = replace(context, toolchain=normalize_toolchain(toolchain))
+        return self._build_project(
+            context,
+            targets=targets,
             policy=ExecutionPolicy(timeout_seconds=timeout, max_output_bytes=10_000_000),
         )
+
+    def project(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        toolchain: str | None = None,
+    ) -> ProjectEnvironment:
+        """Open the nearest pinned Lake project containing ``path``."""
+        context = discover_project(path)
+        if toolchain is not None:
+            context = replace(context, toolchain=normalize_toolchain(toolchain))
+        return ProjectEnvironment(self, context)
 
     def gc(
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
@@ -515,6 +540,72 @@ class Runtime:
                 policy=policy,
             )
 
+    def _check_project_file(
+        self,
+        context: ProjectContext,
+        source: Path,
+        *,
+        policy: ExecutionPolicy,
+    ) -> ExecutionResult:
+        relative = source.relative_to(context.root).as_posix()
+        command = self.toolchains.command(context.toolchain, "lake", "env", "lean", relative)
+        return self._raw_result(
+            command,
+            cwd=context.root,
+            toolchain=context.toolchain,
+            source_digest=sha256_text(source.read_text(encoding="utf-8")),
+            policy=policy,
+            project=context.provenance(),
+            logical_command=("lake", "env", "lean", relative),
+        )
+
+    def _check_project_source(
+        self,
+        context: ProjectContext,
+        source: str,
+        *,
+        filename: str,
+        policy: ExecutionPolicy,
+    ) -> ExecutionResult:
+        safe_filename = Path(filename).name
+        if not safe_filename.endswith(".lean"):
+            safe_filename += ".lean"
+        jobs = context.root / ".lake" / "lean-runtime"
+        jobs.mkdir(parents=True, exist_ok=True)
+        provenance = context.provenance()
+        with tempfile.TemporaryDirectory(prefix="check-", dir=jobs) as temporary:
+            source_path = Path(temporary) / safe_filename
+            source_path.write_text(source, encoding="utf-8")
+            relative = source_path.relative_to(context.root).as_posix()
+            command = self.toolchains.command(context.toolchain, "lake", "env", "lean", relative)
+            return self._raw_result(
+                command,
+                cwd=context.root,
+                toolchain=context.toolchain,
+                source_digest=sha256_text(source),
+                policy=policy,
+                project=provenance,
+                logical_command=("lake", "env", "lean", safe_filename),
+            )
+
+    def _build_project(
+        self,
+        context: ProjectContext,
+        *,
+        targets: Sequence[str],
+        policy: ExecutionPolicy,
+    ) -> ExecutionResult:
+        command = self.toolchains.command(context.toolchain, "lake", "build", *targets)
+        return self._raw_result(
+            command,
+            cwd=context.root,
+            toolchain=context.toolchain,
+            source_digest=sha256_text(""),
+            policy=policy,
+            project=context.provenance(),
+            logical_command=("lake", "build", *targets),
+        )
+
     def _raw_result(
         self,
         command: Sequence[str],
@@ -523,18 +614,23 @@ class Runtime:
         toolchain: str,
         source_digest: str,
         policy: ExecutionPolicy,
+        project: ProjectProvenance | None = None,
+        logical_command: Sequence[str] | None = None,
     ) -> ExecutionResult:
         started_at = datetime.now(timezone.utc).isoformat()
-        logical_command = list(command[3:])
-        if source_digest != sha256_text("") and logical_command:
-            logical_command[-1] = Path(logical_command[-1]).name
+        request_command = (
+            list(logical_command) if logical_command is not None else list(command[3:])
+        )
+        if source_digest != sha256_text("") and request_command and project is None:
+            request_command[-1] = Path(request_command[-1]).name
         request_digest = sha256_id(
             "request",
             {
                 "environment_id": None,
                 "toolchain": toolchain,
-                "command": logical_command,
+                "command": request_command,
                 "source_digest": source_digest,
+                "project": project.to_dict() if project is not None else None,
                 "policy": policy.to_dict(),
                 "backend": self.backend.name,
             },
@@ -570,6 +666,7 @@ class Runtime:
             enforced_policy_fields=raw.enforced_policy_fields,
             source_digest=source_digest,
             started_at=started_at,
+            project=project,
         )
         return ExecutionResult(
             ok=raw.exit_code == 0,
