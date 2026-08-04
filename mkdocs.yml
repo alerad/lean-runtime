@@ -38,6 +38,7 @@ nav:
       - Python API: python-api.md
       - CLI: cli.md
       - Execution captures: captures.md
+      - Verify, diff, profile, and matrix: v1-precision.md
   - Concepts:
       - Architecture: architecture.md
       - Trust and limitations: trust-and-limitations.md

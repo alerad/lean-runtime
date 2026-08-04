@@ -14,7 +14,9 @@ from typing import Any
 from .audit import AuditReport, audit_environment
 from .backends import Backend, LocalBackend
 from .bundles import BundleInfo, EnvironmentBundles
+from .decisions import Decision
 from .diagnostics import error_diagnostic, parse_diagnostics
+from .diffing import ContextDiff, DiffEntry, diff_locks
 from .environments import Environment, EnvironmentManager, ExecutionCapture
 from .errors import (
     EnvironmentError,
@@ -26,6 +28,7 @@ from .errors import (
 from .events import EventCallback, EventEmitter
 from .health import DoctorReport, diagnose
 from .lockfiles import EnvironmentLock
+from .matrix import MatrixContext, MatrixResult, run_matrix
 from .models import ExecutionProvenance, ExecutionResult, ProjectProvenance
 from .oci import (
     DEFAULT_CACHE_REPOSITORIES,
@@ -35,6 +38,7 @@ from .oci import (
     PublishInfo,
 )
 from .policies import ExecutionPolicy
+from .profiling import ProfileReport, run_profile
 from .projects import ProjectContext, ProjectEnvironment, discover_project
 from .references import PackageReference, discover_package, normalize_references
 from .resolver import EnvironmentResolver
@@ -47,11 +51,35 @@ from .store import (
     GarbageCollectionReport,
     StoreStatus,
     environment_identity,
+    platform_compatibility,
     platform_record,
 )
 from .toolchains import ToolchainManager, normalize_toolchain
+from .verification import (
+    VerificationCheck,
+    VerificationReport,
+    load_lock_subject,
+    verify_environment,
+)
 
 EnvironmentReference = Environment | EnvironmentSpec | EnvironmentLock | str
+
+
+def _prebuilt_reason(error: Exception) -> str:
+    message = str(error).lower()
+    if "platform" in message or "compatible" in message:
+        return "platform_compatibility_mismatch"
+    if "signature" in message or "cosign" in message:
+        return "signature_policy_rejected"
+    if "lock" in message and "mismatch" in message:
+        return "lock_id_mismatch"
+    if "environment" in message and "mismatch" in message:
+        return "environment_id_mismatch"
+    if "digest" in message or "corrupt" in message:
+        return "remote_candidate_corrupt"
+    if "not found" in message or "404" in message:
+        return "remote_candidate_missing"
+    return "remote_candidate_unavailable"
 
 
 def project_toolchain(project: str | os.PathLike[str]) -> str:
@@ -137,24 +165,32 @@ class Runtime:
         destination = self.store.environment_path(environment_id)
         if not destination.is_dir() and self.prebuilt != "never":
             imported = False
+            rejections: list[str] = []
             for cache in self.caches:
                 try:
                     cache.pull(lock, name=name)
                     imported = True
                     break
                 except PrebuiltUnavailable as exc:
+                    reason_code = _prebuilt_reason(exc)
+                    rejections.append(f"{cache.repository.display}: {reason_code} ({exc})")
                     self.events.emit(
                         "prebuilt.fallback",
                         "Prebuilt environment is unavailable",
                         registry=cache.repository.display,
                         reason=str(exc),
+                        reason_code=reason_code,
                     )
             if not imported and self.prebuilt == "require":
                 if not self.caches:
                     raise EnvironmentError(
                         "prebuilt environments are required but no caches configured"
                     )
-                raise EnvironmentError("no configured cache provided a compatible environment")
+                nearest = f" Nearest candidates: {'; '.join(rejections)}" if rejections else ""
+                raise EnvironmentError(
+                    "no compatible prebuilt environment was found; prebuilt=require "
+                    "does not permit a source build." + nearest
+                )
         return self.environments.ensure(lock, name=name, build_profile=build_profile)
 
     def open(self, identifier: str) -> Environment:
@@ -212,6 +248,174 @@ class Runtime:
         """Verify locked sources and optionally compare an independent source rebuild."""
         return audit_environment(
             self.open(identifier), self.toolchains, self.backend, self.events, rebuild=rebuild
+        )
+
+    def verify(
+        self,
+        subject: str | os.PathLike[str],
+        *,
+        offline: bool = False,
+        rebuild: bool = False,
+    ) -> VerificationReport:
+        """Verify a lock or published environment using the runtime's canonical checks."""
+        if offline and rebuild:
+            raise SpecificationError("offline and rebuild verification are mutually exclusive")
+        path = Path(subject).expanduser()
+        if path.is_file():
+            if rebuild:
+                raise SpecificationError("rebuild verification requires a published environment")
+            return load_lock_subject(path.resolve())
+        environment_id = self.store.resolve_identifier(str(subject))
+        metadata_path = self.store.environment_path(environment_id) / "metadata.json"
+        if metadata_path.is_file():
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            lock = self.store.load_lock(str(metadata.get("lock_id")))
+            observed_platform = metadata.get("platform_compatibility")
+            expected_platform = platform_compatibility()
+            expected_id = environment_identity(lock, str(metadata.get("build_profile")))
+            failure: VerificationCheck | None = None
+            if observed_platform is not None and observed_platform != expected_platform:
+                failure = VerificationCheck(
+                    "platform_compatibility_mismatch",
+                    False,
+                    details={"expected": expected_platform, "observed": observed_platform},
+                )
+            elif metadata.get("environment_id") != environment_id or expected_id != environment_id:
+                failure = VerificationCheck(
+                    "environment_id_mismatch",
+                    False,
+                    details={"expected": expected_id, "observed": environment_id},
+                )
+            if failure is not None:
+                checks = (
+                    VerificationCheck("alias_resolved", True, subject=environment_id),
+                    failure,
+                    VerificationCheck("package_trees_verified", True, skipped=True),
+                    VerificationCheck("lean_probe", True, skipped=True),
+                )
+                return VerificationReport(
+                    str(subject),
+                    "environment",
+                    checks,
+                    (failure,),
+                    (),
+                    lock.lock_id,
+                    environment_id,
+                )
+        environment = self.open(str(subject))
+        return verify_environment(self, environment, rebuild=rebuild, offline=offline)
+
+    def diff(
+        self,
+        left: str | os.PathLike[str],
+        right: str | os.PathLike[str],
+    ) -> ContextDiff:
+        """Compare the semantic identity inputs of two locks or environments."""
+
+        def resolve(value: str | os.PathLike[str]) -> tuple[EnvironmentLock, Environment | None]:
+            path = Path(value).expanduser()
+            if path.is_file():
+                return EnvironmentLock.load(path), None
+            environment = self.open(str(value))
+            return environment.lock, environment
+
+        left_lock, left_environment = resolve(left)
+        right_lock, right_environment = resolve(right)
+        result = diff_locks(left_lock, right_lock)
+        changes = list(result.changes)
+        left_info = dict(result.left)
+        right_info = dict(result.right)
+        if left_environment is not None:
+            left_info.update(kind="environment", environment_id=left_environment.id)
+        if right_environment is not None:
+            right_info.update(kind="environment", environment_id=right_environment.id)
+        if left_environment is not None and right_environment is not None:
+            for field in ("build_profile", "platform"):
+                before = left_environment.inspect().to_dict()[field]
+                after = right_environment.inspect().to_dict()[field]
+                if before != after:
+                    changes.append(DiffEntry(field, "changed", True, before, after))
+        return ContextDiff(left_info, right_info, tuple(changes))
+
+    def profile(
+        self,
+        environment: str,
+        file: str | os.PathLike[str],
+        *,
+        warmup: int = 1,
+        repeat: int = 5,
+    ) -> ProfileReport:
+        """Repeatedly check one file in fresh instances of a published environment."""
+        path = Path(file).expanduser().resolve()
+        return run_profile(
+            self.open(environment),
+            path.read_text(encoding="utf-8"),
+            filename=path.name,
+            warmup=warmup,
+            repeat=repeat,
+        )
+
+    def check_matrix(
+        self,
+        source: str,
+        *,
+        contexts: Sequence[MatrixContext],
+        filename: str = "Main.lean",
+        base: str | os.PathLike[str] = ".",
+        concurrency: int = 1,
+    ) -> MatrixResult:
+        """Check one input through ordinary execution paths for each named context."""
+        return run_matrix(
+            self,
+            source,
+            filename=filename,
+            contexts=tuple(contexts),
+            base=Path(base).expanduser().resolve(),
+            concurrency=concurrency,
+        )
+
+    def explain(self, subject: str | os.PathLike[str]) -> tuple[Decision, ...]:
+        """Explain locally observable identity, origin, and compatibility decisions."""
+        path = Path(subject).expanduser()
+        if path.is_file():
+            lock = EnvironmentLock.load(path)
+            environment_id = environment_identity(lock)
+            exists = self.store.environment_path(environment_id).is_dir()
+            return (
+                Decision(
+                    "lock_identity_verified",
+                    str(path),
+                    "accepted",
+                    details={"lock_id": lock.lock_id},
+                ),
+                Decision(
+                    "local_environment_hit" if exists else "local_environment_missing",
+                    environment_id,
+                    "accepted" if exists else "missing",
+                    reason=None if exists else "source_build_or_remote_pull_required",
+                ),
+            )
+        environment = self.open(str(subject))
+        origin = environment._record.get("origin", {"kind": "local"})
+        return (
+            Decision(
+                "alias_resolved",
+                str(subject),
+                "accepted",
+                details={"environment_id": environment.id},
+            ),
+            Decision(
+                "local_environment_hit",
+                environment.id,
+                "accepted",
+                details={"origin": origin},
+            ),
+            Decision(
+                "platform_compatibility_match",
+                environment.id,
+                "accepted",
+                details={"platform_compatibility": platform_compatibility()},
+            ),
         )
 
     def publish_environment_index(

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from lean_runtime import PackageReference, Runtime, RuntimeEvent, check_file, setup
+from lean_runtime import MatrixContext, PackageReference, Runtime, RuntimeEvent, check_file, setup
 
 
 @contextmanager
@@ -158,7 +158,8 @@ def test_local_lake_project_build_and_file_check(tmp_path: Path) -> None:
     )
     assert cli.returncode == 0, cli.stdout + cli.stderr
     cli_result = json.loads(cli.stdout)
-    assert cli_result["provenance"]["project"]["root"] == str(root)
+    assert cli_result["schema"] == "lean-runtime.execution/v1"
+    assert cli_result["data"]["provenance"]["project"]["root"] == str(root)
     lean_run = subprocess.run(
         [
             sys.executable,
@@ -259,6 +260,25 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     assert repeated.execution_id != first.execution_id
     assert repeated.provenance is not None
     assert repeated.provenance.request_digest == first.provenance.request_digest
+    verification = runtime.verify("demo", offline=True)
+    assert verification.ok
+    assert any(item.code == "offline_retained_state_verified" for item in verification.checks)
+    assert runtime.diff(lock_path, "demo").equal
+    profile_source = tmp_path / "Profile.lean"
+    profile_source.write_text(source)
+    profile = runtime.profile("demo", profile_source, warmup=0, repeat=2)
+    assert profile.ok
+    assert len({item.execution_id for item in profile.results}) == 2
+    matrix = runtime.check_matrix(
+        source,
+        contexts=(
+            MatrixContext("first", environment="demo"),
+            MatrixContext("second", environment=environment.id),
+        ),
+        concurrency=2,
+    )
+    assert matrix.ok
+    assert [item.context for item in matrix.entries] == ["first", "second"]
     bundle_path = tmp_path / "environment.oci.tar.gz"
     exported = runtime.export_environment(environment.id, bundle_path)
     with _bundle_registry(bundle_path, lock.lock_id) as cache:
@@ -325,7 +345,9 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
         check=False,
     )
     assert locked_run.returncode == 0, locked_run.stdout + locked_run.stderr
-    assert json.loads(locked_run.stdout)["provenance"]["lock_id"] == lock.lock_id
+    locked_payload = json.loads(locked_run.stdout)
+    assert locked_payload["schema"] == "lean-runtime.execution/v1"
+    assert locked_payload["data"]["provenance"]["lock_id"] == lock.lock_id
     child = subprocess.run(
         [
             sys.executable,
@@ -346,5 +368,5 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     assert child.returncode == 0, child.stderr
     second = json.loads(child.stdout)
     assert second["ok"] is True
-    assert second["provenance"]["environment_id"] == environment.id
-    assert second["provenance"]["lock_id"] == lock.lock_id
+    assert second["data"]["provenance"]["environment_id"] == environment.id
+    assert second["data"]["provenance"]["lock_id"] == lock.lock_id

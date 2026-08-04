@@ -2,6 +2,8 @@
 
 from .audit import ArtifactInventory, AuditReport
 from .bundles import BundleInfo
+from .decisions import Decision
+from .diffing import ContextDiff, DiffEntry
 from .environments import (
     Environment,
     EnvironmentInfo,
@@ -27,6 +29,8 @@ from .facade import (
     PreparedEnvironment,
     check,
     check_file,
+    check_matrix,
+    check_matrix_async,
     default_runtime,
     replay,
     setup,
@@ -34,6 +38,7 @@ from .facade import (
 from .frontmatter import LeanFrontmatter, load_frontmatter, parse_frontmatter
 from .health import DoctorCheck, DoctorReport
 from .lockfiles import EnvironmentLock, LockedPackage
+from .matrix import MatrixContext, MatrixEntry, MatrixResult
 from .models import (
     Diagnostic,
     ExecutionProvenance,
@@ -43,15 +48,20 @@ from .models import (
 )
 from .oci import DEFAULT_CACHE_REPOSITORIES, OCIRepository, PublishInfo
 from .policies import ExecutionPolicy
+from .profiling import ProfileReport
 from .projects import ProjectContext, ProjectEnvironment, discover_project
 from .references import PACKAGE_ALIASES, DiscoveredPackage, PackageReference
 from .runtime import Runtime, project_toolchain
 from .specs import EnvironmentSpec, GitPackage, Package
 from .store import BlobGarbageCollectionReport, GarbageCollectionReport, StoreStatus
 from .toolchains import ToolchainManager, normalize_toolchain
+from .verification import VerificationCheck, VerificationReport
 
 __all__ = [
     "Diagnostic",
+    "Decision",
+    "ContextDiff",
+    "DiffEntry",
     "BundleInfo",
     "ArtifactInventory",
     "AuditReport",
@@ -80,6 +90,9 @@ __all__ = [
     "LeanRuntimeError",
     "LockedPackage",
     "MaterializationError",
+    "MatrixContext",
+    "MatrixEntry",
+    "MatrixResult",
     "Package",
     "PackageReference",
     "PACKAGE_ALIASES",
@@ -87,6 +100,7 @@ __all__ = [
     "ProjectContext",
     "ProjectEnvironment",
     "ProjectProvenance",
+    "ProfileReport",
     "PreparedEnvironment",
     "PolicyError",
     "PublishInfo",
@@ -100,11 +114,15 @@ __all__ = [
     "StoreStatus",
     "ToolchainError",
     "ToolchainManager",
+    "VerificationCheck",
+    "VerificationReport",
     "normalize_toolchain",
     "project_toolchain",
     "discover_project",
     "check",
     "check_file",
+    "check_matrix",
+    "check_matrix_async",
     "default_runtime",
     "load_frontmatter",
     "parse_frontmatter",

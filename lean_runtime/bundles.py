@@ -617,6 +617,7 @@ class EnvironmentBundles:
                         "lock_id": lock.lock_id,
                         "toolchain": lock.toolchain,
                         "platform": platform_record(),
+                        "platform_compatibility": platform_compatibility(),
                         "build_profile": build_profile,
                         "status": "ready",
                         "created_at": datetime.now(timezone.utc).isoformat(),

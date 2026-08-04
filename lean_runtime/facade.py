@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 from collections.abc import Sequence
@@ -10,6 +11,7 @@ from pathlib import Path
 from .environments import Environment, ExecutionCapture
 from .errors import SpecificationError
 from .lockfiles import EnvironmentLock
+from .matrix import MatrixContext, MatrixResult
 from .models import ExecutionResult
 from .policies import ExecutionPolicy
 from .projects import ProjectEnvironment
@@ -137,3 +139,35 @@ def replay(
     capture: ExecutionCapture | str | os.PathLike[str], *, runtime: Runtime | None = None
 ) -> ExecutionResult:
     return (runtime or default_runtime()).replay_capture(capture)
+
+
+def check_matrix(
+    source: str,
+    *,
+    contexts: Sequence[MatrixContext],
+    filename: str = "Main.lean",
+    concurrency: int = 1,
+    runtime: Runtime | None = None,
+) -> MatrixResult:
+    """Check one source across named contexts using bounded ordinary executions."""
+    return (runtime or default_runtime()).check_matrix(
+        source, contexts=contexts, filename=filename, concurrency=concurrency
+    )
+
+
+async def check_matrix_async(
+    source: str,
+    *,
+    contexts: Sequence[MatrixContext],
+    filename: str = "Main.lean",
+    concurrency: int = 1,
+    runtime: Runtime | None = None,
+) -> MatrixResult:
+    return await asyncio.to_thread(
+        check_matrix,
+        source,
+        contexts=contexts,
+        filename=filename,
+        concurrency=concurrency,
+        runtime=runtime,
+    )

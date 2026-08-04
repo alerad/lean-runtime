@@ -9,6 +9,8 @@ lean-run Main.lean
 lean-run Main.lean --with mathlib@v4.32.2
 lean-run Main.lean --lock environment.lock.json
 lean-run Main.lean --json
+lean-run Main.lean --explain
+lean-run Main.lean --timings
 ```
 
 Use `--lock-out environment.lock.json` with dependencies to retain the exact
@@ -56,6 +58,10 @@ lean-runtime inspect research-stack --packages
 lean-runtime env-list
 lean-runtime cache-status
 lean-runtime doctor
+lean-runtime verify research-stack --offline
+lean-runtime diff old.lock.json new.lock.json
+lean-runtime profile research-stack Main.lean --repeat 5
+lean-runtime matrix matrix.toml Main.lean
 lean-runtime gc
 lean-runtime gc --execute
 ```
@@ -100,6 +106,11 @@ lean-runtime check research-stack Main.lean --include Support/Defs.lean
 
 Resolution and materialization print structured lifecycle progress to stderr.
 Pass global `--quiet` before the subcommand to suppress it.
+
+Pass global `--timings` before the subcommand for high-level timing output. Machine-readable
+execution output uses the versioned `lean-runtime.execution/v1` envelope; the other v1
+schemas and advanced command examples are documented in
+[Verify, understand, compare, and measure](v1-precision.md).
 
 Global `--cache` is repeatable and `--prebuilt auto|require|never` controls
 transparent cache acquisition. `LEAN_RUNTIME_CACHES` accepts a comma-separated

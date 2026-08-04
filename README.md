@@ -96,6 +96,20 @@ result = lean.check(source, deps=["mathlib@v4.32.2"])
 result = lean.check_file("./my-project/MyProject/Main.lean")
 ```
 
+When you need evidence rather than extra setup, the operations CLI can verify, explain,
+compare, and measure the same exact contexts:
+
+```bash
+lean-runtime verify research-stack --offline
+lean-runtime diff previous.lock.json environment.lock.json
+lean-runtime profile research-stack Main.lean --repeat 5
+lean-runtime matrix compatibility.toml Main.lean
+```
+
+Use `lean-run Main.lean --explain` to inspect context routing without executing Lean, and
+`--timings` to expose preparation versus execution time. Successful ordinary checks remain
+one concise line.
+
 Friendly references remain exact: use `mathlib@VERSION`,
 `leancert@VERSION`, `owner/repository@REVISION`, or the explicit
 `github:owner/repository@REVISION` form. Bare floating package names are never
