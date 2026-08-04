@@ -6,6 +6,7 @@ from pathlib import Path
 from lean_runtime.bundles import BundleInfo
 from lean_runtime.cli import main
 from lean_runtime.models import ExecutionResult
+from lean_runtime.verification import VerificationCheck, VerificationReport
 
 
 def test_raw_check_cli_json_result(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -25,7 +26,8 @@ def test_raw_check_cli_json_result(monkeypatch, tmp_path: Path, capsys) -> None:
     assert main(["raw-check", str(source), "--toolchain", "4.32.0", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert payload["toolchain"] == "leanprover/lean4:v4.32.0"
+    assert payload["schema"] == "lean-runtime.execution/v1"
+    assert payload["data"]["toolchain"] == "leanprover/lean4:v4.32.0"
 
 
 def test_managed_check_cli_accepts_supporting_files(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -122,3 +124,20 @@ def test_export_cli_reports_bundle_identity(monkeypatch, tmp_path: Path, capsys)
     monkeypatch.setattr("lean_runtime.cli.Runtime.export_environment", lambda *_args: info)
     assert main(["--quiet", "export", "demo", "--output", str(output)]) == 0
     assert json.loads(capsys.readouterr().out)["manifest_digest"] == info.manifest_digest
+
+
+def test_verify_cli_is_concise_and_json_is_versioned(monkeypatch, capsys) -> None:
+    report = VerificationReport(
+        "demo",
+        "environment",
+        (VerificationCheck("lean_probe_passed", True),),
+        (),
+        (),
+        "lock_" + "a" * 64,
+        "env_" + "b" * 64,
+    )
+    monkeypatch.setattr("lean_runtime.cli.Runtime.verify", lambda *_args, **_kwargs: report)
+    assert main(["--quiet", "verify", "demo"]) == 0
+    assert capsys.readouterr().out == "✓ demo verified\n"
+    assert main(["--quiet", "verify", "demo", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["schema"] == "lean-runtime.verify/v1"

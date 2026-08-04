@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lean-runtime.dev/schemas/execution-v1.schema.json",
+  "type": "object",
+  "required": ["schema", "ok", "data", "warnings", "errors"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "lean-runtime.execution/v1"},
+    "ok": {"type": "boolean"},
+    "data": {"$ref": "#/$defs/execution"},
+    "warnings": {"$ref": "#/$defs/issues"},
+    "errors": {"$ref": "#/$defs/issues"}
+  },
+  "$defs": {
+    "issues": {"type": "array", "items": {"$ref": "#/$defs/issue"}},
+    "issue": {"type": "object", "required": ["code", "message", "details"], "additionalProperties": false, "properties": {"code": {"type": "string"}, "message": {"type": "string"}, "details": {"type": "object"}}},
+    "execution": {"type": "object", "required": ["ok", "exit_code", "toolchain", "stdout", "stderr", "elapsed_seconds"], "properties": {"ok": {"type": "boolean"}, "exit_code": {"type": "integer"}, "toolchain": {"type": "string"}, "command": {"type": "array", "items": {"type": "string"}}, "cwd": {"type": "string"}, "stdout": {"type": "string"}, "stderr": {"type": "string"}, "elapsed_seconds": {"type": "number"}, "timed_out": {"type": "boolean"}, "cancelled": {"type": "boolean"}, "output_truncated": {"type": "boolean"}, "diagnostics": {"type": "array"}, "provenance": {"type": ["object", "null"]}}, "additionalProperties": false}
+  }
+}

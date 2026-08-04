@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from .errors import LeanRuntimeError, ProjectError, SpecificationError
@@ -13,7 +14,9 @@ from .frontmatter import LeanFrontmatter, parse_frontmatter
 from .lockfiles import EnvironmentLock
 from .models import ExecutionResult
 from .policies import ExecutionPolicy
+from .projects import discover_project
 from .runtime import Runtime
+from .wire import envelope, error, serialize_execution_v1
 
 
 def _progress(event: RuntimeEvent) -> None:
@@ -40,6 +43,12 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--home", help="runtime store root")
     root.add_argument("--json", action="store_true")
     root.add_argument("--quiet", action="store_true")
+    root.add_argument(
+        "--explain", action="store_true", help="explain context selection without running"
+    )
+    root.add_argument(
+        "--timings", action="store_true", help="show preparation and execution timings"
+    )
     root.add_argument("--timeout", type=float, default=120)
     return root
 
@@ -69,9 +78,17 @@ def _lock_path(value: str, source: Path, *, embedded: bool) -> Path:
     return path.resolve()
 
 
-def _emit(result: ExecutionResult, *, as_json: bool, filename: str) -> None:
+def _emit(
+    result: ExecutionResult,
+    *,
+    as_json: bool,
+    filename: str,
+    preparation_seconds: float | None = None,
+) -> None:
     if as_json:
-        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
+        print(
+            json.dumps(serialize_execution_v1(result), ensure_ascii=False, indent=2, sort_keys=True)
+        )
         return
     if result.stdout:
         print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
@@ -80,6 +97,10 @@ def _emit(result: ExecutionResult, *, as_json: bool, filename: str) -> None:
     symbol = "✓" if result.ok else "✗"
     status = "accepted" if result.ok else "rejected"
     print(f"{symbol} {filename} {status} in {result.elapsed_seconds:.2f}s")
+    if preparation_seconds is not None:
+        print("Timings")
+        print(f"  context preparation  {preparation_seconds * 1000:.0f} ms")
+        print(f"  Lean execution       {result.elapsed_seconds * 1000:.0f} ms")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -89,6 +110,43 @@ def main(argv: list[str] | None = None) -> int:
         source = source_path.read_text(encoding="utf-8")
         embedded = parse_frontmatter(source)
         context = _combine(arguments, embedded)
+        if arguments.explain:
+            if context.lock is not None:
+                selected = "exact lock"
+                detail = context.lock
+            elif context.requires:
+                selected = "standalone dependencies"
+                detail = ", ".join(context.requires)
+            elif context.toolchain is not None:
+                selected = "standalone toolchain"
+                detail = context.toolchain
+            else:
+                project = discover_project(source_path)
+                selected = "local project"
+                detail = str(project.root)
+            if arguments.json:
+                print(
+                    json.dumps(
+                        {
+                            "schema": "lean-runtime.inspect/v1",
+                            "ok": True,
+                            "data": {
+                                "decision": "context_selected",
+                                "context": selected,
+                                "subject": detail,
+                            },
+                            "warnings": [],
+                            "errors": [],
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+            else:
+                print(f"Context: {selected}\nSelected: {detail}")
+            return 0
+        preparation_started = time.monotonic()
         runtime = Runtime(
             home=arguments.home,
             on_event=None if arguments.quiet or arguments.json else _progress,
@@ -103,32 +161,53 @@ def main(argv: list[str] | None = None) -> int:
                 embedded=arguments.lock is None,
             )
             environment = runtime.ensure(EnvironmentLock.load(lock_path))
+            preparation_seconds = time.monotonic() - preparation_started
             result = environment.check(source, filename=source_path.name, policy=policy)
         elif context.requires:
             lock = runtime.resolve_references(context.requires, toolchain=context.toolchain)
             if arguments.lock_out is not None:
                 lock.write(arguments.lock_out)
             environment = runtime.ensure(lock)
+            preparation_seconds = time.monotonic() - preparation_started
             result = environment.check(source, filename=source_path.name, policy=policy)
         elif arguments.lock_out is not None:
             raise SpecificationError(
                 "--lock-out requires dependencies declared with --with or frontmatter"
             )
         elif context.toolchain is not None:
+            preparation_seconds = time.monotonic() - preparation_started
             result = runtime.check_file(source_path, toolchain=context.toolchain, policy=policy)
         else:
             try:
+                preparation_seconds = time.monotonic() - preparation_started
                 result = runtime.check_file(source_path, policy=policy)
             except ProjectError as exc:
                 raise SpecificationError(
                     "the file has no execution context; add frontmatter, pass --with or "
                     "--toolchain, provide --lock, or place it in a pinned Lake project"
                 ) from exc
-        _emit(result, as_json=arguments.json, filename=source_path.name)
+        _emit(
+            result,
+            as_json=arguments.json,
+            filename=source_path.name,
+            preparation_seconds=preparation_seconds if arguments.timings else None,
+        )
         return 0 if result.ok else 1
     except (LeanRuntimeError, OSError, UnicodeError, ValueError) as exc:
         if arguments.json:
-            print(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2))
+            print(
+                json.dumps(
+                    envelope(
+                        "lean-runtime.execution/v1",
+                        ok=False,
+                        data={},
+                        errors=[error("invocation_failed", str(exc))],
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
         else:
             print(f"lean-run: {exc}", file=sys.stderr)
         return 2

@@ -33,7 +33,13 @@ from .models import (
 )
 from .policies import ExecutionPolicy
 from .serialization import sha256_id, write_json_atomic
-from .store import EnvironmentStore, clone_tree, environment_identity, platform_record
+from .store import (
+    EnvironmentStore,
+    clone_tree,
+    environment_identity,
+    platform_compatibility,
+    platform_record,
+)
 from .toolchains import ToolchainManager
 
 ENVIRONMENT_SCHEMA = "lean-runtime-published-environment/1"
@@ -1057,6 +1063,7 @@ class EnvironmentManager:
                 "lock_id": lock.lock_id,
                 "toolchain": lock.toolchain,
                 "platform": platform_record(),
+                "platform_compatibility": platform_compatibility(),
                 "build_profile": build_profile,
                 "status": "ready",
                 "created_at": _now(),

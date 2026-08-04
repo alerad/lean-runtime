@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +13,31 @@ from .environments import ExecutionCapture
 from .errors import LeanRuntimeError, MaterializationError, ResolutionError
 from .events import RuntimeEvent
 from .lockfiles import EnvironmentLock
+from .matrix import load_matrix
 from .models import ExecutionResult
 from .policies import ExecutionPolicy
 from .runtime import Runtime
 from .specs import EnvironmentSpec
+from .wire import (
+    envelope,
+    error,
+    serialize_diff_v1,
+    serialize_execution_v1,
+    serialize_matrix_v1,
+    serialize_profile_v1,
+    serialize_verify_v1,
+)
+
+
+def _schema_for(command: str) -> str:
+    return {
+        "verify": "lean-runtime.verify/v1",
+        "diff": "lean-runtime.diff/v1",
+        "profile": "lean-runtime.profile/v1",
+        "matrix": "lean-runtime.matrix/v1",
+        "gc": "lean-runtime.gc/v1",
+        "inspect": "lean-runtime.inspect/v1",
+    }.get(command, "lean-runtime.execution/v1")
 
 
 def _json(value: Any) -> None:
@@ -35,7 +57,7 @@ def _cli_source_name(path: Path) -> str:
 
 def _emit_result(result: ExecutionResult, as_json: bool) -> None:
     if as_json:
-        _json(result.to_dict())
+        _json(serialize_execution_v1(result))
         return
     if result.stdout:
         print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
@@ -71,6 +93,8 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="lean-runtime")
     root.add_argument("--home", help="runtime store root")
     root.add_argument("--quiet", action="store_true", help="suppress progress events")
+    root.add_argument("--verbose", action="store_true", help="show detailed decisions and checks")
+    root.add_argument("--timings", action="store_true", help="show high-level operation timings")
     root.add_argument(
         "--cache",
         action="append",
@@ -159,6 +183,7 @@ def parser() -> argparse.ArgumentParser:
     inspect = commands.add_parser("inspect", help="inspect a published environment")
     inspect.add_argument("environment")
     inspect.add_argument("--packages", action="store_true", help="include exact package locks")
+    inspect.add_argument("--explain", action="store_true", help="explain identity and reuse")
 
     commands.add_parser("env-list", help="list published environments")
     commands.add_parser("cache-status", help="show cache counts and disk usage")
@@ -169,6 +194,30 @@ def parser() -> argparse.ArgumentParser:
     audit.add_argument(
         "--rebuild", action="store_true", help="rebuild the exact lock and compare artifacts"
     )
+
+    verify = commands.add_parser("verify", help="verify a lock or published environment")
+    verify.add_argument("subject")
+    verify.add_argument("--offline", action="store_true")
+    verify.add_argument("--rebuild", action="store_true")
+    verify.add_argument("--json", action="store_true")
+
+    diff = commands.add_parser("diff", help="compare two exact Lean contexts")
+    diff.add_argument("left")
+    diff.add_argument("right")
+    diff.add_argument("--json", action="store_true")
+
+    profile = commands.add_parser("profile", help="measure repeated checks in one environment")
+    profile.add_argument("environment")
+    profile.add_argument("file", type=Path)
+    profile.add_argument("--warmup", type=int, default=1)
+    profile.add_argument("--repeat", type=int, default=5)
+    profile.add_argument("--json", action="store_true")
+
+    matrix = commands.add_parser("matrix", help="check one file across exact contexts")
+    matrix.add_argument("configuration", type=Path)
+    matrix.add_argument("file", type=Path)
+    matrix.add_argument("--concurrency", type=int, default=1)
+    matrix.add_argument("--json", action="store_true")
 
     replay = commands.add_parser("replay", help="replay a canonical execution capture")
     replay.add_argument("capture", type=Path)
@@ -204,6 +253,7 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    operation_started = time.monotonic()
     runtime = Runtime(
         home=args.home,
         on_event=None if args.quiet else _progress,
@@ -225,10 +275,22 @@ def main(argv: list[str] | None = None) -> int:
                 print(lock.lock_id)
             else:
                 _json(lock.to_dict())
+            if args.timings:
+                elapsed_ms = (time.monotonic() - operation_started) * 1000
+                print(
+                    f"Timings\n  resolution  {elapsed_ms:.0f} ms",
+                    file=sys.stderr,
+                )
             return 0
         if args.command == "ensure":
             environment = runtime.ensure(EnvironmentLock.load(args.lock), name=args.name)
             _json(environment.inspect().to_dict())
+            if args.timings:
+                elapsed_ms = (time.monotonic() - operation_started) * 1000
+                print(
+                    f"Timings\n  environment preparation  {elapsed_ms:.0f} ms",
+                    file=sys.stderr,
+                )
             return 0
         if args.command == "pull":
             runtime.prebuilt = "require"
@@ -271,13 +333,27 @@ def main(argv: list[str] | None = None) -> int:
             _json(environment.inspect().to_dict())
             return 0
         if args.command == "inspect":
-            environment = runtime.open(args.environment)
-            payload = environment.inspect().to_dict()
-            if args.packages:
-                payload["package_locks"] = [
-                    package.to_dict() for package in environment.lock.packages
-                ]
-            _json(payload)
+            subject_path = Path(args.environment).expanduser()
+            if args.explain and subject_path.is_file():
+                lock = EnvironmentLock.load(subject_path)
+                payload = {
+                    "subject": str(subject_path),
+                    "subject_kind": "lock",
+                    "lock_id": lock.lock_id,
+                    "decisions": [item.to_dict() for item in runtime.explain(args.environment)],
+                }
+            else:
+                environment = runtime.open(args.environment)
+                payload = environment.inspect().to_dict()
+                if args.packages:
+                    payload["package_locks"] = [
+                        package.to_dict() for package in environment.lock.packages
+                    ]
+                if args.explain:
+                    payload["decisions"] = [
+                        item.to_dict() for item in runtime.explain(args.environment)
+                    ]
+            _json(envelope("lean-runtime.inspect/v1", ok=True, data=payload))
             return 0
         if args.command == "env-list":
             _json(list(runtime.list_environments()))
@@ -293,6 +369,70 @@ def main(argv: list[str] | None = None) -> int:
             audit_report = runtime.audit(args.environment, rebuild=args.rebuild)
             _json(audit_report.to_dict())
             return 0 if audit_report.ok else 2
+        if args.command == "verify":
+            report = runtime.verify(args.subject, offline=args.offline, rebuild=args.rebuild)
+            if args.json:
+                _json(serialize_verify_v1(report))
+            elif report.ok:
+                print(f"✓ {args.subject} verified")
+                if args.verbose:
+                    for check in report.checks:
+                        marker = "-" if check.skipped else "✓" if check.ok else "!"
+                        print(f"{marker} {check.code.replace('_', ' ')}")
+            else:
+                failure = report.failures[0]
+                print(f"✗ {args.subject} failed verification", file=sys.stderr)
+                print(
+                    str((failure.details or {}).get("message", failure.code)),
+                    file=sys.stderr,
+                )
+            return 0 if report.ok else 1
+        if args.command == "diff":
+            difference = runtime.diff(args.left, args.right)
+            if args.json:
+                _json(serialize_diff_v1(difference))
+            elif difference.equal:
+                print("Contexts are identical.")
+            else:
+                print(difference.summary)
+                for item in difference.changes:
+                    print(f"{item.path}\n  {item.before} -> {item.after}")
+            return 0
+        if args.command == "profile":
+            profile_report = runtime.profile(
+                args.environment, args.file, warmup=args.warmup, repeat=args.repeat
+            )
+            if args.json:
+                _json(serialize_profile_v1(profile_report))
+            else:
+                stats = profile_report.statistics()
+                print(f"Profile: {args.file.name}")
+                print(f"Samples: {len(profile_report.results)}")
+                for name in ("min", "median", "mean", "p95", "max"):
+                    value = stats[name]
+                    if value is not None:
+                        print(f"  {name:<6} {value:g} ms")
+            return 0 if profile_report.ok else 1
+        if args.command == "matrix":
+            contexts = load_matrix(args.configuration)
+            matrix_result = runtime.check_matrix(
+                args.file.read_text(encoding="utf-8"),
+                contexts=contexts,
+                filename=args.file.name,
+                base=args.configuration.parent,
+                concurrency=args.concurrency,
+            )
+            if args.json:
+                _json(serialize_matrix_v1(matrix_result))
+            else:
+                print("Context\tResult\tTime\tEnvironment")
+                for entry in matrix_result.entries:
+                    result = entry.result
+                    print(
+                        f"{entry.context}\t{'accepted' if result.ok else 'rejected'}\t"
+                        f"{result.elapsed_seconds:.2f}s\t{result.environment_id or '-'}"
+                    )
+            return 0 if matrix_result.ok else 1
         if args.command == "replay":
             capture = ExecutionCapture.load(args.capture)
             result = runtime.replay_capture(capture)
@@ -311,7 +451,13 @@ def main(argv: list[str] | None = None) -> int:
                     dry_run=not args.execute,
                     minimum_age_seconds=args.minimum_age_hours * 3600,
                 ).to_dict()
-            _json(gc_payload if args.include_blobs else gc_report.to_dict())
+            _json(
+                envelope(
+                    "lean-runtime.gc/v1",
+                    ok=True,
+                    data=gc_payload if args.include_blobs else gc_report.to_dict(),
+                )
+            )
             return 0
         if args.command == "check":
             if args.package_refs:
@@ -361,20 +507,44 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
             )
     except (ResolutionError, MaterializationError) as exc:
-        _json(
-            {
-                "error": str(exc),
-                "phase": exc.phase,
-                "command": list(exc.command),
-                "exit_code": exc.exit_code,
-                "output": exc.output,
-            }
-        )
+        details = {
+            "phase": exc.phase,
+            "command": list(exc.command),
+            "exit_code": exc.exit_code,
+            "output": exc.output,
+        }
+        if getattr(args, "json", False):
+            _json(
+                envelope(
+                    _schema_for(args.command),
+                    ok=False,
+                    data={},
+                    errors=[error("operation_failed", str(exc), details=details)],
+                )
+            )
+        else:
+            print(f"lean-runtime: {exc}", file=sys.stderr)
         return 2
     except (LeanRuntimeError, OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
-        print(f"lean-runtime: {exc}", file=sys.stderr)
+        if getattr(args, "json", False):
+            _json(
+                envelope(
+                    _schema_for(args.command),
+                    ok=False,
+                    data={},
+                    errors=[error("invocation_failed", str(exc))],
+                )
+            )
+        else:
+            print(f"lean-runtime: {exc}", file=sys.stderr)
         return 2
     _emit_result(result, args.json)
+    if args.timings:
+        print(
+            f"Timings\n  total operation  {(time.monotonic() - operation_started) * 1000:.0f} ms\n"
+            f"  Lean execution   {result.elapsed_seconds * 1000:.0f} ms",
+            file=sys.stderr,
+        )
     return 0 if result.ok else 1
 
 
