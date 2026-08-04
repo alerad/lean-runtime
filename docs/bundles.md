@@ -177,19 +177,19 @@ Verify the embedded source markers, Git commits and trees, root lock material,
 Lean probe, and build-output inventory at any time:
 
 ```bash
-lean-runtime audit research-stack
+lean-runtime verify research-stack
 ```
 
 For an independent check, reacquire and rebuild the exact lock in a temporary
 store and compare normalized artifact inventories:
 
 ```bash
-lean-runtime audit research-stack --rebuild
+lean-runtime verify research-stack --rebuild
 ```
 
 `source_verified` and `probe_passed` are the trust result. `artifact_match` is a
 separate byte-reproducibility measurement: a mismatch is reported but is not
-treated as a failed proof audit, because native toolchains and package build
+treated as failed source/proof verification, because native toolchains and package build
 steps are not promised to produce byte-identical artifacts.
 
 ## Format version 1

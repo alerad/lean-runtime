@@ -6,6 +6,57 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 Severity = Literal["error", "warning", "information", "unknown"]
+TimingPhase = Literal[
+    "toolchain",
+    "resolution",
+    "source_acquisition",
+    "cache_lookup",
+    "cache_download",
+    "artifact_hydration",
+    "build",
+    "publication",
+    "environment_open",
+    "instance_creation",
+    "input_staging",
+    "execution",
+    "result_collection",
+    "result_publication",
+    "cleanup",
+]
+TIMING_PHASES = frozenset(
+    {
+        "toolchain",
+        "resolution",
+        "source_acquisition",
+        "cache_lookup",
+        "cache_download",
+        "artifact_hydration",
+        "build",
+        "publication",
+        "environment_open",
+        "instance_creation",
+        "input_staging",
+        "execution",
+        "result_collection",
+        "result_publication",
+        "cleanup",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PhaseTiming:
+    """One stable, user-facing operation phase measured with a monotonic clock."""
+
+    phase: TimingPhase
+    duration_ms: int
+    performed: bool = True
+
+    def __post_init__(self) -> None:
+        if self.phase not in TIMING_PHASES:
+            raise ValueError(f"unsupported timing phase: {self.phase!r}")
+        if self.duration_ms < 0:
+            raise ValueError("timing duration must be nonnegative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +125,7 @@ class ExecutionResult:
     output_truncated: bool = False
     diagnostics: tuple[Diagnostic, ...] = field(default_factory=tuple)
     provenance: ExecutionProvenance | None = None
+    timings: tuple[PhaseTiming, ...] = field(default_factory=tuple)
 
     @property
     def environment_id(self) -> str | None:

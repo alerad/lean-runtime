@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .audit import AuditReport, audit_environment
 from .backends import Backend, LocalBackend
 from .bundles import BundleInfo, EnvironmentBundles
 from .decisions import Decision
@@ -29,7 +29,7 @@ from .events import EventCallback, EventEmitter
 from .health import DoctorReport, diagnose
 from .lockfiles import EnvironmentLock
 from .matrix import MatrixContext, MatrixResult, run_matrix
-from .models import ExecutionProvenance, ExecutionResult, ProjectProvenance
+from .models import ExecutionProvenance, ExecutionResult, PhaseTiming, ProjectProvenance
 from .oci import (
     DEFAULT_CACHE_REPOSITORIES,
     OCIEnvironmentCache,
@@ -120,7 +120,7 @@ class Runtime:
         self.backend = backend or LocalBackend()
         self.events = EventEmitter(on_event)
         self.store = EnvironmentStore(self.home)
-        self.resolver = EnvironmentResolver(self.toolchains, self.store, self.events)
+        self.resolver = EnvironmentResolver(self.toolchains, self.store, self.backend, self.events)
         self.environments = EnvironmentManager(
             self.store, self.toolchains, self.backend, self.events
         )
@@ -151,8 +151,14 @@ class Runtime:
             for value in configured_caches
         )
 
-    def resolve(self, spec: EnvironmentSpec, *, timeout: float = 900) -> EnvironmentLock:
-        return self.resolver.resolve(spec, timeout=timeout)
+    def resolve(
+        self,
+        spec: EnvironmentSpec,
+        *,
+        timeout: float = 900,
+        cancel: threading.Event | None = None,
+    ) -> EnvironmentLock:
+        return self.resolver.resolve(spec, timeout=timeout, cancel=cancel)
 
     def ensure(
         self,
@@ -160,6 +166,7 @@ class Runtime:
         *,
         name: str | None = None,
         build_profile: str = "release",
+        cancel: threading.Event | None = None,
     ) -> Environment:
         environment_id = environment_identity(lock, build_profile)
         destination = self.store.environment_path(environment_id)
@@ -191,7 +198,7 @@ class Runtime:
                     "no compatible prebuilt environment was found; prebuilt=require "
                     "does not permit a source build." + nearest
                 )
-        return self.environments.ensure(lock, name=name, build_profile=build_profile)
+        return self.environments.ensure(lock, name=name, build_profile=build_profile, cancel=cancel)
 
     def open(self, identifier: str) -> Environment:
         """Open a published environment without resolution or network access."""
@@ -236,19 +243,14 @@ class Runtime:
                 publisher.repository, result.index_digest
             )
         if attest:
-            report = self.audit(environment.id)
+            report = self.verify(environment.id)
+            report.raise_for_error()
             CosignVerifier(executable=self.cosign_executable).attest(
                 publisher.repository,
                 result.index_digest or result.manifest_digest,
                 report.to_dict(),
             )
         return result
-
-    def audit(self, identifier: str, *, rebuild: bool = False) -> AuditReport:
-        """Verify locked sources and optionally compare an independent source rebuild."""
-        return audit_environment(
-            self.open(identifier), self.toolchains, self.backend, self.events, rebuild=rebuild
-        )
 
     def verify(
         self,
@@ -363,6 +365,7 @@ class Runtime:
         filename: str = "Main.lean",
         base: str | os.PathLike[str] = ".",
         concurrency: int = 1,
+        cancel: threading.Event | None = None,
     ) -> MatrixResult:
         """Check one input through ordinary execution paths for each named context."""
         return run_matrix(
@@ -372,6 +375,7 @@ class Runtime:
             contexts=tuple(contexts),
             base=Path(base).expanduser().resolve(),
             concurrency=concurrency,
+            cancel=cancel,
         )
 
     def explain(self, subject: str | os.PathLike[str]) -> tuple[Decision, ...]:
@@ -506,10 +510,13 @@ class Runtime:
         *,
         toolchain: str | None = None,
         timeout: float = 900,
+        cancel: threading.Event | None = None,
     ) -> EnvironmentLock:
         """Discover package references and resolve their exact Lake graph."""
         return self.resolve(
-            self.spec_from_references(packages, toolchain=toolchain), timeout=timeout
+            self.spec_from_references(packages, toolchain=toolchain),
+            timeout=timeout,
+            cancel=cancel,
         )
 
     def ensure_references(
@@ -519,10 +526,13 @@ class Runtime:
         toolchain: str | None = None,
         name: str | None = None,
         timeout: float = 900,
+        cancel: threading.Event | None = None,
     ) -> Environment:
         """Build or reopen the environment described by package references."""
         return self.ensure(
-            self.resolve_references(packages, toolchain=toolchain, timeout=timeout), name=name
+            self.resolve_references(packages, toolchain=toolchain, timeout=timeout, cancel=cancel),
+            name=name,
+            cancel=cancel,
         )
 
     def check(
@@ -536,6 +546,7 @@ class Runtime:
         filename: str = "Main.lean",
         timeout: float | None = None,
         policy: ExecutionPolicy | None = None,
+        cancel: threading.Event | None = None,
     ) -> ExecutionResult:
         """Check source in a content-addressed environment or a raw toolchain/project."""
         selected_policy = policy or ExecutionPolicy(timeout_seconds=timeout or 120)
@@ -548,14 +559,14 @@ class Runtime:
         if project is not None and packages:
             raise SpecificationError("check cannot combine project= with packages=")
         if packages:
-            resolved = self.ensure_references(packages, toolchain=toolchain)
-            return resolved.check(source, filename=filename, policy=selected_policy)
+            resolved = self.ensure_references(packages, toolchain=toolchain, cancel=cancel)
+            return resolved.check(source, filename=filename, policy=selected_policy, cancel=cancel)
         if environment is not None:
             resolved = self._environment(environment)
-            return resolved.check(source, filename=filename, policy=selected_policy)
+            return resolved.check(source, filename=filename, policy=selected_policy, cancel=cancel)
         if project is not None:
             return self.project(project, toolchain=toolchain).check(
-                source, filename=filename, policy=selected_policy
+                source, filename=filename, policy=selected_policy, cancel=cancel
             )
         return self._raw_check(
             source,
@@ -563,6 +574,7 @@ class Runtime:
             project=project,
             filename=filename,
             policy=selected_policy,
+            cancel=cancel,
         )
 
     def check_file(
@@ -575,6 +587,7 @@ class Runtime:
         project: str | os.PathLike[str] | None = None,
         timeout: float | None = None,
         policy: ExecutionPolicy | None = None,
+        cancel: threading.Event | None = None,
     ) -> ExecutionResult:
         source_path = Path(path).expanduser().resolve()
         selected_policy = policy or ExecutionPolicy(timeout_seconds=timeout or 120)
@@ -583,10 +596,12 @@ class Runtime:
         if environment is None and not packages:
             if project is not None:
                 return self.project(project, toolchain=toolchain).check_file(
-                    source_path, policy=selected_policy
+                    source_path, policy=selected_policy, cancel=cancel
                 )
             if toolchain is None:
-                return self.project(source_path).check_file(source_path, policy=selected_policy)
+                return self.project(source_path).check_file(
+                    source_path, policy=selected_policy, cancel=cancel
+                )
         return self.check(
             source_path.read_text(encoding="utf-8"),
             filename=source_path.name,
@@ -596,6 +611,7 @@ class Runtime:
             project=project,
             timeout=timeout,
             policy=selected_policy,
+            cancel=cancel,
         )
 
     def check_files(
@@ -605,10 +621,11 @@ class Runtime:
         entrypoint: str = "Main.lean",
         environment: EnvironmentReference,
         policy: ExecutionPolicy | None = None,
+        cancel: threading.Event | None = None,
     ) -> ExecutionResult:
         """Check a multi-file request in a managed environment."""
         return self._environment(environment).check_files(
-            files, entrypoint=entrypoint, policy=policy
+            files, entrypoint=entrypoint, policy=policy, cancel=cancel
         )
 
     def build(
@@ -715,6 +732,7 @@ class Runtime:
         project: str | os.PathLike[str] | None,
         filename: str,
         policy: ExecutionPolicy,
+        cancel: threading.Event | None,
     ) -> ExecutionResult:
         project_root = Path(project).expanduser().resolve() if project else None
         selected = normalize_toolchain(toolchain) if toolchain else None
@@ -742,6 +760,7 @@ class Runtime:
                 toolchain=selected,
                 source_digest=sha256_text(source),
                 policy=policy,
+                cancel=cancel,
             )
 
     def _check_project_file(
@@ -750,6 +769,7 @@ class Runtime:
         source: Path,
         *,
         policy: ExecutionPolicy,
+        cancel: threading.Event | None = None,
     ) -> ExecutionResult:
         relative = source.relative_to(context.root).as_posix()
         command = self.toolchains.command(context.toolchain, "lake", "env", "lean", relative)
@@ -761,6 +781,7 @@ class Runtime:
             policy=policy,
             project=context.provenance(),
             logical_command=("lake", "env", "lean", relative),
+            cancel=cancel,
         )
 
     def _check_project_source(
@@ -770,6 +791,7 @@ class Runtime:
         *,
         filename: str,
         policy: ExecutionPolicy,
+        cancel: threading.Event | None = None,
     ) -> ExecutionResult:
         safe_filename = Path(filename).name
         if not safe_filename.endswith(".lean"):
@@ -790,6 +812,7 @@ class Runtime:
                 policy=policy,
                 project=provenance,
                 logical_command=("lake", "env", "lean", safe_filename),
+                cancel=cancel,
             )
 
     def _build_project(
@@ -798,6 +821,7 @@ class Runtime:
         *,
         targets: Sequence[str],
         policy: ExecutionPolicy,
+        cancel: threading.Event | None = None,
     ) -> ExecutionResult:
         command = self.toolchains.command(context.toolchain, "lake", "build", *targets)
         return self._raw_result(
@@ -808,6 +832,7 @@ class Runtime:
             policy=policy,
             project=context.provenance(),
             logical_command=("lake", "build", *targets),
+            cancel=cancel,
         )
 
     def _raw_result(
@@ -820,6 +845,7 @@ class Runtime:
         policy: ExecutionPolicy,
         project: ProjectProvenance | None = None,
         logical_command: Sequence[str] | None = None,
+        cancel: threading.Event | None = None,
     ) -> ExecutionResult:
         started_at = datetime.now(timezone.utc).isoformat()
         request_command = (
@@ -852,11 +878,14 @@ class Runtime:
             cwd=cwd,
             environment=self.toolchains.environment,
             policy=policy,
+            cancel=cancel,
         )
         output = "\n".join(part for part in (raw.stdout, raw.stderr) if part)
         diagnostics = parse_diagnostics(output)
         if raw.timed_out:
             diagnostics += (error_diagnostic("Lean execution exceeded its time limit"),)
+        if raw.cancelled:
+            diagnostics += (error_diagnostic("Lean execution was cancelled"),)
         provenance = ExecutionProvenance(
             environment_id=None,
             execution_id=execution_id,
@@ -886,4 +915,5 @@ class Runtime:
             output_truncated=raw.output_truncated,
             diagnostics=diagnostics,
             provenance=provenance,
+            timings=(PhaseTiming("execution", round(raw.elapsed_seconds * 1000)),),
         )

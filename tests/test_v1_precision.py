@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +10,7 @@ import pytest
 
 from lean_runtime import EnvironmentLock, LockedPackage, MatrixContext, Runtime
 from lean_runtime.diffing import diff_locks
+from lean_runtime.facade import check_matrix_async
 from lean_runtime.matrix import load_matrix, run_matrix
 from lean_runtime.models import ExecutionResult
 from lean_runtime.profiling import run_profile
@@ -112,6 +115,70 @@ def test_matrix_parser_is_closed_and_execution_preserves_context_order(tmp_path:
     configuration.write_text('[[context]]\nname="bad"\ntoolchain="4.32.0"\nextra=true\n')
     with pytest.raises(Exception, match="unknown fields"):
         load_matrix(configuration)
+
+
+def test_matrix_passes_one_cancellation_signal_to_every_active_check(tmp_path: Path) -> None:
+    observed: list[threading.Event | None] = []
+
+    def check(*_args, **kwargs):
+        observed.append(kwargs.get("cancel"))
+        return result()
+
+    cancel = threading.Event()
+    runtime = SimpleNamespace(check=check)
+    contexts = (
+        MatrixContext("one", toolchain="4.32.0"),
+        MatrixContext("two", toolchain="4.32.0"),
+    )
+    run_matrix(
+        runtime,
+        "source",
+        filename="Main.lean",
+        contexts=contexts,
+        base=tmp_path,
+        concurrency=2,
+        cancel=cancel,
+    )
+    assert observed == [cancel, cancel]
+
+
+def test_async_matrix_cancellation_waits_for_active_checks_to_stop() -> None:
+    stopped = threading.Event()
+
+    def check(*_args, **kwargs):
+        cancel = kwargs["cancel"]
+        assert cancel is not None
+        cancel.wait(5)
+        stopped.set()
+        return result(ok=False)
+
+    runtime = SimpleNamespace(
+        check_matrix=lambda source, **kwargs: run_matrix(
+            SimpleNamespace(check=check),
+            source,
+            filename=kwargs["filename"],
+            contexts=tuple(kwargs["contexts"]),
+            base=Path("."),
+            concurrency=kwargs["concurrency"],
+            cancel=kwargs["cancel"],
+        )
+    )
+
+    async def cancel_matrix() -> None:
+        task = asyncio.create_task(
+            check_matrix_async(
+                "source",
+                contexts=(MatrixContext("one", toolchain="4.32.0"),),
+                runtime=runtime,
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_matrix())
+    assert stopped.is_set()
 
 
 def test_execution_serializer_has_stable_envelope() -> None:

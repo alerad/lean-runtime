@@ -132,6 +132,13 @@ result = await environment.check_files_async(files, entrypoint="Main.lean")
 results = await environment.check_many_async(sources, concurrency=8)
 ```
 
+Mutable project checks and `check_matrix_async()` use the same cancellation signal; cancelling
+the coroutine terminates active local Lean processes before control returns to the caller.
+Synchronous `setup()`, `check()`, and `Runtime.resolve()` accept a `threading.Event` through
+`cancel=`. The signal interrupts toolchain installation, Lake resolution, environment builds,
+and waits for another process materializing the same environment. Initial shorthand-reference
+discovery and OCI transfers remain bounded by their transport timeouts.
+
 ## Interactive sessions
 
 `spawn_interactive()` keeps a tool alive inside one disposable instance and
@@ -198,8 +205,8 @@ because it cannot enforce them.
 
 ## Result and provenance
 
-`ExecutionResult` includes the exit code, command, output, duration, timeout,
-cancellation and truncation flags, parsed diagnostics, and provenance.
+`ExecutionResult` includes the exit code, command, output, duration, stable phase timings,
+timeout, cancellation and truncation flags, parsed diagnostics, and provenance.
 Provenance includes:
 
 - unique `execution_id`;

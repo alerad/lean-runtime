@@ -14,10 +14,11 @@ from .errors import LeanRuntimeError, MaterializationError, ResolutionError
 from .events import RuntimeEvent
 from .lockfiles import EnvironmentLock
 from .matrix import load_matrix
-from .models import ExecutionResult
+from .models import ExecutionResult, PhaseTiming
 from .policies import ExecutionPolicy
 from .runtime import Runtime
 from .specs import EnvironmentSpec
+from .timings import render_timings
 from .wire import (
     envelope,
     error,
@@ -94,7 +95,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--home", help="runtime store root")
     root.add_argument("--quiet", action="store_true", help="suppress progress events")
     root.add_argument("--verbose", action="store_true", help="show detailed decisions and checks")
-    root.add_argument("--timings", action="store_true", help="show high-level operation timings")
+    root.add_argument("--timings", action="store_true", help="show stable operation phase timings")
     root.add_argument(
         "--cache",
         action="append",
@@ -189,12 +190,6 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("cache-status", help="show cache counts and disk usage")
     commands.add_parser("doctor", help="check local prerequisites and cache health")
 
-    audit = commands.add_parser("audit", help="verify locked sources and build artifacts")
-    audit.add_argument("environment")
-    audit.add_argument(
-        "--rebuild", action="store_true", help="rebuild the exact lock and compare artifacts"
-    )
-
     verify = commands.add_parser("verify", help="verify a lock or published environment")
     verify.add_argument("subject")
     verify.add_argument("--offline", action="store_true")
@@ -276,9 +271,14 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 _json(lock.to_dict())
             if args.timings:
-                elapsed_ms = (time.monotonic() - operation_started) * 1000
                 print(
-                    f"Timings\n  resolution  {elapsed_ms:.0f} ms",
+                    render_timings(
+                        (
+                            PhaseTiming(
+                                "resolution", round((time.monotonic() - operation_started) * 1000)
+                            ),
+                        )
+                    ),
                     file=sys.stderr,
                 )
             return 0
@@ -286,9 +286,15 @@ def main(argv: list[str] | None = None) -> int:
             environment = runtime.ensure(EnvironmentLock.load(args.lock), name=args.name)
             _json(environment.inspect().to_dict())
             if args.timings:
-                elapsed_ms = (time.monotonic() - operation_started) * 1000
                 print(
-                    f"Timings\n  environment preparation  {elapsed_ms:.0f} ms",
+                    render_timings(
+                        (
+                            PhaseTiming(
+                                "environment_open",
+                                round((time.monotonic() - operation_started) * 1000),
+                            ),
+                        )
+                    ),
                     file=sys.stderr,
                 )
             return 0
@@ -336,15 +342,24 @@ def main(argv: list[str] | None = None) -> int:
             subject_path = Path(args.environment).expanduser()
             if args.explain and subject_path.is_file():
                 lock = EnvironmentLock.load(subject_path)
-                payload = {
+                payload: dict[str, Any] = {
                     "subject": str(subject_path),
                     "subject_kind": "lock",
                     "lock_id": lock.lock_id,
+                    "environment": None,
+                    "package_locks": [],
                     "decisions": [item.to_dict() for item in runtime.explain(args.environment)],
                 }
             else:
                 environment = runtime.open(args.environment)
-                payload = environment.inspect().to_dict()
+                payload = {
+                    "subject": args.environment,
+                    "subject_kind": "environment",
+                    "lock_id": environment.lock.lock_id,
+                    "environment": environment.inspect().to_dict(),
+                    "package_locks": [],
+                    "decisions": [],
+                }
                 if args.packages:
                     payload["package_locks"] = [
                         package.to_dict() for package in environment.lock.packages
@@ -365,10 +380,6 @@ def main(argv: list[str] | None = None) -> int:
             doctor_report = runtime.doctor()
             _json(doctor_report.to_dict())
             return 0 if doctor_report.ok else 2
-        if args.command == "audit":
-            audit_report = runtime.audit(args.environment, rebuild=args.rebuild)
-            _json(audit_report.to_dict())
-            return 0 if audit_report.ok else 2
         if args.command == "verify":
             report = runtime.verify(args.subject, offline=args.offline, rebuild=args.rebuild)
             if args.json:
@@ -445,7 +456,10 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=not args.execute,
                 minimum_age_seconds=args.minimum_age_hours * 3600,
             )
-            gc_payload: dict[str, Any] = {"environments": gc_report.to_dict()}
+            gc_payload: dict[str, Any] = {
+                "environments": gc_report.to_dict(),
+                "oci_blobs": None,
+            }
             if args.include_blobs:
                 gc_payload["oci_blobs"] = runtime.gc_oci_blobs(
                     dry_run=not args.execute,
@@ -455,7 +469,7 @@ def main(argv: list[str] | None = None) -> int:
                 envelope(
                     "lean-runtime.gc/v1",
                     ok=True,
-                    data=gc_payload if args.include_blobs else gc_report.to_dict(),
+                    data=gc_payload,
                 )
             )
             return 0
@@ -540,11 +554,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     _emit_result(result, args.json)
     if args.timings:
-        print(
-            f"Timings\n  total operation  {(time.monotonic() - operation_started) * 1000:.0f} ms\n"
-            f"  Lean execution   {result.elapsed_seconds * 1000:.0f} ms",
-            file=sys.stderr,
-        )
+        print(render_timings(result.timings), file=sys.stderr)
     return 0 if result.ok else 1
 
 

@@ -320,16 +320,27 @@ class LocalBackend:
             reader.start()
         timed_out = False
         cancelled = False
-        while process.poll() is None:
-            if cancel is not None and cancel.is_set():
-                cancelled = True
-                self._stop(process)
-                break
-            if time.monotonic() - started >= policy.timeout_seconds:
-                timed_out = True
-                self._stop(process)
-                break
-            time.sleep(0.02)
+        try:
+            while process.poll() is None:
+                if cancel is not None and cancel.is_set():
+                    cancelled = True
+                    self._stop(process)
+                    break
+                if time.monotonic() - started >= policy.timeout_seconds:
+                    timed_out = True
+                    self._stop(process)
+                    break
+                time.sleep(0.02)
+        except BaseException:
+            self._stop(process)
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._kill(process)
+                process.wait()
+            for reader in readers:
+                reader.join()
+            raise
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:

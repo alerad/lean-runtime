@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
-from lean_runtime import ExecutionJob, Runtime, ToolchainError
+from lean_runtime import EnvironmentSpec, ExecutionJob, ResolutionError, Runtime, ToolchainError
 
 
 class FakeToolchains:
@@ -17,7 +18,7 @@ class FakeToolchains:
     def environment(self) -> dict[str, str]:
         return os.environ.copy()
 
-    def ensure(self, toolchain: str) -> str:
+    def ensure(self, toolchain: str, **_kwargs: object) -> str:
         return toolchain
 
     def command(self, toolchain: str, executable: str, *args: str) -> list[str]:
@@ -79,3 +80,20 @@ def test_build_infers_project_toolchain(tmp_path: Path) -> None:
     result = runtime.build(tmp_path, targets=["Example"])
     assert result.ok
     assert result.toolchain == "leanprover/lean4:v4.32.0"
+
+
+def test_resolution_cancellation_stops_lake_before_lock_publication(tmp_path: Path) -> None:
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=FakeToolchains(tmp_path / "runtime"),  # type: ignore[arg-type]
+        caches=[],
+    )
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(ResolutionError, match="cancelled") as captured:
+        runtime.resolve(
+            EnvironmentSpec("leanprover/lean4:v4.32.0", ()),
+            cancel=cancel,
+        )
+    assert captured.value.exit_code == 130
+    assert not list(runtime.store.locks.glob("lock_*.json"))

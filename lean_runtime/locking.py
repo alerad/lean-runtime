@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 from types import TracebackType
@@ -12,9 +13,15 @@ from .errors import EnvironmentError
 
 
 class FileLock:
-    def __init__(self, path: Path, timeout: float = 300) -> None:
+    def __init__(
+        self,
+        path: Path,
+        timeout: float = 300,
+        cancel: threading.Event | None = None,
+    ) -> None:
         self.path = path
         self.timeout = timeout
+        self.cancel = cancel
         self._handle: BinaryIO | None = None
 
     def __enter__(self) -> FileLock:
@@ -46,6 +53,11 @@ class FileLock:
                 self._handle = handle
                 return self
             except OSError as error:
+                if self.cancel is not None and self.cancel.is_set():
+                    handle.close()
+                    raise EnvironmentError(
+                        f"cancelled while waiting for store lock: {self.path}"
+                    ) from error
                 if time.monotonic() - started >= self.timeout:
                     handle.close()
                     raise EnvironmentError(

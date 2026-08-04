@@ -1,1 +1,34 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://lean-runtime.dev/schemas/matrix-v1.schema.json","type":"object","required":["schema","ok","data","warnings","errors"],"additionalProperties":false,"properties":{"schema":{"const":"lean-runtime.matrix/v1"},"ok":{"type":"boolean"},"data":{"type":"object","required":["ok","duration_ms","entries"],"additionalProperties":false,"properties":{"ok":{"type":"boolean"},"duration_ms":{"type":"integer"},"entries":{"type":"array","items":{"type":"object","required":["context","result"],"additionalProperties":false,"properties":{"context":{"type":"string"},"result":{"type":"object"}}}}}},"warnings":{"type":"array"},"errors":{"type":"array"}}}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lean-runtime.dev/schemas/matrix-v1.schema.json",
+  "type": "object",
+  "required": ["schema", "ok", "data", "warnings", "errors"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "lean-runtime.matrix/v1"},
+    "ok": {"type": "boolean"},
+    "data": {
+      "type": "object",
+      "anyOf": [{"required": ["ok", "duration_ms", "entries"]}, {"maxProperties": 0}],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"type": "boolean"},
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["context", "result"],
+            "additionalProperties": false,
+            "properties": {
+              "context": {"type": "string"},
+              "result": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/execution"}
+            }
+          }
+        }
+      }
+    },
+    "warnings": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"},
+    "errors": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"}
+  }
+}

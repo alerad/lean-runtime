@@ -3,7 +3,10 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 from pathlib import Path
+
+import pytest
 
 from lean_runtime.backends import LocalBackend
 from lean_runtime.policies import ExecutionPolicy
@@ -49,3 +52,32 @@ def test_cancellation_stops_process(tmp_path: Path) -> None:
     assert result.cancelled
     assert result.exit_code == 130
     assert result.elapsed_seconds < 3
+
+
+def test_caller_interrupt_stops_child_before_propagating(tmp_path: Path) -> None:
+    pid_path = tmp_path / "pid"
+
+    class Interrupt:
+        def is_set(self) -> bool:
+            if pid_path.exists():
+                raise KeyboardInterrupt
+            return False
+
+    with pytest.raises(KeyboardInterrupt):
+        LocalBackend().execute(
+            [
+                sys.executable,
+                "-c",
+                "import os,pathlib,time,sys; "
+                "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(10)",
+                str(pid_path),
+            ],
+            cwd=tmp_path,
+            environment=os.environ,
+            policy=ExecutionPolicy(timeout_seconds=5),
+            cancel=Interrupt(),  # type: ignore[arg-type]
+        )
+    pid = int(pid_path.read_text())
+    time.sleep(0.05)
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)

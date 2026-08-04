@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 import subprocess
+import threading
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -113,6 +114,7 @@ class ProjectEnvironment:
         path: str | os.PathLike[str],
         *,
         policy: ExecutionPolicy | None = None,
+        cancel: threading.Event | None = None,
     ) -> ExecutionResult:
         source = Path(path).expanduser().resolve()
         try:
@@ -122,7 +124,7 @@ class ProjectEnvironment:
         if not source.is_file() or source.suffix != ".lean":
             raise ProjectError(f"project check requires an existing .lean file: {source}")
         return self.runtime._check_project_file(
-            self.context, source, policy=policy or ExecutionPolicy()
+            self.context, source, policy=policy or ExecutionPolicy(), cancel=cancel
         )
 
     def check(
@@ -131,12 +133,14 @@ class ProjectEnvironment:
         *,
         filename: str = "Main.lean",
         policy: ExecutionPolicy | None = None,
+        cancel: threading.Event | None = None,
     ) -> ExecutionResult:
         return self.runtime._check_project_source(
             self.context,
             source,
             filename=filename,
             policy=policy or ExecutionPolicy(),
+            cancel=cancel,
         )
 
     async def check_async(
@@ -146,7 +150,16 @@ class ProjectEnvironment:
         filename: str = "Main.lean",
         policy: ExecutionPolicy | None = None,
     ) -> ExecutionResult:
-        return await asyncio.to_thread(self.check, source, filename=filename, policy=policy)
+        cancel = threading.Event()
+        task = asyncio.create_task(
+            asyncio.to_thread(self.check, source, filename=filename, policy=policy, cancel=cancel)
+        )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancel.set()
+            await task
+            raise
 
     def check_many(
         self,
@@ -154,11 +167,15 @@ class ProjectEnvironment:
         *,
         concurrency: int = 4,
         policy: ExecutionPolicy | None = None,
+        cancel: threading.Event | None = None,
     ) -> tuple[ExecutionResult, ...]:
         if concurrency < 1:
             raise ValueError("concurrency must be positive")
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = [executor.submit(self.check, source, policy=policy) for source in sources]
+            futures = [
+                executor.submit(self.check, source, policy=policy, cancel=cancel)
+                for source in sources
+            ]
             return tuple(future.result() for future in futures)
 
     async def check_many_async(
@@ -167,6 +184,7 @@ class ProjectEnvironment:
         *,
         concurrency: int = 4,
         policy: ExecutionPolicy | None = None,
+        cancel: threading.Event | None = None,
     ) -> tuple[ExecutionResult, ...]:
         if concurrency < 1:
             raise ValueError("concurrency must be positive")
@@ -174,6 +192,8 @@ class ProjectEnvironment:
 
         async def check_one(source: str) -> ExecutionResult:
             async with semaphore:
+                if cancel is not None and cancel.is_set():
+                    raise asyncio.CancelledError
                 return await self.check_async(source, policy=policy)
 
         return tuple(await asyncio.gather(*(check_one(source) for source in sources)))
@@ -183,9 +203,11 @@ class ProjectEnvironment:
         targets: Sequence[str] = (),
         *,
         policy: ExecutionPolicy | None = None,
+        cancel: threading.Event | None = None,
     ) -> ExecutionResult:
         return self.runtime._build_project(
             self.context,
             targets=targets,
             policy=policy or ExecutionPolicy(timeout_seconds=900, max_output_bytes=10_000_000),
+            cancel=cancel,
         )

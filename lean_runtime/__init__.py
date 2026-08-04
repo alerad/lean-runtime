@@ -1,6 +1,5 @@
 """Content-addressed execution environments for Lean 4."""
 
-from .audit import ArtifactInventory, AuditReport
 from .bundles import BundleInfo
 from .decisions import Decision
 from .diffing import ContextDiff, DiffEntry
@@ -44,6 +43,7 @@ from .models import (
     ExecutionProvenance,
     ExecutionResult,
     PackageProvenance,
+    PhaseTiming,
     ProjectProvenance,
 )
 from .oci import DEFAULT_CACHE_REPOSITORIES, OCIRepository, PublishInfo
@@ -63,8 +63,6 @@ __all__ = [
     "ContextDiff",
     "DiffEntry",
     "BundleInfo",
-    "ArtifactInventory",
-    "AuditReport",
     "BlobGarbageCollectionReport",
     "DEFAULT_CACHE_REPOSITORIES",
     "DependencyInput",
@@ -97,6 +95,7 @@ __all__ = [
     "PackageReference",
     "PACKAGE_ALIASES",
     "PackageProvenance",
+    "PhaseTiming",
     "ProjectContext",
     "ProjectEnvironment",
     "ProjectProvenance",
