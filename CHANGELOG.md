@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Add lazy `setup`, `check`, `check_file`, and `replay` Python façade functions.
+- Add `lean-run` with strict TOML frontmatter, automatic local-project discovery,
+  exact lock input/output, concise progress, and structured JSON output.
+- Add exact `mathlib@REVISION`, `leancert@REVISION`, and
+  `owner/repository@REVISION` package references without permitting floating aliases.
+- Add `ExecutionResult.raise_for_error()` and structured `LeanCheckError` failures.
+- Rewrite the README around the front-facing workflow and expand the standalone
+  file, CLI, Python, and routing documentation.
 - Discover pinned local Lake projects from contained Lean files and expose a
   distinct mutable `ProjectEnvironment` API.
 - Preserve project-relative file checks and record content, configuration,

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from lean_runtime import PackageReference, Runtime, RuntimeEvent
+from lean_runtime import PackageReference, Runtime, RuntimeEvent, check_file, setup
 
 
 @contextmanager
@@ -134,6 +134,9 @@ def test_local_lake_project_build_and_file_check(tmp_path: Path) -> None:
     assert result.provenance.project.root == str(root)
     scratch = project.check("import LocalProject.Defs\nexample : answer = 42 := by rfl\n")
     assert scratch.ok, scratch.stdout + scratch.stderr
+    prepared = setup(project=root, runtime=runtime)
+    assert prepared.check_file(main).ok  # type: ignore[union-attr]
+    assert check_file(main, runtime=runtime).ok
     child_environment = os.environ.copy()
     child_environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
     cli = subprocess.run(
@@ -156,6 +159,23 @@ def test_local_lake_project_build_and_file_check(tmp_path: Path) -> None:
     assert cli.returncode == 0, cli.stdout + cli.stderr
     cli_result = json.loads(cli.stdout)
     assert cli_result["provenance"]["project"]["root"] == str(root)
+    lean_run = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "lean_runtime.run_cli",
+            str(main),
+            "--home",
+            str(tmp_path / "runtime"),
+            "--json",
+        ],
+        env=child_environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert lean_run.returncode == 0, lean_run.stdout + lean_run.stderr
+    assert json.loads(lean_run.stdout)["ok"] is True
 
 
 @pytest.mark.integration
@@ -285,6 +305,27 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     assert replayed.environment_id == environment.id
     source_path = tmp_path / "Main.lean"
     source_path.write_text(source)
+    locked_source = tmp_path / "Locked.lean"
+    locked_source.write_text(
+        '-- /// lean-runtime\n-- lock = "environment.lock.json"\n-- ///\n' + source
+    )
+    locked_run = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "lean_runtime.run_cli",
+            str(locked_source),
+            "--home",
+            str(runtime_home),
+            "--json",
+        ],
+        env=child_environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert locked_run.returncode == 0, locked_run.stdout + locked_run.stderr
+    assert json.loads(locked_run.stdout)["provenance"]["lock_id"] == lock.lock_id
     child = subprocess.run(
         [
             sys.executable,

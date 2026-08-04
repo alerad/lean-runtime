@@ -8,6 +8,7 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
+from difflib import get_close_matches
 from pathlib import Path
 from typing import Any, Literal
 
@@ -24,7 +25,19 @@ _GITHUB = re.compile(
     r"github:(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/"
     r"(?P<repo>[A-Za-z0-9_.-]+)@(?P<revision>[A-Za-z0-9][A-Za-z0-9._/+\-]{0,199})"
 )
+_SHORT = re.compile(
+    r"(?P<name>[A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.-]+)?)"
+    r"@(?P<revision>[A-Za-z0-9][A-Za-z0-9._/+\-]{0,199})"
+)
 _COMMIT = re.compile(r"[0-9a-fA-F]{40}")
+PACKAGE_ALIASES: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "mathlib": (
+        "leanprover-community",
+        "mathlib4",
+        ("lake", "exe", "cache", "get"),
+    ),
+    "leancert": ("alerad", "leancert", ()),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,22 +48,45 @@ class PackageReference:
     revision: str
     display: str
     revision_kind: Literal["commit", "tag"]
+    artifact_command: tuple[str, ...] = ()
 
     @classmethod
     def parse(cls, value: str) -> PackageReference:
-        """Parse ``github:owner/repository@tag-or-commit``."""
+        """Parse an alias, owner/repository, or explicit GitHub reference."""
         match = _GITHUB.fullmatch(value)
         if match is None:
-            raise SpecificationError(
-                "invalid package reference; expected github:owner/repository@tag-or-commit"
-            )
-        owner = match.group("owner")
-        repository = match.group("repo")
+            short = _SHORT.fullmatch(value)
+            if short is None:
+                name = value.partition("@")[0]
+                suggestion = get_close_matches(name, PACKAGE_ALIASES, n=1, cutoff=0.7)
+                hint = f"; did you mean {suggestion[0]!r}?" if suggestion else ""
+                raise SpecificationError(
+                    "invalid package reference; expected alias@revision, "
+                    f"owner/repository@revision, or github:owner/repository@revision{hint}"
+                )
+            name = short.group("name")
+            revision = short.group("revision")
+            if "/" in name:
+                owner, repository = name.split("/", 1)
+                artifact_command: tuple[str, ...] = ()
+            elif name in PACKAGE_ALIASES:
+                owner, repository, artifact_command = PACKAGE_ALIASES[name]
+            else:
+                suggestion = get_close_matches(name, PACKAGE_ALIASES, n=1, cutoff=0.7)
+                hint = f" Did you mean {suggestion[0]!r}?" if suggestion else ""
+                raise SpecificationError(
+                    f"unknown package alias {name!r}.{hint} "
+                    "Use owner/repository@revision for other GitHub packages."
+                )
+        else:
+            owner = match.group("owner")
+            repository = match.group("repo")
+            revision = match.group("revision")
+            artifact_command = ()
         if repository.endswith(".git"):
             repository = repository[:-4]
         if not repository:
             raise SpecificationError("GitHub package reference has an empty repository name")
-        revision = match.group("revision")
         kind: Literal["commit", "tag"] = (
             "commit" if _COMMIT.fullmatch(revision) is not None else "tag"
         )
@@ -59,6 +95,7 @@ class PackageReference:
             revision=revision,
             display=f"github:{owner}/{repository}@{revision}",
             revision_kind=kind,
+            artifact_command=artifact_command,
         )
 
     @classmethod
@@ -234,7 +271,13 @@ def discover_package(
             toolchain=toolchain,
             toolchains=manager,
         )
-        package = GitPackage.git(name, reference.url, revision, root_module=root_module)
+        package = GitPackage.git(
+            name,
+            reference.url,
+            revision,
+            root_module=root_module,
+            artifact_command=reference.artifact_command,
+        )
         return DiscoveredPackage(reference=reference, toolchain=toolchain, package=package)
 
 

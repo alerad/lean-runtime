@@ -31,6 +31,7 @@ nav:
   - Overview: index.md
   - Getting started: getting-started.md
   - Guides:
+      - Standalone Lean files: standalone-files.md
       - Environments: environments.md
       - Local Lake projects: local-projects.md
       - Environment bundles: bundles.md
