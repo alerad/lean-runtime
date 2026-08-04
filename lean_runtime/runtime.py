@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .audit import AuditReport, audit_environment
 from .backends import Backend, LocalBackend
 from .bundles import BundleInfo, EnvironmentBundles
 from .diagnostics import error_diagnostic, parse_diagnostics
@@ -26,7 +27,13 @@ from .events import EventCallback, EventEmitter
 from .health import DoctorReport, diagnose
 from .lockfiles import EnvironmentLock
 from .models import ExecutionProvenance, ExecutionResult
-from .oci import OCIEnvironmentCache, OCIEnvironmentPublisher, OCIRepository, PublishInfo
+from .oci import (
+    DEFAULT_CACHE_REPOSITORIES,
+    OCIEnvironmentCache,
+    OCIEnvironmentPublisher,
+    OCIRepository,
+    PublishInfo,
+)
 from .policies import ExecutionPolicy
 from .references import PackageReference, discover_package, normalize_references
 from .resolver import EnvironmentResolver
@@ -34,6 +41,7 @@ from .serialization import sha256_id, sha256_text
 from .signatures import CosignVerifier
 from .specs import EnvironmentSpec, GitPackage
 from .store import (
+    BlobGarbageCollectionReport,
     EnvironmentStore,
     GarbageCollectionReport,
     StoreStatus,
@@ -90,10 +98,11 @@ class Runtime:
         self.bundles = EnvironmentBundles(self.store, self.toolchains, self.backend, self.events)
         configured_caches = caches
         if configured_caches is None:
-            configured_caches = tuple(
-                item.strip()
-                for item in os.environ.get("LEAN_RUNTIME_CACHES", "").split(",")
-                if item.strip()
+            configured = os.environ.get("LEAN_RUNTIME_CACHES")
+            configured_caches = (
+                tuple(item.strip() for item in configured.split(",") if item.strip())
+                if configured is not None
+                else DEFAULT_CACHE_REPOSITORIES
             )
         self.prebuilt = prebuilt
         self.cosign_executable = cosign
@@ -175,6 +184,7 @@ class Runtime:
         tags: Sequence[str] = (),
         finalize: bool = True,
         sign: bool = False,
+        attest: bool = False,
     ) -> PublishInfo:
         """Publish a built environment and its lock-level OCI index."""
         environment = self.open(identifier)
@@ -188,7 +198,20 @@ class Runtime:
             CosignVerifier(executable=self.cosign_executable).sign(
                 publisher.repository, result.index_digest
             )
+        if attest:
+            report = self.audit(environment.id)
+            CosignVerifier(executable=self.cosign_executable).attest(
+                publisher.repository,
+                result.index_digest or result.manifest_digest,
+                report.to_dict(),
+            )
         return result
+
+    def audit(self, identifier: str, *, rebuild: bool = False) -> AuditReport:
+        """Verify locked sources and optionally compare an independent source rebuild."""
+        return audit_environment(
+            self.open(identifier), self.toolchains, self.backend, self.events, rebuild=rebuild
+        )
 
     def publish_environment_index(
         self,
@@ -393,6 +416,11 @@ class Runtime:
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
     ) -> GarbageCollectionReport:
         return self.store.gc(dry_run=dry_run, minimum_age_seconds=minimum_age_seconds)
+
+    def gc_oci_blobs(
+        self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
+    ) -> BlobGarbageCollectionReport:
+        return self.store.gc_oci_blobs(dry_run=dry_run, minimum_age_seconds=minimum_age_seconds)
 
     def doctor(self) -> DoctorReport:
         return diagnose(self.toolchains, self.store)

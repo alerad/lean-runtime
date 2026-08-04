@@ -1,0 +1,110 @@
+name: Publish public Lean cache
+
+on:
+  workflow_dispatch:
+    inputs:
+      package-reference:
+        description: github:OWNER/REPOSITORY@TAG-OR-COMMIT
+        required: true
+        type: string
+      alias-tag:
+        description: Optional human-readable cache tag
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      lock-id: ${{ steps.lock.outputs.lock_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install .
+      - id: lock
+        env:
+          PACKAGE_REFERENCE: ${{ inputs.package-reference }}
+        run: |
+          python - <<'PY'
+          import os
+          from lean_runtime import Runtime
+          lock = Runtime(caches=[]).resolve_references([os.environ["PACKAGE_REFERENCE"]])
+          lock.write("environment.lock.json")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"lock_id={lock.lock_id}\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: environment-lock
+          path: environment.lock.json
+
+  platform:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-amd64
+          - os: macos-15-intel
+            name: macos-amd64
+          - os: macos-15
+            name: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: environment-lock
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install .
+      - uses: sigstore/cosign-installer@v4.1.2
+      - name: Build and publish platform
+        env:
+          LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
+          LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          lean-runtime --prebuilt never build-and-push environment.lock.json \
+            --push-to oci://ghcr.io/alerad/lean-runtime-cache \
+            --platform-only --attest > platform-result.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: platform-${{ matrix.name }}
+          path: platform-result.json
+
+  finalize:
+    needs: [resolve, platform]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: platform-*
+          path: results
+          merge-multiple: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install .
+      - name: Publish canonical index
+        env:
+          LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
+          LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          ALIAS_TAG: ${{ inputs.alias-tag }}
+        run: |
+          args=(publish-index "${{ needs.resolve.outputs.lock-id }}" results/*.json \
+            --repository oci://ghcr.io/alerad/lean-runtime-cache)
+          if [[ -n "$ALIAS_TAG" ]]; then args+=(--tag "$ALIAS_TAG"); fi
+          lean-runtime "${args[@]}"

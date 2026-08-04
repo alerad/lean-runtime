@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +26,7 @@ STORE_SCHEMA = "lean-runtime-store/2"
 PLATFORM_COMPATIBILITY_SCHEMA = "lean-runtime-platform/1"
 _ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _ENVIRONMENT_ID = re.compile(r"env_[0-9a-f]{64}")
+_OCI_BLOB = re.compile(r"[0-9a-f]{64}")
 ALIAS_SCHEMA = "lean-runtime-environment-alias/1"
 SUPPORTED_BUILD_PROFILE = "release"
 
@@ -141,6 +142,24 @@ class GarbageCollectionReport:
             "candidates": list(self.candidates),
             "removed": list(self.removed),
             "retained": list(self.retained),
+            "dry_run": self.dry_run,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class BlobGarbageCollectionReport:
+    candidates: tuple[str, ...]
+    removed: tuple[str, ...]
+    retained: tuple[str, ...]
+    reclaimed_bytes: int
+    dry_run: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "candidates": list(self.candidates),
+            "removed": list(self.removed),
+            "retained": list(self.retained),
+            "reclaimed_bytes": self.reclaimed_bytes,
             "dry_run": self.dry_run,
         }
 
@@ -370,6 +389,58 @@ class EnvironmentStore:
     def has_execution_leases(self, environment_id: str) -> bool:
         return any((self.leases / environment_id).glob("*.json"))
 
+    @contextmanager
+    def oci_blob_lease(self, digests: Iterable[str]) -> Iterator[None]:
+        """Prevent OCI blob collection while a pull is downloading or importing blobs."""
+        names = sorted(
+            {
+                digest.removeprefix("sha256:")
+                for digest in digests
+                if _OCI_BLOB.fullmatch(digest.removeprefix("sha256:")) is not None
+            }
+        )
+        lease_id = f"{os.getpid()}-{uuid.uuid4().hex}.json"
+        created: list[Path] = []
+        for name in names:
+            directory = self.leases / "oci" / name
+            directory.mkdir(parents=True, exist_ok=True)
+            lease = directory / lease_id
+            write_json_atomic(
+                lease,
+                {"digest": f"sha256:{name}", "pid": os.getpid(), "created_at": time.time()},
+            )
+            created.append(lease)
+        try:
+            yield None
+        finally:
+            for lease in created:
+                lease.unlink(missing_ok=True)
+                with suppress(OSError):
+                    lease.parent.rmdir()
+
+    def has_oci_blob_leases(self, digest: str) -> bool:
+        name = digest.removeprefix("sha256:")
+        return any((self.leases / "oci" / name).glob("*.json"))
+
+    def referenced_oci_blobs(self) -> set[str]:
+        referenced: set[str] = set()
+        for path in self.environments.glob("env_*/metadata.json"):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            origin = value.get("origin") if isinstance(value, dict) else None
+            digests = origin.get("blob_digests", ()) if isinstance(origin, dict) else ()
+            if not isinstance(digests, list):
+                continue
+            referenced.update(
+                digest.removeprefix("sha256:")
+                for digest in digests
+                if isinstance(digest, str)
+                and _OCI_BLOB.fullmatch(digest.removeprefix("sha256:")) is not None
+            )
+        return referenced
+
     def validate_alias(self, name: str) -> str:
         if _ALIAS.fullmatch(name) is None:
             raise EnvironmentError(f"invalid environment name: {name!r}")
@@ -485,3 +556,47 @@ class EnvironmentStore:
                         usage.unlink(missing_ok=True)
                         removed.append(path.name)
         return GarbageCollectionReport(tuple(candidates), tuple(removed), tuple(retained), dry_run)
+
+    def gc_oci_blobs(
+        self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
+    ) -> BlobGarbageCollectionReport:
+        """Remove old OCI blobs not referenced by an imported environment or active pull."""
+        candidates: list[str] = []
+        removed: list[str] = []
+        retained: list[str] = []
+        reclaimed_bytes = 0
+        now = time.time()
+        with FileLock(self.lock_dir / "oci-gc.lock"):
+            referenced = self.referenced_oci_blobs()
+            for path in sorted(self.oci_blobs.iterdir()):
+                if not path.is_file() or _OCI_BLOB.fullmatch(path.name) is None:
+                    retained.append(path.name)
+                    continue
+                age = now - path.stat().st_mtime
+                if (
+                    path.name in referenced
+                    or age < minimum_age_seconds
+                    or self.has_oci_blob_leases(path.name)
+                ):
+                    retained.append(path.name)
+                    continue
+                candidates.append(path.name)
+                if dry_run:
+                    continue
+                with FileLock(self.lock_dir / f"oci-{path.name}.lock"):
+                    referenced = self.referenced_oci_blobs()
+                    if (
+                        not path.is_file()
+                        or path.name in referenced
+                        or now - path.stat().st_mtime < minimum_age_seconds
+                        or self.has_oci_blob_leases(path.name)
+                    ):
+                        retained.append(path.name)
+                        continue
+                    size = path.stat().st_size
+                    path.unlink()
+                    reclaimed_bytes += size
+                    removed.append(path.name)
+        return BlobGarbageCollectionReport(
+            tuple(candidates), tuple(removed), tuple(retained), reclaimed_bytes, dry_run
+        )

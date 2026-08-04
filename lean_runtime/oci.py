@@ -31,6 +31,7 @@ _REPOSITORY = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z
 _BEARER_PARAMETER = re.compile(r'([a-zA-Z]+)="([^"]*)"')
 _DIGEST = re.compile(r"sha256:([0-9a-f]{64})")
 _ACCEPT = ", ".join((INDEX_MEDIA_TYPE, MANIFEST_MEDIA_TYPE))
+DEFAULT_CACHE_REPOSITORIES = ("oci://ghcr.io/alerad/lean-runtime-cache",)
 
 
 class SignatureVerifier(Protocol):
@@ -451,26 +452,31 @@ class OCIEnvironmentCache:
         descriptors = [manifest.get("config"), *manifest.get("layers", [])]
         if not all(isinstance(item, dict) for item in descriptors):
             raise EnvironmentError("OCI platform manifest is incomplete")
-        entries: dict[str, Path] = {}
-        manifest_path = self._cache_manifest(manifest_descriptor, manifest_data)
-        entries["blobs/sha256/" + str(manifest_descriptor["digest"]).removeprefix("sha256:")] = (
-            manifest_path
-        )
-        for descriptor in descriptors:
-            assert isinstance(descriptor, dict)
-            path = self.client.download_blob(descriptor, self.store, self.events)
-            entries["blobs/sha256/" + str(descriptor["digest"]).removeprefix("sha256:")] = path
-        index = {
-            "schemaVersion": 2,
-            "mediaType": INDEX_MEDIA_TYPE,
-            "manifests": [manifest_descriptor],
-        }
-        info = self.bundles.import_layout(
-            index,
-            entries,
-            origin={"kind": "prebuilt", "registry": self.repository.display},
-            name=name,
-        )
+        lease_digests = [
+            str(manifest_descriptor["digest"]),
+            *(str(descriptor["digest"]) for descriptor in descriptors),
+        ]
+        with self.store.oci_blob_lease(lease_digests):
+            entries: dict[str, Path] = {}
+            manifest_path = self._cache_manifest(manifest_descriptor, manifest_data)
+            entries[
+                "blobs/sha256/" + str(manifest_descriptor["digest"]).removeprefix("sha256:")
+            ] = manifest_path
+            for descriptor in descriptors:
+                assert isinstance(descriptor, dict)
+                path = self.client.download_blob(descriptor, self.store, self.events)
+                entries["blobs/sha256/" + str(descriptor["digest"]).removeprefix("sha256:")] = path
+            index = {
+                "schemaVersion": 2,
+                "mediaType": INDEX_MEDIA_TYPE,
+                "manifests": [manifest_descriptor],
+            }
+            info = self.bundles.import_layout(
+                index,
+                entries,
+                origin={"kind": "prebuilt", "registry": self.repository.display},
+                name=name,
+            )
         self.events.emit(
             "prebuilt.verified",
             "Imported a verified prebuilt environment",

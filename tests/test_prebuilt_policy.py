@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from lean_runtime import EnvironmentError, EnvironmentLock, PrebuiltUnavailable, Runtime
+from lean_runtime import (
+    DEFAULT_CACHE_REPOSITORIES,
+    EnvironmentError,
+    EnvironmentLock,
+    PrebuiltUnavailable,
+    Runtime,
+)
 from lean_runtime.oci import _SafeRedirectHandler
 
 
@@ -32,6 +38,15 @@ class _Cache:
 
     def pull(self, *_args: object, **_kwargs: object) -> str:
         raise self.failure
+
+
+def test_public_cache_is_default_and_empty_environment_override_disables_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = Runtime(home=tmp_path / "default")
+    assert tuple(cache.repository.display for cache in runtime.caches) == DEFAULT_CACHE_REPOSITORIES
+    monkeypatch.setenv("LEAN_RUNTIME_CACHES", "")
+    assert Runtime(home=tmp_path / "disabled").caches == ()
 
 
 def test_auto_falls_back_only_when_prebuilt_is_unavailable(

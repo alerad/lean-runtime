@@ -49,3 +49,31 @@ def test_vulnerable_cosign_release_is_rejected(
     )
     with pytest.raises(EnvironmentError, match="3.0.4"):
         CosignVerifier("identity", "issuer", executable=executable)
+
+
+def test_cosign_attestation_binds_predicate_to_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "cosign"
+    executable.write_text("")
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        commands.append(command)
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"gitVersion":"v3.0.4"}' if command[1:3] == ["version", "--json"] else "",
+            stderr="",
+        )
+
+    monkeypatch.setattr("lean_runtime.signatures.subprocess.run", run)
+    verifier = CosignVerifier(executable=executable)
+    verifier.attest(
+        OCIRepository.parse("oci://ghcr.io/owner/cache"),
+        "sha256:" + "b" * 64,
+        {"lock_id": "lock_123"},
+    )
+    command = commands[-1]
+    assert command[1] == "attest"
+    assert "https://lean-runtime.dev/attestation/environment/v1" in command
+    assert command[-1] == "ghcr.io/owner/cache@sha256:" + "b" * 64

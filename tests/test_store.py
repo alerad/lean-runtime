@@ -91,6 +91,35 @@ def test_execution_lease_prevents_collection(tmp_path: Path) -> None:
     assert CANDIDATE in report.candidates
 
 
+def test_oci_blob_gc_retains_environment_references_and_active_leases(tmp_path: Path) -> None:
+    store = EnvironmentStore(tmp_path)
+    referenced = "1" * 64
+    leased = "2" * 64
+    candidate = "3" * 64
+    for digest in (referenced, leased, candidate):
+        (store.oci_blobs / digest).write_bytes(digest.encode())
+    environment = store.environment_path(RETAINED)
+    environment.mkdir()
+    (environment / "metadata.json").write_text(
+        json.dumps({"origin": {"blob_digests": [f"sha256:{referenced}"]}})
+    )
+
+    with store.oci_blob_lease([f"sha256:{leased}"]):
+        report = store.gc_oci_blobs(dry_run=False, minimum_age_seconds=0)
+        assert report.removed == (candidate,)
+        assert referenced in report.retained
+        assert leased in report.retained
+    assert store.gc_oci_blobs(dry_run=False, minimum_age_seconds=0).removed == (leased,)
+
+
+def test_oci_blob_gc_reports_reclaimed_bytes(tmp_path: Path) -> None:
+    store = EnvironmentStore(tmp_path)
+    digest = "4" * 64
+    (store.oci_blobs / digest).write_bytes(b"payload")
+    report = store.gc_oci_blobs(dry_run=False, minimum_age_seconds=0)
+    assert report.reclaimed_bytes == len(b"payload")
+
+
 def test_alias_record_is_validated(tmp_path: Path) -> None:
     store = EnvironmentStore(tmp_path)
     store.environment_path(FIRST).mkdir()
