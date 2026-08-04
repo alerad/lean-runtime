@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from lean_runtime import EnvironmentError, EnvironmentLock, LockedPackage
-from lean_runtime.store import EnvironmentStore, environment_identity
+from lean_runtime.store import EnvironmentStore, environment_identity, platform_compatibility
 
 RETAINED = "env_" + "a" * 64
 CANDIDATE = "env_" + "b" * 64
@@ -103,6 +103,13 @@ def test_alias_record_is_validated(tmp_path: Path) -> None:
 def test_only_implemented_build_profile_is_accepted() -> None:
     with pytest.raises(EnvironmentError, match="only 'release'"):
         environment_identity(_sample_lock(), "debug")
+
+
+def test_environment_identity_ignores_informational_platform_details(monkeypatch) -> None:
+    before = environment_identity(_sample_lock())
+    monkeypatch.setattr("lean_runtime.store.platform.platform", lambda: "different-patch-release")
+    assert environment_identity(_sample_lock()) == before
+    assert "python_platform" not in platform_compatibility()
 
 
 def test_source_snapshot_is_shallow_and_detects_content_changes(tmp_path: Path) -> None:

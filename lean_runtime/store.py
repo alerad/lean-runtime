@@ -22,14 +22,15 @@ from .lockfiles import EnvironmentLock
 from .locking import FileLock
 from .serialization import sha256_id, write_json_atomic
 
-STORE_SCHEMA = "lean-runtime-store/1"
+STORE_SCHEMA = "lean-runtime-store/2"
+PLATFORM_COMPATIBILITY_SCHEMA = "lean-runtime-platform/1"
 _ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _ENVIRONMENT_ID = re.compile(r"env_[0-9a-f]{64}")
 ALIAS_SCHEMA = "lean-runtime-environment-alias/1"
 SUPPORTED_BUILD_PROFILE = "release"
 
 
-def _snapshot_digest(root: Path) -> str:
+def source_snapshot_digest(root: Path) -> str:
     """Hash checked-out content while excluding Git and runtime metadata."""
     digest = hashlib.sha256()
     for directory, directories, filenames in os.walk(root, followlinks=False):
@@ -67,6 +68,25 @@ def platform_record() -> dict[str, str]:
     }
 
 
+def platform_compatibility() -> dict[str, str]:
+    """Return only fields that determine compatibility of built artifacts."""
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    machine = {"amd64": "x86_64", "x64": "x86_64", "aarch64": "arm64"}.get(machine, machine)
+    abi = "native"
+    if system == "linux":
+        libc, _version = platform.libc_ver()
+        abi = {"glibc": "gnu", "musl": "musl"}.get(libc.lower(), libc.lower() or "unknown")
+    elif system == "windows":
+        abi = "msvc"
+    return {
+        "schema": PLATFORM_COMPATIBILITY_SCHEMA,
+        "system": system,
+        "machine": machine,
+        "abi": abi,
+    }
+
+
 def environment_identity(lock: EnvironmentLock, build_profile: str = "release") -> str:
     if build_profile != SUPPORTED_BUILD_PROFILE:
         raise EnvironmentError(
@@ -77,7 +97,7 @@ def environment_identity(lock: EnvironmentLock, build_profile: str = "release") 
         {
             "schema": STORE_SCHEMA,
             "lock_id": lock.lock_id,
-            "platform": platform_record(),
+            "platform_compatibility": platform_compatibility(),
             "build_profile": build_profile,
         },
     )
@@ -220,7 +240,7 @@ class EnvironmentStore:
         if any(metadata.get(key) != value for key, value in expected.items()):
             raise EnvironmentError(f"immutable source metadata mismatch: {source_id}")
         content_hash = metadata.get("content_hash")
-        if isinstance(content_hash, str) and _snapshot_digest(source) != content_hash:
+        if isinstance(content_hash, str) and source_snapshot_digest(source) != content_hash:
             raise EnvironmentError(f"immutable source content was modified: {source_id}")
         commands = (("rev-parse", "HEAD"), ("rev-parse", "HEAD^{tree}"))
         observed = []
@@ -296,7 +316,7 @@ class EnvironmentStore:
                         + remote.stdout
                         + remote.stderr
                     )
-                snapshot_metadata = {**metadata, "content_hash": _snapshot_digest(stage)}
+                snapshot_metadata = {**metadata, "content_hash": source_snapshot_digest(stage)}
                 write_json_atomic(stage / ".lean-runtime-source.json", snapshot_metadata)
                 stage.replace(destination)
             finally:

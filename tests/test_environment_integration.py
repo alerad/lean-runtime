@@ -124,6 +124,15 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     assert repeated.execution_id != first.execution_id
     assert repeated.provenance is not None
     assert repeated.provenance.request_digest == first.provenance.request_digest
+    bundle_path = tmp_path / "environment.oci.tar.gz"
+    exported = runtime.export_environment(environment.id, bundle_path)
+    imported_runtime = Runtime(home=tmp_path / "imported-runtime")
+    imported = imported_runtime.import_environment(bundle_path, name="imported")
+    assert imported.id == environment.id
+    assert exported.lock_id == lock.lock_id
+    imported_check = imported.check(source)
+    assert imported_check.ok
+    assert imported_check.lock_id == lock.lock_id
     assert (runtime.store.executions / f"{first.execution_id}.json").is_file()
     assert (runtime.store.executions / f"{repeated.execution_id}.json").is_file()
     version = environment.execute(["lean", "--version"])

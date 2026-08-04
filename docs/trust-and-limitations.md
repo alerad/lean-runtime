@@ -25,6 +25,12 @@ SHA-256 digest before execution. Lean toolchains and exact Git package revisions
 are then acquired through Elan and Git. This is integrity hardening, not a full
 signed software-supply-chain system.
 
+Local OCI bundle import verifies the complete blob digest chain, recomputes the
+lock and environment identities, verifies package Git commits and trees, and
+runs a Lean probe before publication. A bundle still contains trusted executable
+build output: these checks do not prove that its builder compiled the locked
+sources faithfully. Phase 1 does not provide signatures or remote attestations.
+
 ## Reproducibility boundary
 
 The same lock identifies the same source graph, and an environment identity also
@@ -35,7 +41,6 @@ package scripts are not promised to be byte-for-byte deterministic.
 ## Deliberately deferred
 
 - semantic version solving, floating branches, and editable dependencies;
-- portable source or binary environment archives;
 - signatures and remote attestations;
 - untrusted sandboxed execution;
 - remote workers and shared artifact services;

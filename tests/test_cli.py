@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from lean_runtime.bundles import BundleInfo
 from lean_runtime.cli import main
 from lean_runtime.models import ExecutionResult
 
@@ -108,3 +109,16 @@ def test_check_cli_discovers_with_packages(monkeypatch, tmp_path: Path, capsys) 
     assert observed["references"] == ["github:alerad/leancert@v4.32.2.4"]
     assert observed["entrypoint"] == "Main.lean"
     assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_export_cli_reports_bundle_identity(monkeypatch, tmp_path: Path, capsys) -> None:
+    output = tmp_path / "environment.oci.tar.gz"
+    info = BundleInfo(
+        environment_id="env_" + "a" * 64,
+        lock_id="lock_" + "b" * 64,
+        manifest_digest="sha256:" + "c" * 64,
+        path=str(output),
+    )
+    monkeypatch.setattr("lean_runtime.cli.Runtime.export_environment", lambda *_args: info)
+    assert main(["--quiet", "export", "demo", "--output", str(output)]) == 0
+    assert json.loads(capsys.readouterr().out)["manifest_digest"] == info.manifest_digest

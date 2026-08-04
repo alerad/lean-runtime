@@ -82,6 +82,17 @@ def parser() -> argparse.ArgumentParser:
     ensure.add_argument("lock", type=Path)
     ensure.add_argument("--name")
 
+    export = commands.add_parser("export", help="export a deterministic OCI environment bundle")
+    export.add_argument("environment")
+    export.add_argument("--output", required=True, type=Path)
+
+    import_bundle = commands.add_parser(
+        "import", help="verify and import an OCI environment bundle"
+    )
+    import_bundle.add_argument("bundle", type=Path)
+    import_bundle.add_argument("--name")
+    import_bundle.add_argument("--no-probe", action="store_true", help="skip the Lean import probe")
+
     check = commands.add_parser(
         "check", help="check with --with packages or in a published environment"
     )
@@ -157,6 +168,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "ensure":
             environment = runtime.ensure(EnvironmentLock.load(args.lock), name=args.name)
+            _json(environment.inspect().to_dict())
+            return 0
+        if args.command == "export":
+            _json(runtime.export_environment(args.environment, args.output).to_dict())
+            return 0
+        if args.command == "import":
+            environment = runtime.import_environment(
+                args.bundle, name=args.name, probe=not args.no_probe
+            )
             _json(environment.inspect().to_dict())
             return 0
         if args.command == "inspect":

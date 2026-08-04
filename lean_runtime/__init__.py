@@ -1,5 +1,6 @@
 """Content-addressed execution environments for Lean 4."""
 
+from .bundles import BundleInfo
 from .environments import (
     Environment,
     EnvironmentInfo,
@@ -30,6 +31,7 @@ from .toolchains import ToolchainManager, normalize_toolchain
 
 __all__ = [
     "Diagnostic",
+    "BundleInfo",
     "DiscoveredPackage",
     "DoctorCheck",
     "DoctorReport",
