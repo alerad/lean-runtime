@@ -51,8 +51,10 @@ through the locked toolchain.
 
 ## Identity
 
-The environment identity includes the complete lock, host platform, and the
-implemented build profile. Version 0.5 supports only the `release` profile;
+The environment identity includes the complete lock, a versioned platform
+compatibility record, and the implemented build profile. Informational details
+such as the Python platform and OS patch release are retained in metadata but
+are not identity inputs. The runtime currently supports only the `release` profile;
 other values are rejected rather than producing misleadingly distinct IDs for
 identical builds.
 
@@ -63,6 +65,10 @@ research-stack -> env_74fbe13a...
 ```
 
 Updating an alias never mutates or deletes the old environment.
+
+Store schema 2 changed this compatibility identity. Environments produced by
+schema 1 are intentionally cache misses and must be rebuilt or re-imported;
+aliases to their old IDs do not migrate automatically.
 
 ## Storage and garbage collection
 

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .backends import Backend, LocalBackend
+from .bundles import BundleInfo, EnvironmentBundles
 from .diagnostics import error_diagnostic, parse_diagnostics
 from .environments import Environment, EnvironmentManager, ExecutionCapture
 from .errors import ProjectError, SpecificationError, ToolchainError
@@ -58,6 +59,7 @@ class Runtime:
         self.environments = EnvironmentManager(
             self.store, self.toolchains, self.backend, self.events
         )
+        self.bundles = EnvironmentBundles(self.store, self.toolchains, self.backend, self.events)
 
     def resolve(self, spec: EnvironmentSpec, *, timeout: float = 900) -> EnvironmentLock:
         return self.resolver.resolve(spec, timeout=timeout)
@@ -74,6 +76,22 @@ class Runtime:
     def open(self, identifier: str) -> Environment:
         """Open a published environment without resolution or network access."""
         return self.environments.open(identifier)
+
+    def export_environment(self, identifier: str, output: str | os.PathLike[str]) -> BundleInfo:
+        """Export a published environment as a deterministic OCI layout archive."""
+        environment = self.open(identifier)
+        return self.bundles.export(environment.id, Path(output))
+
+    def import_environment(
+        self,
+        bundle: str | os.PathLike[str],
+        *,
+        name: str | None = None,
+        probe: bool = True,
+    ) -> Environment:
+        """Verify and atomically import a local OCI environment bundle."""
+        info = self.bundles.import_bundle(Path(bundle), name=name, probe=probe)
+        return self.open(info.environment_id)
 
     def create_environment(
         self,
@@ -292,6 +310,7 @@ class Runtime:
                     "toolchain": metadata.get("toolchain"),
                     "created_at": metadata.get("created_at"),
                     "status": metadata.get("status"),
+                    "origin": metadata.get("origin", {"kind": "local"}),
                     "names": sorted(names_by_id.get(path.name, [])),
                 }
             )

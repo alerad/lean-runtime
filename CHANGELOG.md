@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add deterministic OCI image-layout export and verified, atomic environment import.
+- Verify bundle digests, lock and environment identities, package Git trees,
+  archive paths, host compatibility, and a Lean probe before publication.
+- Separate artifact compatibility identity from informational host metadata and
+  bump the environment store identity schema.
+
 ## 0.6.0
 
 - Discover packages declared with either `lakefile.toml` or `lakefile.lean`.

@@ -32,6 +32,7 @@ nav:
   - Getting started: getting-started.md
   - Guides:
       - Environments: environments.md
+      - Environment bundles: bundles.md
       - Python API: python-api.md
       - CLI: cli.md
       - Execution captures: captures.md

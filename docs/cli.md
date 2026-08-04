@@ -29,6 +29,8 @@ lean-runtime check Main.lean \
 ```bash
 lean-runtime resolve environment.toml --output environment.lock.json
 lean-runtime ensure environment.lock.json --name research-stack
+lean-runtime export research-stack --output research-stack.oci.tar.gz
+lean-runtime --home /tmp/fresh import research-stack.oci.tar.gz --name research-stack
 lean-runtime check research-stack Main.lean --json
 lean-runtime inspect research-stack --packages
 lean-runtime env-list
@@ -39,6 +41,11 @@ lean-runtime gc --execute
 ```
 
 `gc` is a dry run unless `--execute` is supplied.
+
+`export` produces a deterministic OCI image-layout archive. `import` verifies
+the digest and identity chain, package Git trees, platform compatibility, and a
+Lean probe before atomically publishing the environment. See
+[Environment bundles](bundles.md) for the format and trust boundary.
 
 ## Replay
 
