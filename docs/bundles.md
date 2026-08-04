@@ -12,9 +12,7 @@ The equivalent Python API is:
 
 ```python
 info = runtime.export_environment("research-stack", "research-stack.oci.tar.gz")
-environment = another_runtime.import_environment(
-    "research-stack.oci.tar.gz", name="research-stack"
-)
+environment = another_runtime.import_environment("research-stack.oci.tar.gz", name="research-stack")
 ```
 
 Import verifies the OCI manifest and every blob digest, recomputes the lock and
