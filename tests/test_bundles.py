@@ -24,8 +24,9 @@ from lean_runtime.store import environment_identity, platform_record, source_sna
 def _git_package(path: Path) -> tuple[str, str]:
     path.mkdir(parents=True)
     (path / "Sample.lean").write_text("def sampleValue : Nat := 41\n")
+    (path / ".gitignore").write_text("generated.hash\n")
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
-    subprocess.run(["git", "add", "Sample.lean"], cwd=path, check=True)
+    subprocess.run(["git", "add", "Sample.lean", ".gitignore"], cwd=path, check=True)
     subprocess.run(
         [
             "git",
@@ -185,6 +186,38 @@ def test_bundle_export_rejects_modified_checked_out_package(tmp_path: Path) -> N
         / "Sample.lean"
     )
     package.write_text("def sampleValue : Nat := 666\n")
+    with pytest.raises(EnvironmentError, match="checked-out content mismatch"):
+        producer.export_environment(environment_id, tmp_path / "tampered.oci.tar.gz")
+
+
+def test_bundle_export_accepts_gitignored_generated_build_artifact(tmp_path: Path) -> None:
+    producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
+    package = (
+        producer.store.environment_path(environment_id)
+        / "workspace"
+        / ".lake"
+        / "packages"
+        / "sample"
+    )
+    (package / "generated.hash").write_text("derived build state\n")
+
+    bundle = tmp_path / "generated.oci.tar.gz"
+    producer.export_environment(environment_id, bundle)
+
+    assert bundle.is_file()
+
+
+def test_bundle_export_rejects_untracked_nonignored_package_content(tmp_path: Path) -> None:
+    producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
+    package = (
+        producer.store.environment_path(environment_id)
+        / "workspace"
+        / ".lake"
+        / "packages"
+        / "sample"
+    )
+    (package / "unexpected.txt").write_text("not a declared source or ignored build artifact\n")
+
     with pytest.raises(EnvironmentError, match="checked-out content mismatch"):
         producer.export_environment(environment_id, tmp_path / "tampered.oci.tar.gz")
 
