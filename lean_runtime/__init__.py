@@ -23,9 +23,16 @@ from .errors import (
 from .events import EventCallback, RuntimeEvent
 from .health import DoctorCheck, DoctorReport
 from .lockfiles import EnvironmentLock, LockedPackage
-from .models import Diagnostic, ExecutionProvenance, ExecutionResult, PackageProvenance
+from .models import (
+    Diagnostic,
+    ExecutionProvenance,
+    ExecutionResult,
+    PackageProvenance,
+    ProjectProvenance,
+)
 from .oci import DEFAULT_CACHE_REPOSITORIES, OCIRepository, PublishInfo
 from .policies import ExecutionPolicy
+from .projects import ProjectContext, ProjectEnvironment, discover_project
 from .references import DiscoveredPackage, PackageReference
 from .runtime import Runtime, project_toolchain
 from .specs import EnvironmentSpec, GitPackage, Package
@@ -62,6 +69,9 @@ __all__ = [
     "Package",
     "PackageReference",
     "PackageProvenance",
+    "ProjectContext",
+    "ProjectEnvironment",
+    "ProjectProvenance",
     "PolicyError",
     "PublishInfo",
     "PrebuiltUnavailable",
@@ -76,4 +86,5 @@ __all__ = [
     "ToolchainManager",
     "normalize_toolchain",
     "project_toolchain",
+    "discover_project",
 ]

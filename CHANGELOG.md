@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Discover pinned local Lake projects from contained Lean files and expose a
+  distinct mutable `ProjectEnvironment` API.
+- Preserve project-relative file checks and record content, configuration,
+  manifest, and Git project provenance without claiming an environment identity.
 - Add transparent OCI prebuilt-cache lookup with authenticated registry pulls,
   disk-backed blob reuse, strict fallback policy, and explicit `pull` support.
 - Add deterministic OCI publishing through `build-and-push`, with blobs and the

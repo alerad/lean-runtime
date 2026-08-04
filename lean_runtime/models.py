@@ -28,6 +28,19 @@ class PackageProvenance:
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectProvenance:
+    root: str
+    workspace_digest: str
+    lakefile_digest: str
+    manifest_digest: str | None
+    git_revision: str | None
+    git_dirty: bool | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionProvenance:
     environment_id: str | None
     execution_id: str
@@ -41,6 +54,7 @@ class ExecutionProvenance:
     enforced_policy_fields: tuple[str, ...]
     source_digest: str
     started_at: str
+    project: ProjectProvenance | None = None
 
 
 @dataclass(frozen=True, slots=True)

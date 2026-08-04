@@ -110,6 +110,55 @@ def _sample_package(path: Path) -> str:
 
 
 @pytest.mark.integration
+def test_local_lake_project_build_and_file_check(tmp_path: Path) -> None:
+    root = tmp_path / "local-project"
+    root.mkdir()
+    (root / "lean-toolchain").write_text("leanprover/lean4:v4.32.0\n")
+    (root / "lakefile.toml").write_text(
+        'name = "local_project"\n\n[[lean_lib]]\n'
+        'name = "LocalProject"\nroots = ["LocalProject.Defs"]\n'
+    )
+    library = root / "LocalProject"
+    library.mkdir()
+    (library / "Defs.lean").write_text("def answer : Nat := 42\n")
+    main = library / "Main.lean"
+    main.write_text("import LocalProject.Defs\nexample : answer = 42 := by rfl\n")
+
+    runtime = Runtime(home=tmp_path / "runtime", caches=[])
+    project = runtime.project(main)
+    assert project.build(["LocalProject"]).ok
+    result = project.check_file(main)
+    assert result.ok, result.stdout + result.stderr
+    assert result.environment_id is None
+    assert result.provenance is not None and result.provenance.project is not None
+    assert result.provenance.project.root == str(root)
+    scratch = project.check("import LocalProject.Defs\nexample : answer = 42 := by rfl\n")
+    assert scratch.ok, scratch.stdout + scratch.stderr
+    child_environment = os.environ.copy()
+    child_environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    cli = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "lean_runtime",
+            "--home",
+            str(tmp_path / "runtime"),
+            "--quiet",
+            "raw-check",
+            str(main),
+            "--json",
+        ],
+        env=child_environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert cli.returncode == 0, cli.stdout + cli.stderr
+    cli_result = json.loads(cli.stdout)
+    assert cli_result["provenance"]["project"]["root"] == str(root)
+
+
+@pytest.mark.integration
 def test_resolve_publish_and_reopen_offline_from_second_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

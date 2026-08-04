@@ -181,7 +181,9 @@ def parser() -> argparse.ArgumentParser:
         "--include-blobs", action="store_true", help="also collect unreferenced OCI blobs"
     )
 
-    raw = commands.add_parser("raw-check", help="check without a managed environment")
+    raw = commands.add_parser(
+        "raw-check", help="check a file, discovering its local Lake project when possible"
+    )
     raw.add_argument("file", type=Path, help="Lean source file, or - for stdin")
     raw.add_argument("--toolchain")
     raw.add_argument("--project", type=Path)
@@ -337,13 +339,20 @@ def main(argv: list[str] | None = None) -> int:
                     policy=_policy(args),
                 )
         elif args.command == "raw-check":
-            source = sys.stdin.read() if str(args.file) == "-" else args.file.read_text()
-            result = runtime.check(
-                source,
-                toolchain=args.toolchain,
-                project=args.project,
-                policy=_policy(args),
-            )
+            if str(args.file) == "-":
+                result = runtime.check(
+                    sys.stdin.read(),
+                    toolchain=args.toolchain,
+                    project=args.project,
+                    policy=_policy(args),
+                )
+            else:
+                result = runtime.check_file(
+                    args.file,
+                    toolchain=args.toolchain,
+                    project=args.project,
+                    policy=_policy(args),
+                )
         else:
             result = runtime.build(
                 args.project,

@@ -197,10 +197,24 @@ lean-runtime gc --execute              # removes old, unnamed environments
 Raw execution remains available for existing projects and core-only snippets:
 
 ```bash
+lean-runtime raw-check ./existing-project/MyProject/Main.lean
 lean-runtime raw-check Main.lean --toolchain 4.32.0
-lean-runtime raw-check Main.lean --project ./existing-project
 lean-runtime project-build ./existing-project MyLibrary
 ```
+
+Local project discovery walks upward from a Lean file to the nearest pinned Lake
+project. The Python handle keeps mutable project execution distinct from an
+immutable managed environment:
+
+```python
+project = Runtime().project("./existing-project")
+project.build()
+result = project.check_file("./existing-project/MyProject/Main.lean")
+```
+
+Project results carry a workspace/configuration/Git snapshot in provenance but
+do not claim a content-addressed `environment_id`. See [Local Lake
+projects](docs/local-projects.md) for discovery and mutation semantics.
 
 ## Execution policy
 
