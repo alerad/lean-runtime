@@ -1,8 +1,28 @@
 """Exceptions raised by :mod:`lean_runtime`."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import ExecutionResult
+
 
 class LeanRuntimeError(RuntimeError):
     """Base class for runtime infrastructure failures."""
+
+
+class LeanCheckError(LeanRuntimeError):
+    """A completed Lean invocation rejected its input."""
+
+    def __init__(self, result: ExecutionResult) -> None:
+        self.result = result
+        diagnostic = next(
+            (item.message for item in result.diagnostics if item.severity == "error"), None
+        )
+        detail = diagnostic or result.stderr.strip() or result.stdout.strip()
+        message = f"Lean check failed with exit code {result.exit_code}"
+        super().__init__(f"{message}: {detail}" if detail else message)
 
 
 class ToolchainError(LeanRuntimeError):

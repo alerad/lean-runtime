@@ -1,17 +1,19 @@
 # Lean Runtime
 
-Lean Runtime is a Python-native execution substrate for Lean 4. It compiles a
-declarative dependency specification into a content-addressed environment, then
-runs Lean with structured results and exact provenance.
+Lean Runtime runs Lean proofs from Python or a single `.lean` file. It discovers
+local Lake projects or compiles friendly exact dependencies into a
+content-addressed environment, then returns structured results and provenance.
 
 ```text
-EnvironmentSpec ──resolve──> EnvironmentLock ──ensure──> Environment
-                                                           │
-                                              check / build / execute
-                                                           │
-                                                           ▼
-                                                  ExecutionResult
-                                                   + provenance
+lean-run FILE / lean.setup(CONTEXT)
+                │
+                ├── pinned local project ───────────> ProjectEnvironment
+                └── dependencies / exact lock ─────> Environment
+                                                        │
+                                               check / build / execute
+                                                        │
+                                                        ▼
+                                               ExecutionResult + provenance
 ```
 
 It deliberately does not replace the official tools:
@@ -23,12 +25,11 @@ It deliberately does not replace the official tools:
 
 ## Current scope
 
-Version 0.5 supports exact Git locks, commit-or-tag specifications, ergonomic
-GitHub package references, retained Lake manifests, immutable published
-environments, mutable aliases, offline reopening, disposable execution
-workspaces, structured diagnostics, resource policies, cancellation, multi-file
-and batch checking, asyncio, one-shot target execution, managed interactive
-processes, progress events, health inspection, and replayable JSON captures.
+The front-facing API supports setup-once Python environments, one-shot helpers,
+friendly exact package references, standalone TOML frontmatter, local-project
+discovery, exact lock output, batch checking, and asyncio. The explicit runtime
+also exposes OCI caches, bundles, audits, signatures, captures, policies, and
+store lifecycle operations.
 
 The local backend executes **trusted inputs only**. Lean packages and Lake
 configuration can run native programs and arbitrary build commands; the local

@@ -90,3 +90,11 @@ class ExecutionResult:
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""
         return asdict(self)
+
+    def raise_for_error(self) -> ExecutionResult:
+        """Return this result when accepted, otherwise raise ``LeanCheckError``."""
+        if not self.ok:
+            from .errors import LeanCheckError
+
+            raise LeanCheckError(self)
+        return self

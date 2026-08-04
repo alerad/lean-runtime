@@ -1,8 +1,47 @@
 # Python API
 
-## Runtime
+## Prepared environments
 
-`Runtime` is the main entry point:
+The usual entry point prepares one context and returns either an immutable
+`Environment` or mutable `ProjectEnvironment`:
+
+```python
+import lean_runtime as lean
+
+environment = lean.setup(["mathlib@v4.32.2"])
+project = lean.setup(project="./my-project")
+locked = lean.setup(lock="environment.lock.json")
+existing = lean.setup(environment="research-stack")
+```
+
+Exactly one of `deps`, `project`, `lock`, or `environment` is required. The
+default `Runtime` is created lazily on the first operation; importing
+`lean_runtime` has no filesystem or network side effects. Supply
+`runtime=Runtime(...)` to any façade function for explicit configuration.
+
+One-shot helpers use the same routing:
+
+```python
+result = lean.check(source, deps=["mathlib@v4.32.2"])
+result = lean.check_file("./my-project/MyProject/Main.lean")
+result = lean.replay("execution.capture.json")
+```
+
+## Results
+
+Results remain inspectable values. Scripts that prefer exceptions can use:
+
+```python
+result.raise_for_error()
+```
+
+Rejection raises `LeanCheckError`, whose `result` attribute retains diagnostics,
+stdout, stderr, environment and execution identities, and complete provenance.
+
+## Explicit Runtime API
+
+`Runtime` exposes resolution, stores, policies, publishing, and lifecycle
+operations directly:
 
 ```python
 runtime.resolve(spec)  # -> EnvironmentLock

@@ -1,311 +1,124 @@
 # Lean Runtime
 
-Lean Runtime compiles declarative specifications into content-addressed Lean
-execution environments.
+Run Lean proofs from Python or a single `.lean` file—without creating a throwaway
+Lake project or rebuilding the same dependencies on every machine.
 
-```text
-environment specification + Lean source + execution policy
-                              ↓
-kernel-checked result + exact environment and execution provenance
-```
+Lean Runtime discovers or resolves the environment, checks a global OCI cache,
+and returns structured Lean results with exact provenance.
 
-It does not replace Elan or Lake. Elan remains authoritative for toolchains and
-Lake remains authoritative for dependency resolution and builds. Lean Runtime
-adds immutable identities, lifecycle management, reuse, structured Python
-results, and replayable provenance above them.
+> **Status:** Alpha. The local backend runs trusted Lean, Lake, and package code;
+> it is an orchestration boundary, not a security sandbox.
 
-> **Status:** `0.5` alpha. Exact Git environments and trusted local execution
-> are implemented. Local execution is an orchestration boundary, not a security
-> sandbox.
-
-Full guides, API examples, architecture, and the trust model live in the
-[documentation](https://alerad.github.io/lean-runtime/).
-
-## Installation
+## Install
 
 ```bash
 python -m pip install lean-runtime
 ```
 
-For development:
+Lean Runtime manages its own Elan installation on macOS and Linux. Windows
+currently requires `LEAN_RUNTIME_ELAN`.
+
+## Run one Lean file
+
+Inside an existing pinned Lake project, just pass the file:
 
 ```bash
-python -m pip install -e '.[dev]'
+lean-run MyProject/Main.lean
 ```
 
-Users do not need a separately managed Lean installation. On macOS and Linux,
-Lean Runtime bootstraps a private Elan installation and installs requested Lean
-versions into its own cache. Windows currently requires `LEAN_RUNTIME_ELAN`.
+For a portable standalone file, declare exact dependencies in TOML frontmatter:
 
-## Check with a package
+```lean
+-- /// lean-runtime
+-- requires = ["mathlib@v4.32.2"]
+-- ///
 
-The shortest reproducible path discovers a tagged Lake package, pins it to an
-exact commit, builds or reuses its environment, and checks the source:
+import Mathlib
+
+example : 2 + 2 = 4 := by norm_num
+```
 
 ```bash
-lean-runtime check Main.lean \
-  --with github:alerad/leancert@v4.32.2.4
+lean-run Main.lean
 ```
 
-The corresponding Python API uses the identical resolver and store:
+The same context can be supplied from the command line:
 
-```python
-from lean_runtime import Runtime
-
-result = Runtime().check(
-    "import LeanCert.Tactic\nexample : True := by trivial",
-    packages=["github:alerad/leancert@v4.32.2.4"],
-)
+```bash
+lean-run Main.lean --with mathlib@v4.32.2
 ```
 
-Package discovery reads the referenced root `lean-toolchain` and
-`lakefile.toml`, then records the exact commit in the environment lock. Multiple
-`--with` options are allowed when their discovered toolchains agree. An
-explicit `--toolchain` selects a compatibility build when they differ.
+Create an exact lock for CI without changing the file:
 
-## Python API
+```bash
+lean-run Main.lean --with mathlib@v4.32.2 \
+  --lock-out environment.lock.json
+lean-run Main.lean --lock environment.lock.json
+```
+
+## Python
+
+Configure an environment once, then use it repeatedly:
 
 ```python
-from lean_runtime import EnvironmentSpec, GitPackage, Runtime
+import lean_runtime as lean
 
-runtime = Runtime()
+env = lean.setup(["mathlib@v4.32.2"])
 
-spec = EnvironmentSpec(
-    toolchain="leanprover/lean4:v4.32.2",
-    packages=(
-        GitPackage(
-            name="mathlib",
-            url="https://github.com/leanprover-community/mathlib4.git",
-            rev="905b95818eb32af7874a58b427f50c1711a5e96c",
-            root_module="Mathlib",
-            artifact_command=("lake", "exe", "cache", "get"),
-        ),
-    ),
-)
-
-# Resolution is deliberately separate from materialization.
-lock = runtime.resolve(spec)
-environment = runtime.ensure(lock, name="mathlib-4.32.2")
-
-result = environment.check(
+result = env.check(
     """
     import Mathlib
-
     example : 2 + 2 = 4 := by norm_num
     """
 )
-
-assert result.ok
-print(result.environment_id)
-print(result.execution_id)
-print(result.provenance.request_digest)
-print(result.provenance.packages)
+result.raise_for_error()
 ```
 
-`runtime.open()` performs no resolution and needs no network access:
+Batch and asyncio APIs reuse that prepared environment:
 
 ```python
-same_environment = Runtime().open(result.environment_id)
-replayed = same_environment.check("import Mathlib\nexample : True := by trivial")
+results = env.check_many(generated_proofs, concurrency=8)
+results = await env.check_many_async(generated_proofs, concurrency=20)
 ```
 
-The convenience form compiles and reuses the environment automatically:
+Local projects use the same setup pattern while retaining mutable-project
+semantics:
 
 ```python
-result = runtime.check(source, environment=spec)
+project = lean.setup(project="./my-project")
+result = project.check_file("./my-project/MyProject/Main.lean")
 ```
 
-## Long-running Lean tools
-
-Generic commands and stateful protocols run in the same disposable,
-content-addressed execution model:
+One-shot helpers are available when setup reuse is unnecessary:
 
 ```python
-import json
-
-from lean_runtime import ExecutionPolicy
-
-environment = runtime.ensure_references(
-    ["github:alerad/leancert@v4.32.2.4"],
-    name="leancert-4.32.2.4",
-)
-
-with environment.spawn_interactive(
-    ["lake", "exe", "lean_bridge"],
-    policy=ExecutionPolicy(timeout_seconds=3600, memory_mb=4096),
-) as session:
-    session.stdin.write(json.dumps({"id": 1, "method": "get_info", "params": {}}) + "\n")
-    session.stdin.flush()
-    response = json.loads(session.stdout.readline())
-
-result = session.close()  # idempotent after context-manager cleanup
-assert result.execution_id == session.execution_id
+result = lean.check(source, deps=["mathlib@v4.32.2"])
+result = lean.check_file("./my-project/MyProject/Main.lean")
 ```
 
-`Environment.execute(["lake", "exe", "target"])` provides the corresponding
-one-shot path. Both APIs retain the exact environment, policy, command,
-transcript, duration, and final exit status.
+Friendly references remain exact: use `mathlib@VERSION`,
+`leancert@VERSION`, `owner/repository@REVISION`, or the explicit
+`github:owner/repository@REVISION` form. Bare floating package names are never
+accepted.
 
-## Package revision policy
+## Under the hood
 
-Specifications accept exact Git commits or explicitly marked tags:
+The simple API is backed by exact Git commits and trees, Lake-resolved locks,
+platform-aware content-addressed environments, atomic cross-process builds,
+transparent OCI cache reuse, replayable provenance, audits, and signed
+attestations. Advanced users can access all of it through `lean_runtime.Runtime`
+and the `lean-runtime` operations CLI.
 
-```python
-GitPackage(
-    name="sample",
-    url="https://github.com/example/sample.git",
-    rev="0123456789abcdef0123456789abcdef01234567",
-    root_module="Sample",
-)
+## Documentation
 
-GitPackage.tag(
-    name="mathlib",
-    url="https://github.com/leanprover-community/mathlib4.git",
-    tag="v4.32.2",
-    root_module="Mathlib",
-)
-```
-
-Tags are convenience inputs: resolution records their exact commit and Git tree
-identity in the lock. Floating branches, semantic versions, editable
-dependencies, and path packages are intentionally not part of the model.
-
-`root_module` tells the generated environment root what to import so the
-package's Lean artifacts are built. `artifact_command` is an optional explicit
-package-supported hydration step; it is useful for Mathlib's cache command
-without introducing a premature artifact-provider framework.
-
-Artifact commands run from the generated root workspace. Locks, packages, and
-artifact commands must be trusted; schema validation is not a security sandbox.
-
-## CLI
-
-An environment specification can be JSON or TOML. See
-[examples/mathlib.toml](examples/mathlib.toml).
-
-```bash
-lean-runtime check Main.lean --with github:alerad/leancert@v4.32.2.4
-lean-runtime resolve environment.toml --output environment.lock.json
-lean-runtime ensure environment.lock.json --name research-stack
-lean-runtime check research-stack Main.lean --json
-lean-runtime inspect research-stack
-lean-runtime replay result.execution.json --json
-lean-runtime gc                         # dry-run
-lean-runtime gc --execute              # removes old, unnamed environments
-```
-
-Raw execution remains available for existing projects and core-only snippets:
-
-```bash
-lean-runtime raw-check ./existing-project/MyProject/Main.lean
-lean-runtime raw-check Main.lean --toolchain 4.32.0
-lean-runtime project-build ./existing-project MyLibrary
-```
-
-Local project discovery walks upward from a Lean file to the nearest pinned Lake
-project. The Python handle keeps mutable project execution distinct from an
-immutable managed environment:
-
-```python
-project = Runtime().project("./existing-project")
-project.build()
-result = project.check_file("./existing-project/MyProject/Main.lean")
-```
-
-Project results carry a workspace/configuration/Git snapshot in provenance but
-do not claim a content-addressed `environment_id`. See [Local Lake
-projects](docs/local-projects.md) for discovery and mutation semantics.
-
-## Execution policy
-
-```python
-from lean_runtime import ExecutionPolicy
-
-policy = ExecutionPolicy(
-    timeout_seconds=30,
-    max_output_bytes=1_000_000,
-    memory_mb=2048,
-    cpu_seconds=20,
-)
-
-result = environment.check(source, policy=policy)
-print(result.provenance.enforced_policy_fields)
-```
-
-The local Unix backend enforces timeout, bounded captured output, address-space
-and CPU limits. It cannot enforce network isolation and rejects
-`network="disabled"` rather than claiming otherwise. Future container and
-remote backends can implement stronger policies without changing environment
-semantics.
-
-Checks can be cancelled or batched:
-
-```python
-job = environment.start_check(source)
-job.cancel()
-result = job.result()
-
-results = environment.check_many(sources, concurrency=8)
-```
-
-Multi-file and asyncio requests are first-class:
-
-```python
-result = environment.check_files(
-    {"Support/Defs.lean": defs, "Main.lean": main},
-    entrypoint="Main.lean",
-)
-result = await environment.check_async(source)
-```
-
-Long operations can emit structured progress events:
-
-```python
-runtime = Runtime(on_event=lambda event: print(event.kind, event.message))
-```
-
-## Captures
-
-The first capsule representation is intentionally a canonical JSON manifest,
-not a bespoke archive:
-
-```python
-capture = environment.capture(source, expected_ok=True)
-capture.write("result.execution.json")
-```
-
-It contains the complete environment lock, input files, policy, operation, and
-optional expected outcome. `runtime.replay_capture(...)` or
-`lean-runtime replay` can acquire the exact locked sources and recreate the
-environment without invoking dependency resolution. Source/binary archives,
-signatures, and attestations are deferred until their trust model is clear.
-
-## Store
-
-The default store is `~/Library/Caches/lean-runtime` on macOS and
-`${XDG_CACHE_HOME:-~/.cache}/lean-runtime` on Linux. Set `LEAN_RUNTIME_HOME` to
-override it.
-
-```text
-lean-runtime/
-  elan/          private toolchains
-  sources/git/   immutable exact source snapshots
-  locks/         portable Lake-backed locks
-  environments/  platform-specific published builds
-  names/         mutable aliases to immutable identities
-  executions/    result/provenance records
-  jobs/          disposable writable execution instances
-```
-
-See [Architecture](docs/architecture.md) for identities, publication rules,
-offline behavior, and trust boundaries.
-
-## Security
-
-Lean files, dependency Lake configurations, custom targets, native extensions,
-and artifact commands are trusted code. Content addressing provides identity
-and reuse; it is not a sandbox. Do not build adversarial packages with the
-local backend.
+- [Getting started](https://alerad.github.io/lean-runtime/getting-started/)
+- [Python API](https://alerad.github.io/lean-runtime/python-api/)
+- [`lean-run` and operations CLI](https://alerad.github.io/lean-runtime/cli/)
+- [Managed environments](https://alerad.github.io/lean-runtime/environments/)
+- [Local Lake projects](https://alerad.github.io/lean-runtime/local-projects/)
+- [Environment bundles and OCI caches](https://alerad.github.io/lean-runtime/bundles/)
+- [Architecture](https://alerad.github.io/lean-runtime/architecture/)
+- [Trust and limitations](https://alerad.github.io/lean-runtime/trust-and-limitations/)
 
 ## License
 

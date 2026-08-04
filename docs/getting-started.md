@@ -6,103 +6,98 @@
 python -m pip install lean-runtime
 ```
 
-On macOS and Linux, Lean Runtime downloads a checksum-verified, pinned Elan
-installer into its private cache. It then installs requested Lean versions on
-demand. It does not modify the user's default Elan toolchain or shell profile.
+On macOS and Linux, Lean Runtime installs requested Lean versions through its
+private, checksum-verified Elan installation. It does not change the user's
+default toolchain or shell profile. Windows currently requires an existing Elan
+executable through `LEAN_RUNTIME_ELAN`.
 
-Windows users currently need to point `LEAN_RUNTIME_ELAN` at an existing Elan
-executable.
+## Run a file
 
-## One-shot package checking
-
-For a tagged GitHub-hosted Lake library, no environment file is required:
+For a file inside a pinned Lake project:
 
 ```bash
-lean-runtime check Main.lean \
-  --with github:alerad/leancert@v4.32.2.4
+lean-run MyProject/Main.lean
 ```
 
-This is shorthand for metadata discovery, exact commit pinning, Lake
-resolution, materialization, and checking. Subsequent invocations reuse the
-content-addressed environment.
+Lean Runtime walks upward to the nearest `lakefile.toml` or `lakefile.lean` with
+a `lean-toolchain`, then checks the actual project-relative path.
+
+Standalone files can declare their context in strict TOML frontmatter:
+
+```lean
+-- /// lean-runtime
+-- requires = ["mathlib@v4.32.2"]
+-- ///
+
+import Mathlib
+example : 2 + 2 = 4 := by norm_num
+```
+
+```bash
+lean-run Main.lean
+```
+
+Dependencies may instead be supplied without editing the file:
+
+```bash
+lean-run Main.lean --with mathlib@v4.32.2
+```
+
+Friendly references require a revision and compile to exact Git identities:
+
+- `mathlib@v4.32.2`
+- `leancert@v4.32.2.4`
+- `owner/repository@tag-or-commit`
+- `github:owner/repository@tag-or-commit`
+
+Bare floating aliases are rejected.
+
+## Python setup
 
 ```python
-from lean_runtime import Runtime
+import lean_runtime as lean
 
-result = Runtime().check(
-    "import LeanCert.Tactic\nexample : True := by trivial",
-    packages=["github:alerad/leancert@v4.32.2.4"],
-)
-assert result.ok
+environment = lean.setup(["mathlib@v4.32.2"])
+result = environment.check("import Mathlib\nexample : 2 + 2 = 4 := by norm_num")
+result.raise_for_error()
 ```
 
-## Create an environment
+`setup()` resolves and ensures the environment once. Further checks reuse that
+handle, including batch and asynchronous calls.
 
-Dependencies may use exact commits or friendly tags. Locks always contain exact
-commits:
+The same entry point opens local projects, exact locks, and previously named
+environments:
 
 ```python
-from lean_runtime import EnvironmentSpec, GitPackage, Runtime
-
-runtime = Runtime()
-spec = EnvironmentSpec(
-    toolchain="4.32.2",
-    packages=(
-        GitPackage.tag(
-            name="mathlib",
-            url="https://github.com/leanprover-community/mathlib4.git",
-            tag="v4.32.2",
-            root_module="Mathlib",
-            artifact_command=("lake", "exe", "cache", "get"),
-        ),
-    ),
-)
-
-lock = runtime.resolve(spec)
-lock.write("environment.lock.json")
-environment = runtime.ensure(lock, name="mathlib-4.32.2")
+project = lean.setup(project="./my-project")
+locked = lean.setup(lock="environment.lock.json")
+existing = lean.setup(environment="research-stack")
 ```
 
-`resolve()` asks Lake for a concrete dependency graph. `ensure()` acquires the
-exact locked sources, builds the environment once, and atomically publishes it.
+Exactly one context must be supplied.
 
-## Check Lean
+## Lock for CI
 
-```python
-result = environment.check(
-    """
-    import Mathlib
+Resolve a friendly dependency declaration and retain its exact graph:
 
-    example : 2 + 2 = 4 := by norm_num
-    """
-)
-
-assert result.ok
-print(result.environment_id)
-print(result.provenance.request_digest)
+```bash
+lean-run Main.lean --with mathlib@v4.32.2 \
+  --lock-out environment.lock.json
 ```
 
-Each run has a unique `execution_id`, so repeated checks do not overwrite
-history. Identical logical requests share a stable `request_digest`.
+Subsequent runs can skip dependency resolution:
 
-For generated projects, submit a complete relative source tree:
-
-```python
-result = environment.check_files(
-    {
-        "Support/Defs.lean": "def answer : Nat := 42",
-        "Main.lean": "import Support.Defs\nexample : answer = 42 := by rfl",
-    },
-    entrypoint="Main.lean",
-)
+```bash
+lean-run Main.lean --lock environment.lock.json
 ```
 
-## Reopen offline
+Frontmatter may reference a lock relative to the Lean file:
 
-After the environment has been published, it can be opened by alias or digest
-without resolving dependencies or accessing the network:
-
-```python
-environment = Runtime().open("mathlib-4.32.2")
-result = environment.check("import Mathlib\nexample : True := by trivial")
+```lean
+-- /// lean-runtime
+-- lock = "environment.lock.json"
+-- ///
 ```
+
+See [Standalone Lean files](standalone-files.md) for routing and validation
+rules, or [Python API](python-api.md) for the explicit advanced API.

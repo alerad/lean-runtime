@@ -1,5 +1,22 @@
 # Command-line interface
 
+## `lean-run`
+
+The front-facing command checks one file and discovers its context:
+
+```bash
+lean-run Main.lean
+lean-run Main.lean --with mathlib@v4.32.2
+lean-run Main.lean --lock environment.lock.json
+lean-run Main.lean --json
+```
+
+Use `--lock-out environment.lock.json` with dependencies to retain the exact
+resolved graph. See [Standalone Lean files](standalone-files.md) for frontmatter,
+routing precedence, conflict rules, and output behavior.
+
+## `lean-runtime`
+
 All commands accept `--home PATH` before the subcommand to select a store.
 
 ## One-shot package workflow
@@ -10,7 +27,8 @@ lean-runtime check Main.lean \
 ```
 
 `--with` is repeatable. References use
-`github:OWNER/REPOSITORY@TAG-OR-COMMIT`. Package discovery reads the root
+`mathlib@REVISION`, `OWNER/REPOSITORY@REVISION`, or the explicit
+`github:OWNER/REPOSITORY@REVISION` form. Package discovery reads the root
 `lean-toolchain` and `lakefile.toml`, pins the reference to a full commit, and
 then uses the normal lock and environment pipeline. Multiple discovered
 packages must declare the same toolchain unless `--toolchain` explicitly

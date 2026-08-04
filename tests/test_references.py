@@ -99,6 +99,20 @@ def test_github_reference_is_canonical() -> None:
     assert reference.display == "github:alerad/leancert@v4.32.2.4"
 
 
+def test_friendly_alias_and_owner_repository_references_are_canonical() -> None:
+    mathlib = PackageReference.parse("mathlib@v4.32.2")
+    assert mathlib.url == "https://github.com/leanprover-community/mathlib4.git"
+    assert mathlib.artifact_command == ("lake", "exe", "cache", "get")
+    explicit = PackageReference.parse("alerad/leancert@v4.32.2.4")
+    assert explicit.url == "https://github.com/alerad/leancert.git"
+    assert explicit.display == "github:alerad/leancert@v4.32.2.4"
+
+
+def test_unknown_alias_requires_an_explicit_repository() -> None:
+    with pytest.raises(SpecificationError, match="Did you mean 'mathlib'"):
+        PackageReference.parse("mathilb@v1")
+
+
 @pytest.mark.parametrize(
     "value",
     ["alerad/leancert", "github:alerad/leancert", "github:/leancert@v1", "github:a/b@main^"],
