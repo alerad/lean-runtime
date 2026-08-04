@@ -6,7 +6,7 @@ Lake project or rebuilding the same dependencies on every machine.
 Lean Runtime discovers or resolves the environment, checks a global OCI cache,
 and returns structured Lean results with exact provenance.
 
-> **Status:** Alpha. The local backend runs trusted Lean, Lake, and package code;
+> **Status:** V1 beta. The local backend runs trusted Lean, Lake, and package code;
 > it is an orchestration boundary, not a security sandbox.
 
 ## Install
@@ -133,6 +133,7 @@ and the `lean-runtime` operations CLI.
 - [Environment bundles and OCI caches](https://alerad.github.io/lean-runtime/bundles/)
 - [Architecture](https://alerad.github.io/lean-runtime/architecture/)
 - [Trust and limitations](https://alerad.github.io/lean-runtime/trust-and-limitations/)
+- [V1 release case study](https://alerad.github.io/lean-runtime/case-study-v1/)
 
 ## License
 

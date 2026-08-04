@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## 1.0.0
+
+Lean Runtime v1 establishes the concise `lean-run` and `lean.setup()` workflows while making
+exact environments independently verifiable, explainable, measurable, and portable.
+
+### Breaking changes
+
+- Remove `lean-runtime audit`, `Runtime.audit()`, `AuditReport`, and `ArtifactInventory`;
+  `verify` is the sole trust surface and `verify --rebuild` performs independent rebuild checks.
+- Close and version the seven public CLI JSON schemas. Execution payloads now include stable
+  phase timings, while `inspect` and `gc` use one canonical data shape each.
+- Remove transitional compatibility surfaces introduced before v1; callers should use the
+  top-level façade, `Runtime`, and the documented v1 result types directly.
+
+### Release capabilities
 
 - Add lazy `setup`, `check`, `check_file`, and `replay` Python façade functions.
 - Add `lean-run` with strict TOML frontmatter, automatic local-project discovery,
@@ -25,6 +39,13 @@
   archive paths, host compatibility, and a Lean probe before publication.
 - Separate artifact compatibility identity from informational host metadata and
   bump the environment store identity schema.
+- Add verification, decision explanations, semantic context diffs, repeated profiles, and
+  bounded matrix execution over ordinary execution results.
+- Add interruptible toolchain installation, Lake resolution, environment builds, matrix checks,
+  and project checks with process-group cleanup on cancellation and Ctrl-C.
+- Ship the public JSON schemas in wheel and source distributions and expose `schema_path()`.
+- Add reproducible case-study fixtures, clean-wheel smoke testing, and installed-wheel Lean
+  acceptance in CI.
 
 ## 0.6.0
 
