@@ -245,10 +245,9 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     runtime = Runtime(home=runtime_home)
     environment = runtime.open("demo")
     assert identities == {environment.id}
-    audit = runtime.audit("demo", rebuild=True)
-    assert audit.ok
-    assert audit.rebuilt_artifacts is not None
-    assert isinstance(audit.artifact_match, bool)
+    rebuilt_verification = runtime.verify("demo", rebuild=True)
+    assert rebuilt_verification.ok
+    assert isinstance(rebuilt_verification.artifact_match, bool)
     source = "import Sample\nexample : sampleValue = 41 := by rfl\n"
     first = environment.check(source)
     assert first.ok

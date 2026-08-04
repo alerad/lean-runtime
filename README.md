@@ -119,7 +119,7 @@ accepted.
 
 The simple API is backed by exact Git commits and trees, Lake-resolved locks,
 platform-aware content-addressed environments, atomic cross-process builds,
-transparent OCI cache reuse, replayable provenance, audits, and signed
+transparent OCI cache reuse, replayable provenance, verification, and signed
 attestations. Advanced users can access all of it through `lean_runtime.Runtime`
 and the `lean-runtime` operations CLI.
 

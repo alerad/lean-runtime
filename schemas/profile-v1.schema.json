@@ -1,1 +1,38 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://lean-runtime.dev/schemas/profile-v1.schema.json","type":"object","required":["schema","ok","data","warnings","errors"],"additionalProperties":false,"properties":{"schema":{"const":"lean-runtime.profile/v1"},"ok":{"type":"boolean"},"data":{"type":"object","required":["subject","ok","warmup","samples","duration_ms","statistics_ms","results"],"additionalProperties":false,"properties":{"subject":{"type":"string"},"ok":{"type":"boolean"},"warmup":{"type":"integer"},"samples":{"type":"integer"},"duration_ms":{"type":"integer"},"statistics_ms":{"type":"object"},"results":{"type":"array","items":{"type":"object"}}}},"warnings":{"type":"array"},"errors":{"type":"array"}}}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lean-runtime.dev/schemas/profile-v1.schema.json",
+  "type": "object",
+  "required": ["schema", "ok", "data", "warnings", "errors"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "lean-runtime.profile/v1"},
+    "ok": {"type": "boolean"},
+    "data": {
+      "type": "object",
+      "anyOf": [{"required": ["subject", "ok", "warmup", "samples", "duration_ms", "statistics_ms", "results"]}, {"maxProperties": 0}],
+      "additionalProperties": false,
+      "properties": {
+        "subject": {"type": "string"},
+        "ok": {"type": "boolean"},
+        "warmup": {"type": "integer", "minimum": 0},
+        "samples": {"type": "integer", "minimum": 0},
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "statistics_ms": {
+          "type": "object",
+          "required": ["min", "median", "mean", "p95", "max"],
+          "additionalProperties": false,
+          "properties": {
+            "min": {"type": ["number", "null"]},
+            "median": {"type": ["number", "null"]},
+            "mean": {"type": ["number", "null"]},
+            "p95": {"type": ["number", "null"]},
+            "max": {"type": ["number", "null"]}
+          }
+        },
+        "results": {"type": "array", "items": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/execution"}}
+      }
+    },
+    "warnings": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"},
+    "errors": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"}
+  }
+}

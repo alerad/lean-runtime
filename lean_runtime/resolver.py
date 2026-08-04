@@ -6,14 +6,17 @@ import json
 import re
 import subprocess
 import tempfile
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from .backends import Backend
 from .errors import ResolutionError
 from .events import EventEmitter
 from .lake import ROOT_MODULE, generate_lakefile, generate_root_module
 from .lockfiles import EnvironmentLock, LockedPackage
+from .policies import ExecutionPolicy
 from .serialization import sha256_id
 from .specs import EnvironmentSpec, GitPackage
 from .store import EnvironmentStore
@@ -45,22 +48,30 @@ class EnvironmentResolver:
         self,
         toolchains: ToolchainManager,
         store: EnvironmentStore,
+        backend: Backend,
         events: EventEmitter | None = None,
     ) -> None:
         self.toolchains = toolchains
         self.store = store
+        self.backend = backend
         self.events = events or EventEmitter()
 
-    def resolve(self, spec: EnvironmentSpec, *, timeout: float = 900) -> EnvironmentLock:
+    def resolve(
+        self,
+        spec: EnvironmentSpec,
+        *,
+        timeout: float = 900,
+        cancel: threading.Event | None = None,
+    ) -> EnvironmentLock:
         self.events.emit(
             "resolution.started",
             "Resolving environment",
             toolchain=spec.toolchain,
             packages=len(spec.packages),
         )
-        toolchain = self.toolchains.ensure(spec.toolchain)
+        toolchain = self.toolchains.ensure(spec.toolchain, cancel=cancel)
         self.events.emit("toolchain.ready", "Lean toolchain is ready", toolchain=toolchain)
-        pinned_spec = self._pin_tags(spec)
+        pinned_spec = self._pin_tags(spec, cancel=cancel)
         root_lakefile = generate_lakefile(pinned_spec)
         root_module = generate_root_module(spec)
         resolution_root = self.store.home / "resolution"
@@ -72,28 +83,32 @@ class EnvironmentResolver:
             (workspace / f"{ROOT_MODULE}.lean").write_text(root_module, encoding="utf-8")
             command = self.toolchains.command(toolchain, "lake", "update")
             self.events.emit("resolution.lake_started", "Lake dependency resolution started")
-            try:
-                process = subprocess.run(
-                    command,
-                    cwd=workspace,
-                    env=self.toolchains.environment,
-                    text=True,
-                    capture_output=True,
-                    timeout=timeout,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
+            process = self.backend.execute(
+                command,
+                cwd=workspace,
+                environment=self.toolchains.environment,
+                policy=ExecutionPolicy(timeout_seconds=timeout, max_output_bytes=10_000_000),
+                cancel=cancel,
+            )
+            if process.timed_out:
                 raise ResolutionError(
                     f"Lake resolution exceeded {timeout:g} seconds",
                     command=tuple(command),
                     exit_code=124,
-                    output=str(exc.stdout or "") + str(exc.stderr or ""),
-                ) from exc
-            if process.returncode:
+                    output=process.stdout + process.stderr,
+                )
+            if process.cancelled:
+                raise ResolutionError(
+                    "Lake resolution was cancelled",
+                    command=tuple(command),
+                    exit_code=130,
+                    output=process.stdout + process.stderr,
+                )
+            if process.exit_code:
                 raise ResolutionError(
                     "Lake could not resolve the environment specification",
                     command=tuple(command),
-                    exit_code=process.returncode,
+                    exit_code=process.exit_code,
                     output=process.stdout + process.stderr,
                 )
             manifest_path = workspace / "lake-manifest.json"
@@ -120,7 +135,9 @@ class EnvironmentResolver:
             )
             return lock
 
-    def _pin_tags(self, spec: EnvironmentSpec) -> EnvironmentSpec:
+    def _pin_tags(
+        self, spec: EnvironmentSpec, *, cancel: threading.Event | None
+    ) -> EnvironmentSpec:
         pinned: list[GitPackage] = []
         for package in spec.packages:
             if package.revision_kind == "commit":
@@ -128,28 +145,35 @@ class EnvironmentResolver:
                 continue
             reference = f"refs/tags/{package.rev}"
             command = ["git", "ls-remote", package.url, reference, f"{reference}^{{}}"]
-            try:
-                process = subprocess.run(
-                    command,
-                    text=True,
-                    capture_output=True,
-                    timeout=60,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
+            process = self.backend.execute(
+                command,
+                cwd=self.store.home,
+                environment=self.toolchains.environment,
+                policy=ExecutionPolicy(timeout_seconds=60),
+                cancel=cancel,
+            )
+            if process.timed_out:
                 raise ResolutionError(
                     f"tag lookup timed out for package {package.name!r}",
                     phase="tag-resolution",
                     command=tuple(command),
                     exit_code=124,
-                    output=str(exc.stdout or "") + str(exc.stderr or ""),
-                ) from exc
-            if process.returncode:
+                    output=process.stdout + process.stderr,
+                )
+            if process.cancelled:
+                raise ResolutionError(
+                    f"tag lookup was cancelled for package {package.name!r}",
+                    phase="tag-resolution",
+                    command=tuple(command),
+                    exit_code=130,
+                    output=process.stdout + process.stderr,
+                )
+            if process.exit_code:
                 raise ResolutionError(
                     f"could not resolve tag {package.rev!r} for package {package.name!r}",
                     phase="tag-resolution",
                     command=tuple(command),
-                    exit_code=process.returncode,
+                    exit_code=process.exit_code,
                     output=process.stdout + process.stderr,
                 )
             candidates: dict[str, str] = {}

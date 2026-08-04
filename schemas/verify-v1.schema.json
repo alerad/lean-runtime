@@ -7,8 +7,37 @@
   "properties": {
     "schema": {"const": "lean-runtime.verify/v1"},
     "ok": {"type": "boolean"},
-    "data": {"type": "object", "required": ["subject", "subject_kind", "ok", "checks", "failures", "warnings", "lock_id", "environment_id", "artifact_match"], "additionalProperties": false, "properties": {"subject": {"type": "string"}, "subject_kind": {"enum": ["lock", "environment"]}, "ok": {"type": "boolean"}, "checks": {"type": "array"}, "failures": {"type": "array"}, "warnings": {"type": "array"}, "lock_id": {"type": "string"}, "environment_id": {"type": ["string", "null"]}, "artifact_match": {"type": ["boolean", "null"]}}},
-    "warnings": {"type": "array"},
-    "errors": {"type": "array"}
+    "data": {
+      "type": "object",
+      "anyOf": [{"required": ["subject", "subject_kind", "ok", "checks", "failures", "warnings", "lock_id", "environment_id", "artifact_match"]}, {"maxProperties": 0}],
+      "additionalProperties": false,
+      "properties": {
+        "subject": {"type": "string"},
+        "subject_kind": {"enum": ["lock", "environment"]},
+        "ok": {"type": "boolean"},
+        "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+        "failures": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+        "warnings": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+        "lock_id": {"type": "string"},
+        "environment_id": {"type": ["string", "null"]},
+        "artifact_match": {"type": ["boolean", "null"]}
+      }
+    },
+    "warnings": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"},
+    "errors": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"}
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "required": ["code", "ok", "subject", "details", "skipped"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "ok": {"type": "boolean"},
+        "subject": {"type": ["string", "null"]},
+        "details": {"type": "object"},
+        "skipped": {"type": "boolean"}
+      }
+    }
   }
 }

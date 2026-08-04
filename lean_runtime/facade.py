@@ -43,6 +43,7 @@ def setup(
     name: str | None = None,
     toolchain: str | None = None,
     runtime: Runtime | None = None,
+    cancel: threading.Event | None = None,
 ) -> PreparedEnvironment:
     """Prepare exactly one dependency, lock, named environment, or local-project context."""
     selected = runtime or default_runtime()
@@ -62,7 +63,9 @@ def setup(
         normalized_deps = (deps,) if isinstance(deps, (str, PackageReference)) else tuple(deps)
         if not normalized_deps:
             raise SpecificationError("setup deps must contain at least one dependency")
-        return selected.ensure_references(normalized_deps, toolchain=toolchain, name=name)
+        return selected.ensure_references(
+            normalized_deps, toolchain=toolchain, name=name, cancel=cancel
+        )
     if project is not None:
         if name is not None:
             raise SpecificationError("local projects cannot be assigned environment aliases")
@@ -73,7 +76,7 @@ def setup(
         resolved = (
             EnvironmentLock.load(Path(lock)) if isinstance(lock, (str, os.PathLike)) else lock
         )
-        return selected.ensure(resolved, name=name)
+        return selected.ensure(resolved, name=name, cancel=cancel)
     if toolchain is not None or name is not None:
         raise SpecificationError("opened environments do not accept name or toolchain overrides")
     return environment if isinstance(environment, Environment) else selected.open(str(environment))
@@ -90,11 +93,18 @@ def check(
     filename: str = "Main.lean",
     policy: ExecutionPolicy | None = None,
     runtime: Runtime | None = None,
+    cancel: threading.Event | None = None,
 ) -> ExecutionResult:
     """Check one source string, preparing its declared context when necessary."""
     selected = runtime or default_runtime()
     if all(value is None for value in (deps, project, lock, environment)):
-        return selected.check(source, toolchain=toolchain, filename=filename, policy=policy)
+        return selected.check(
+            source,
+            toolchain=toolchain,
+            filename=filename,
+            policy=policy,
+            cancel=cancel,
+        )
     prepared = setup(
         deps,
         project=project,
@@ -102,8 +112,9 @@ def check(
         environment=environment,
         toolchain=toolchain,
         runtime=selected,
+        cancel=cancel,
     )
-    return prepared.check(source, filename=filename, policy=policy)
+    return prepared.check(source, filename=filename, policy=policy, cancel=cancel)
 
 
 def check_file(
@@ -116,12 +127,13 @@ def check_file(
     toolchain: str | None = None,
     policy: ExecutionPolicy | None = None,
     runtime: Runtime | None = None,
+    cancel: threading.Event | None = None,
 ) -> ExecutionResult:
     """Check a file, automatically discovering a local project when no context is given."""
     selected = runtime or default_runtime()
     source = Path(path).expanduser().resolve()
     if all(value is None for value in (deps, project, lock, environment)):
-        return selected.check_file(source, toolchain=toolchain, policy=policy)
+        return selected.check_file(source, toolchain=toolchain, policy=policy, cancel=cancel)
     prepared = setup(
         deps,
         project=project,
@@ -129,10 +141,16 @@ def check_file(
         environment=environment,
         toolchain=toolchain,
         runtime=selected,
+        cancel=cancel,
     )
     if isinstance(prepared, ProjectEnvironment):
-        return prepared.check_file(source, policy=policy)
-    return prepared.check(source.read_text(encoding="utf-8"), filename=source.name, policy=policy)
+        return prepared.check_file(source, policy=policy, cancel=cancel)
+    return prepared.check(
+        source.read_text(encoding="utf-8"),
+        filename=source.name,
+        policy=policy,
+        cancel=cancel,
+    )
 
 
 def replay(
@@ -148,10 +166,15 @@ def check_matrix(
     filename: str = "Main.lean",
     concurrency: int = 1,
     runtime: Runtime | None = None,
+    cancel: threading.Event | None = None,
 ) -> MatrixResult:
     """Check one source across named contexts using bounded ordinary executions."""
     return (runtime or default_runtime()).check_matrix(
-        source, contexts=contexts, filename=filename, concurrency=concurrency
+        source,
+        contexts=contexts,
+        filename=filename,
+        concurrency=concurrency,
+        cancel=cancel,
     )
 
 
@@ -163,11 +186,21 @@ async def check_matrix_async(
     concurrency: int = 1,
     runtime: Runtime | None = None,
 ) -> MatrixResult:
-    return await asyncio.to_thread(
-        check_matrix,
-        source,
-        contexts=contexts,
-        filename=filename,
-        concurrency=concurrency,
-        runtime=runtime,
+    cancel = threading.Event()
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            check_matrix,
+            source,
+            contexts=contexts,
+            filename=filename,
+            concurrency=concurrency,
+            runtime=runtime,
+            cancel=cancel,
+        )
     )
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        cancel.set()
+        await task
+        raise

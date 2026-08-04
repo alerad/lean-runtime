@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -105,29 +106,39 @@ def run_matrix(
     contexts: tuple[MatrixContext, ...],
     base: Path,
     concurrency: int,
+    cancel: threading.Event | None = None,
 ) -> MatrixResult:
     if concurrency < 1 or concurrency > 32:
         raise SpecificationError("matrix concurrency must be between 1 and 32")
 
     def execute(context: MatrixContext) -> MatrixEntry:
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError("matrix execution was cancelled")
         if context.requires:
-            environment = runtime.ensure_references(context.requires, toolchain=context.toolchain)
-            result = environment.check(source, filename=filename)
+            environment = runtime.ensure_references(
+                context.requires, toolchain=context.toolchain, cancel=cancel
+            )
+            result = environment.check(source, filename=filename, cancel=cancel)
         elif context.lock is not None:
-            environment = runtime.ensure(EnvironmentLock.load(base / context.lock))
-            result = environment.check(source, filename=filename)
+            environment = runtime.ensure(EnvironmentLock.load(base / context.lock), cancel=cancel)
+            result = environment.check(source, filename=filename, cancel=cancel)
         elif context.environment is not None:
-            result = runtime.open(context.environment).check(source, filename=filename)
+            result = runtime.open(context.environment).check(
+                source, filename=filename, cancel=cancel
+            )
         elif context.project is not None:
             result = runtime.check(
                 source,
                 project=base / context.project,
                 filename=filename,
                 toolchain=context.toolchain,
+                cancel=cancel,
             )
         else:
             assert context.toolchain is not None
-            result = runtime.check(source, toolchain=context.toolchain, filename=filename)
+            result = runtime.check(
+                source, toolchain=context.toolchain, filename=filename, cancel=cancel
+            )
         return MatrixEntry(context.name, result)
 
     started = time.monotonic()
@@ -142,6 +153,8 @@ def run_matrix(
                     entry = future.result()
                     by_name[entry.context] = entry
             except BaseException:
+                if cancel is not None:
+                    cancel.set()
                 for future in futures:
                     future.cancel()
                 raise

@@ -25,8 +25,8 @@ def _result(*, ok: bool = True) -> ExecutionResult:
 
 
 class Prepared:
-    def check(self, source: str, *, filename: str, policy: object) -> ExecutionResult:
-        del source, filename, policy
+    def check(self, source: str, *, filename: str, policy: object, cancel=None) -> ExecutionResult:
+        del source, filename, policy, cancel
         return _result()
 
 
@@ -34,7 +34,8 @@ class FakeRuntime:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
 
-    def ensure_references(self, deps, *, toolchain=None, name=None):
+    def ensure_references(self, deps, *, toolchain=None, name=None, cancel=None):
+        del cancel
         self.calls.append(("deps", (deps, toolchain, name)))
         return Prepared()
 

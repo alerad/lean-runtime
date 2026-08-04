@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -30,6 +31,7 @@ from .models import (
     ExecutionProvenance,
     ExecutionResult,
     PackageProvenance,
+    PhaseTiming,
 )
 from .policies import ExecutionPolicy
 from .serialization import sha256_id, write_json_atomic
@@ -691,15 +693,23 @@ class Environment:
         job_parent.mkdir(parents=True, exist_ok=True)
         instance = job_parent / f"instance-{uuid.uuid4().hex}"
         try:
+            instance_started = time.monotonic()
             with self.manager.store.execution_lease(self.id):
                 clone_tree(self.workspace, instance)
+            instance_timing = PhaseTiming(
+                "instance_creation", round((time.monotonic() - instance_started) * 1000)
+            )
             preliminary: list[BackendResult] = []
+            staging_started = time.monotonic()
             if operation == "check":
                 assert entrypoint is not None
                 for name, source in files.items():
                     source_path = instance / name
                     source_path.parent.mkdir(parents=True, exist_ok=True)
                     source_path.write_text(source, encoding="utf-8")
+                staging_timing = PhaseTiming(
+                    "input_staging", round((time.monotonic() - staging_started) * 1000)
+                )
                 import_targets = _package_import_targets(files, self.lock)
                 if import_targets:
                     import_command = self.manager.toolchains.command(
@@ -723,6 +733,7 @@ class Environment:
                             source_digest=source_digest,
                             started_at=started_at,
                             policy=policy,
+                            timings=(instance_timing, staging_timing),
                         )
                         self._record_execution(
                             result,
@@ -768,6 +779,7 @@ class Environment:
                             source_digest=source_digest,
                             started_at=started_at,
                             policy=policy,
+                            timings=(instance_timing, staging_timing),
                         )
                         self._record_execution(
                             result,
@@ -783,10 +795,12 @@ class Environment:
                     self.lock.toolchain, "lake", "env", "lean", str(source_path)
                 )
             elif operation == "build":
+                staging_timing = PhaseTiming("input_staging", 0, performed=False)
                 command = self.manager.toolchains.command(
                     self.lock.toolchain, "lake", "build", *targets
                 )
             else:
+                staging_timing = PhaseTiming("input_staging", 0, performed=False)
                 command = self.manager.toolchains.command(
                     self.lock.toolchain, requested_command[0], *requested_command[1:]
                 )
@@ -819,6 +833,7 @@ class Environment:
                 source_digest=source_digest,
                 started_at=started_at,
                 policy=policy,
+                timings=(instance_timing, staging_timing),
             )
             self._record_execution(
                 result,
@@ -846,6 +861,7 @@ class Environment:
         source_digest: str,
         started_at: str,
         policy: ExecutionPolicy,
+        timings: tuple[PhaseTiming, ...] = (),
     ) -> ExecutionResult:
         combined = "\n".join(part for part in (raw.stdout, raw.stderr) if part)
         diagnostics = parse_diagnostics(combined)
@@ -884,6 +900,7 @@ class Environment:
             output_truncated=raw.output_truncated,
             diagnostics=diagnostics,
             provenance=provenance,
+            timings=(*timings, PhaseTiming("execution", round(raw.elapsed_seconds * 1000))),
         )
 
     def _record_execution(
@@ -929,6 +946,7 @@ class EnvironmentManager:
         *,
         name: str | None = None,
         build_profile: str = "release",
+        cancel: threading.Event | None = None,
     ) -> Environment:
         self.store.publish_lock(lock)
         environment_id = environment_identity(lock, build_profile)
@@ -938,10 +956,10 @@ class EnvironmentManager:
             "Ensuring published environment",
             environment_id=environment_id,
         )
-        with FileLock(self.store.lock_dir / f"{environment_id}.lock", timeout=1800):
+        with FileLock(self.store.lock_dir / f"{environment_id}.lock", timeout=1800, cancel=cancel):
             if not destination.is_dir():
                 self._ensure_sources(lock)
-                self._materialize(lock, environment_id, destination, build_profile)
+                self._materialize(lock, environment_id, destination, build_profile, cancel=cancel)
             else:
                 self.events.emit(
                     "environment.cache_hit",
@@ -983,6 +1001,8 @@ class EnvironmentManager:
         environment_id: str,
         destination: Path,
         build_profile: str,
+        *,
+        cancel: threading.Event | None,
     ) -> None:
         stage = self.store.environments / f".staging-{os.getpid()}-{uuid.uuid4().hex}"
         workspace = stage / "workspace"
@@ -1025,6 +1045,7 @@ class EnvironmentManager:
                     cwd=workspace,
                     environment=self.toolchains.environment,
                     policy=build_policy,
+                    cancel=cancel,
                 )
                 hydration.append(
                     {
@@ -1048,6 +1069,7 @@ class EnvironmentManager:
                 cwd=workspace,
                 environment=self.toolchains.environment,
                 policy=build_policy,
+                cancel=cancel,
             )
             if result.exit_code:
                 raise MaterializationError(

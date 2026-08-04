@@ -107,7 +107,7 @@ lean-runtime check research-stack Main.lean --include Support/Defs.lean
 Resolution and materialization print structured lifecycle progress to stderr.
 Pass global `--quiet` before the subcommand to suppress it.
 
-Pass global `--timings` before the subcommand for high-level timing output. Machine-readable
+Pass global `--timings` before the subcommand for stable phase timing output. Machine-readable
 execution output uses the versioned `lean-runtime.execution/v1` envelope; the other v1
 schemas and advanced command examples are documented in
 [Verify, understand, compare, and measure](v1-precision.md).

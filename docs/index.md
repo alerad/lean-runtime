@@ -28,7 +28,7 @@ It deliberately does not replace the official tools:
 The front-facing API supports setup-once Python environments, one-shot helpers,
 friendly exact package references, standalone TOML frontmatter, local-project
 discovery, exact lock output, batch checking, and asyncio. The explicit runtime
-also exposes OCI caches, bundles, audits, signatures, captures, policies, and
+also exposes OCI caches, bundles, verification, signatures, captures, policies, and
 store lifecycle operations.
 
 The local backend executes **trusted inputs only**. Lean packages and Lake

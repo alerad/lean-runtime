@@ -7,13 +7,126 @@
   "properties": {
     "schema": {"const": "lean-runtime.execution/v1"},
     "ok": {"type": "boolean"},
-    "data": {"$ref": "#/$defs/execution"},
+    "data": {"oneOf": [{"$ref": "#/$defs/execution"}, {"$ref": "#/$defs/empty"}]},
     "warnings": {"$ref": "#/$defs/issues"},
     "errors": {"$ref": "#/$defs/issues"}
   },
   "$defs": {
+    "empty": {"type": "object", "maxProperties": 0},
     "issues": {"type": "array", "items": {"$ref": "#/$defs/issue"}},
-    "issue": {"type": "object", "required": ["code", "message", "details"], "additionalProperties": false, "properties": {"code": {"type": "string"}, "message": {"type": "string"}, "details": {"type": "object"}}},
-    "execution": {"type": "object", "required": ["ok", "exit_code", "toolchain", "stdout", "stderr", "elapsed_seconds"], "properties": {"ok": {"type": "boolean"}, "exit_code": {"type": "integer"}, "toolchain": {"type": "string"}, "command": {"type": "array", "items": {"type": "string"}}, "cwd": {"type": "string"}, "stdout": {"type": "string"}, "stderr": {"type": "string"}, "elapsed_seconds": {"type": "number"}, "timed_out": {"type": "boolean"}, "cancelled": {"type": "boolean"}, "output_truncated": {"type": "boolean"}, "diagnostics": {"type": "array"}, "provenance": {"type": ["object", "null"]}}, "additionalProperties": false}
+    "issue": {
+      "type": "object",
+      "required": ["code", "message", "details"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "message": {"type": "string"},
+        "details": {"type": "object"}
+      }
+    },
+    "timing": {
+      "type": "object",
+      "required": ["phase", "duration_ms", "performed"],
+      "additionalProperties": false,
+      "properties": {
+        "phase": {"enum": ["toolchain", "resolution", "source_acquisition", "cache_lookup", "cache_download", "artifact_hydration", "build", "publication", "environment_open", "instance_creation", "input_staging", "execution", "result_collection", "result_publication", "cleanup"]},
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "performed": {"type": "boolean"}
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "required": ["severity", "message", "file", "line", "column"],
+      "additionalProperties": false,
+      "properties": {
+        "severity": {"enum": ["error", "warning", "information", "unknown"]},
+        "message": {"type": "string"},
+        "file": {"type": ["string", "null"]},
+        "line": {"type": ["integer", "null"]},
+        "column": {"type": ["integer", "null"]}
+      }
+    },
+    "package": {
+      "type": "object",
+      "required": ["name", "url", "revision", "tree_hash"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "url": {"type": "string"},
+        "revision": {"type": "string"},
+        "tree_hash": {"type": "string"}
+      }
+    },
+    "project": {
+      "type": "object",
+      "required": ["root", "workspace_digest", "lakefile_digest", "manifest_digest", "git_revision", "git_dirty"],
+      "additionalProperties": false,
+      "properties": {
+        "root": {"type": "string"},
+        "workspace_digest": {"type": "string"},
+        "lakefile_digest": {"type": "string"},
+        "manifest_digest": {"type": ["string", "null"]},
+        "git_revision": {"type": ["string", "null"]},
+        "git_dirty": {"type": ["boolean", "null"]}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "required": ["timeout_seconds", "max_output_bytes", "memory_mb", "cpu_seconds", "network"],
+      "additionalProperties": false,
+      "properties": {
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "max_output_bytes": {"type": "integer", "minimum": 0},
+        "memory_mb": {"type": ["integer", "null"]},
+        "cpu_seconds": {"type": ["integer", "null"]},
+        "network": {"enum": ["inherit", "disabled"]}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["environment_id", "execution_id", "request_digest", "lock_id", "toolchain", "packages", "platform", "backend", "requested_policy", "enforced_policy_fields", "source_digest", "started_at", "project"],
+      "additionalProperties": false,
+      "properties": {
+        "environment_id": {"type": ["string", "null"]},
+        "execution_id": {"type": "string"},
+        "request_digest": {"type": "string"},
+        "lock_id": {"type": ["string", "null"]},
+        "toolchain": {"type": "string"},
+        "packages": {"type": "array", "items": {"$ref": "#/$defs/package"}},
+        "platform": {
+          "type": "object",
+          "required": ["system", "machine", "python_platform"],
+          "additionalProperties": false,
+          "properties": {"system": {"type": "string"}, "machine": {"type": "string"}, "python_platform": {"type": "string"}}
+        },
+        "backend": {"type": "string"},
+        "requested_policy": {"$ref": "#/$defs/policy"},
+        "enforced_policy_fields": {"type": "array", "items": {"type": "string"}},
+        "source_digest": {"type": "string"},
+        "started_at": {"type": "string"},
+        "project": {"anyOf": [{"$ref": "#/$defs/project"}, {"type": "null"}]}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "required": ["ok", "exit_code", "toolchain", "command", "cwd", "stdout", "stderr", "elapsed_seconds", "timed_out", "cancelled", "output_truncated", "diagnostics", "provenance", "timings"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"type": "boolean"},
+        "exit_code": {"type": "integer"},
+        "toolchain": {"type": "string"},
+        "command": {"type": "array", "items": {"type": "string"}},
+        "cwd": {"type": "string"},
+        "stdout": {"type": "string"},
+        "stderr": {"type": "string"},
+        "elapsed_seconds": {"type": "number", "minimum": 0},
+        "timed_out": {"type": "boolean"},
+        "cancelled": {"type": "boolean"},
+        "output_truncated": {"type": "boolean"},
+        "diagnostics": {"type": "array", "items": {"$ref": "#/$defs/diagnostic"}},
+        "provenance": {"anyOf": [{"$ref": "#/$defs/provenance"}, {"type": "null"}]},
+        "timings": {"type": "array", "items": {"$ref": "#/$defs/timing"}}
+      }
+    }
   }
 }

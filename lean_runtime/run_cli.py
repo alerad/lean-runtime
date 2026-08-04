@@ -6,16 +6,18 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from .errors import LeanRuntimeError, ProjectError, SpecificationError
 from .events import RuntimeEvent
 from .frontmatter import LeanFrontmatter, parse_frontmatter
 from .lockfiles import EnvironmentLock
-from .models import ExecutionResult
+from .models import ExecutionResult, PhaseTiming
 from .policies import ExecutionPolicy
 from .projects import discover_project
 from .runtime import Runtime
+from .timings import render_timings
 from .wire import envelope, error, serialize_execution_v1
 
 
@@ -83,7 +85,7 @@ def _emit(
     *,
     as_json: bool,
     filename: str,
-    preparation_seconds: float | None = None,
+    show_timings: bool = False,
 ) -> None:
     if as_json:
         print(
@@ -97,10 +99,8 @@ def _emit(
     symbol = "✓" if result.ok else "✗"
     status = "accepted" if result.ok else "rejected"
     print(f"{symbol} {filename} {status} in {result.elapsed_seconds:.2f}s")
-    if preparation_seconds is not None:
-        print("Timings")
-        print(f"  context preparation  {preparation_seconds * 1000:.0f} ms")
-        print(f"  Lean execution       {result.elapsed_seconds * 1000:.0f} ms")
+    if show_timings:
+        print(render_timings(result.timings))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -161,36 +161,52 @@ def main(argv: list[str] | None = None) -> int:
                 embedded=arguments.lock is None,
             )
             environment = runtime.ensure(EnvironmentLock.load(lock_path))
-            preparation_seconds = time.monotonic() - preparation_started
+            preparation = PhaseTiming(
+                "environment_open", round((time.monotonic() - preparation_started) * 1000)
+            )
             result = environment.check(source, filename=source_path.name, policy=policy)
         elif context.requires:
+            resolution_started = time.monotonic()
             lock = runtime.resolve_references(context.requires, toolchain=context.toolchain)
+            resolution = PhaseTiming(
+                "resolution", round((time.monotonic() - resolution_started) * 1000)
+            )
             if arguments.lock_out is not None:
                 lock.write(arguments.lock_out)
             environment = runtime.ensure(lock)
-            preparation_seconds = time.monotonic() - preparation_started
+            preparation = PhaseTiming(
+                "environment_open",
+                round((time.monotonic() - resolution_started) * 1000) - resolution.duration_ms,
+            )
             result = environment.check(source, filename=source_path.name, policy=policy)
+            result = replace(result, timings=(resolution, preparation, *result.timings))
         elif arguments.lock_out is not None:
             raise SpecificationError(
                 "--lock-out requires dependencies declared with --with or frontmatter"
             )
         elif context.toolchain is not None:
-            preparation_seconds = time.monotonic() - preparation_started
+            preparation = PhaseTiming(
+                "toolchain", round((time.monotonic() - preparation_started) * 1000)
+            )
             result = runtime.check_file(source_path, toolchain=context.toolchain, policy=policy)
         else:
             try:
-                preparation_seconds = time.monotonic() - preparation_started
+                preparation = PhaseTiming(
+                    "environment_open", round((time.monotonic() - preparation_started) * 1000)
+                )
                 result = runtime.check_file(source_path, policy=policy)
             except ProjectError as exc:
                 raise SpecificationError(
                     "the file has no execution context; add frontmatter, pass --with or "
                     "--toolchain, provide --lock, or place it in a pinned Lake project"
                 ) from exc
+        if context.lock is not None or context.toolchain is not None or not context.requires:
+            result = replace(result, timings=(preparation, *result.timings))
         _emit(
             result,
             as_json=arguments.json,
             filename=source_path.name,
-            preparation_seconds=preparation_seconds if arguments.timings else None,
+            show_timings=arguments.timings,
         )
         return 0 if result.ok else 1
     except (LeanRuntimeError, OSError, UnicodeError, ValueError) as exc:

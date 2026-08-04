@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -20,9 +22,10 @@ class ProjectToolchains:
     def command(self, _toolchain: str, executable: str, *args: str) -> list[str]:
         if executable == "lake" and args[:2] == ("env", "lean"):
             script = (
-                "import pathlib,sys; "
+                "import pathlib,sys,time; "
                 "source=pathlib.Path(sys.argv[1]); "
                 "text=source.read_text(); "
+                "time.sleep(10) if 'SLOW' in text else None; "
                 "raise SystemExit(1 if 'BAD' in text else 0)"
             )
             return [sys.executable, "-c", script, args[-1]]
@@ -122,3 +125,38 @@ def test_project_environment_rejects_files_outside_its_root(tmp_path: Path) -> N
     )
     with pytest.raises(ProjectError, match="outside the project root"):
         runtime.project(source).check_file(outside)
+
+
+def test_project_check_propagates_cancellation_to_the_active_process(tmp_path: Path) -> None:
+    source = _project(tmp_path / "project")
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        caches=[],  # type: ignore[arg-type]
+    )
+    cancel = threading.Event()
+    timer = threading.Timer(0.1, cancel.set)
+    timer.start()
+    try:
+        result = runtime.project(source).check("-- SLOW", cancel=cancel)
+    finally:
+        timer.cancel()
+    assert result.cancelled
+    assert result.exit_code == 130
+    assert any("cancelled" in item.message for item in result.diagnostics)
+
+
+def test_project_async_cancellation_waits_for_process_cleanup(tmp_path: Path) -> None:
+    source = _project(tmp_path / "project")
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        caches=[],  # type: ignore[arg-type]
+    )
+
+    async def cancel_check() -> None:
+        task = asyncio.create_task(runtime.project(source).check_async("-- SLOW"))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_check())

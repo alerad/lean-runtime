@@ -1,1 +1,47 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://lean-runtime.dev/schemas/gc-v1.schema.json","type":"object","required":["schema","ok","data","warnings","errors"],"additionalProperties":false,"properties":{"schema":{"const":"lean-runtime.gc/v1"},"ok":{"type":"boolean"},"data":{"type":"object"},"warnings":{"type":"array"},"errors":{"type":"array"}}}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lean-runtime.dev/schemas/gc-v1.schema.json",
+  "type": "object",
+  "required": ["schema", "ok", "data", "warnings", "errors"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "lean-runtime.gc/v1"},
+    "ok": {"type": "boolean"},
+    "data": {
+      "type": "object",
+      "anyOf": [{"required": ["environments", "oci_blobs"]}, {"maxProperties": 0}],
+      "additionalProperties": false,
+      "properties": {
+        "environments": {"$ref": "#/$defs/gc"},
+        "oci_blobs": {"anyOf": [{"$ref": "#/$defs/blobGc"}, {"type": "null"}]}
+      }
+    },
+    "warnings": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"},
+    "errors": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"}
+  },
+  "$defs": {
+    "gc": {
+      "type": "object",
+      "required": ["candidates", "removed", "retained", "dry_run"],
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {"type": "array", "items": {"type": "string"}},
+        "removed": {"type": "array", "items": {"type": "string"}},
+        "retained": {"type": "array", "items": {"type": "string"}},
+        "dry_run": {"type": "boolean"}
+      }
+    },
+    "blobGc": {
+      "type": "object",
+      "required": ["candidates", "removed", "retained", "reclaimed_bytes", "dry_run"],
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {"type": "array", "items": {"type": "string"}},
+        "removed": {"type": "array", "items": {"type": "string"}},
+        "retained": {"type": "array", "items": {"type": "string"}},
+        "reclaimed_bytes": {"type": "integer", "minimum": 0},
+        "dry_run": {"type": "boolean"}
+      }
+    }
+  }
+}

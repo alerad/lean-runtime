@@ -1,1 +1,79 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://lean-runtime.dev/schemas/inspect-v1.schema.json","type":"object","required":["schema","ok","data","warnings","errors"],"additionalProperties":false,"properties":{"schema":{"const":"lean-runtime.inspect/v1"},"ok":{"type":"boolean"},"data":{"type":"object"},"warnings":{"type":"array"},"errors":{"type":"array"}}}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lean-runtime.dev/schemas/inspect-v1.schema.json",
+  "type": "object",
+  "required": ["schema", "ok", "data", "warnings", "errors"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "lean-runtime.inspect/v1"},
+    "ok": {"type": "boolean"},
+    "data": {
+      "type": "object",
+      "anyOf": [{"required": ["subject", "subject_kind", "lock_id", "environment", "package_locks", "decisions"]}, {"maxProperties": 0}],
+      "additionalProperties": false,
+      "properties": {
+        "subject": {"type": "string"},
+        "subject_kind": {"enum": ["lock", "environment"]},
+        "lock_id": {"type": "string"},
+        "environment": {"anyOf": [{"$ref": "#/$defs/environment"}, {"type": "null"}]},
+        "package_locks": {"type": "array", "items": {"$ref": "#/$defs/package"}},
+        "decisions": {"type": "array", "items": {"$ref": "#/$defs/decision"}}
+      }
+    },
+    "warnings": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"},
+    "errors": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"}
+  },
+  "$defs": {
+    "environment": {
+      "type": "object",
+      "required": ["environment_id", "lock_id", "toolchain", "packages", "platform", "build_profile", "status", "created_at", "names"],
+      "additionalProperties": false,
+      "properties": {
+        "environment_id": {"type": "string"},
+        "lock_id": {"type": "string"},
+        "toolchain": {"type": "string"},
+        "packages": {"type": "integer", "minimum": 0},
+        "platform": {
+          "type": "object",
+          "required": ["system", "machine", "python_platform"],
+          "additionalProperties": false,
+          "properties": {"system": {"type": "string"}, "machine": {"type": "string"}, "python_platform": {"type": "string"}}
+        },
+        "build_profile": {"type": "string"},
+        "status": {"type": "string"},
+        "created_at": {"type": "string"},
+        "names": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "package": {
+      "type": "object",
+      "required": ["name", "source", "url", "requested_revision", "revision", "tree_hash", "source_id", "inherited", "subdir", "root_module", "artifact_command"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "source": {"const": "git"},
+        "url": {"type": "string"},
+        "requested_revision": {"type": ["string", "null"]},
+        "revision": {"type": "string"},
+        "tree_hash": {"type": "string"},
+        "source_id": {"type": "string"},
+        "inherited": {"type": "boolean"},
+        "subdir": {"type": ["string", "null"]},
+        "root_module": {"type": ["string", "null"]},
+        "artifact_command": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "decision": {
+      "type": "object",
+      "required": ["code", "subject", "outcome", "reason", "details"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "subject": {"type": "string"},
+        "outcome": {"type": "string"},
+        "reason": {"type": ["string", "null"]},
+        "details": {"type": "object"}
+      }
+    }
+  }
+}

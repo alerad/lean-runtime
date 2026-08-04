@@ -7,10 +7,13 @@ import os
 import stat
 import subprocess
 import tempfile
+import threading
 import urllib.request
 from pathlib import Path
 
+from .backends import LocalBackend
 from .errors import ToolchainError
+from .policies import ExecutionPolicy
 
 ELAN_VERSION = "4.2.3"
 ELAN_INIT_URL = f"https://raw.githubusercontent.com/leanprover/elan/v{ELAN_VERSION}/elan-init.sh"
@@ -141,21 +144,24 @@ class ToolchainManager:
         }
         return name in installed
 
-    def ensure(self, toolchain: str) -> str:
+    def ensure(self, toolchain: str, *, cancel: threading.Event | None = None) -> str:
         """Install a toolchain if necessary and return its normalized name."""
         name = normalize_toolchain(toolchain)
         if self.is_installed(name):
             return name
-        process = subprocess.run(
+        process = LocalBackend().execute(
             [str(self.elan_path()), "toolchain", "install", name],
-            env=self.environment,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
+            cwd=self.home,
+            environment=self.environment,
+            policy=ExecutionPolicy(timeout_seconds=1800, max_output_bytes=10_000_000),
+            cancel=cancel,
         )
-        if process.returncode:
-            raise ToolchainError(f"could not install Lean toolchain {name!r}:\n{process.stdout}")
+        if process.cancelled:
+            raise ToolchainError(f"Lean toolchain installation was cancelled: {name!r}")
+        if process.exit_code:
+            raise ToolchainError(
+                f"could not install Lean toolchain {name!r}:\n{process.stdout}{process.stderr}"
+            )
         return name
 
     def command(self, toolchain: str, executable: str, *args: str) -> list[str]:

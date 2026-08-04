@@ -21,7 +21,7 @@ lean-runtime verify research-stack --rebuild
 Lock verification parses the canonical lock and recomputes its identity without resolving,
 acquiring, or building. Environment verification checks identity, platform compatibility,
 embedded Git commits and trees, workspace structure, and a Lean probe. `--offline` refuses
-toolchain acquisition. `--rebuild` uses the independent audit build and reports artifact
+toolchain acquisition. `--rebuild` uses an independent verification build and reports artifact
 inventory differences as warnings: source/probe trust and byte equality are distinct claims.
 
 ## Explain context and reuse
@@ -53,7 +53,8 @@ lean-runtime profile research-stack Main.lean --warmup 1 --repeat 5
 ```
 
 Warmups are excluded. Every measured sample remains an ordinary persisted execution with a
-unique execution ID. Profiling stops at the first rejected or failed sample.
+unique execution ID. Profiling stops at the first rejected or failed sample. Execution JSON
+contains the same stable phase records shown by `--timings`; unperformed phases are explicit.
 
 ## Matrix checks
 
@@ -74,6 +75,8 @@ lean-runtime matrix matrix.toml Main.lean --concurrency 2
 Each context uses exactly one of `requires`, `lock`, `environment`, `toolchain`, or
 `project`. Preparation and checking use the normal runtime paths, and every entry contains
 an ordinary execution result. Concurrency defaults to one and is bounded at 32.
+Cancelling the async Python matrix API signals every active Lean process and prevents pending
+entries from beginning execution.
 
 ## Machine-readable output
 
