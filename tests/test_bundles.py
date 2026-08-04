@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import http.server
 import json
+import os
 import shutil
 import subprocess
+import sys
 import tarfile
+import threading
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -12,6 +17,7 @@ import pytest
 from lean_runtime import EnvironmentError, EnvironmentLock, LockedPackage, Runtime
 from lean_runtime.bundles import _oci_archive
 from lean_runtime.environments import ENVIRONMENT_SCHEMA
+from lean_runtime.oci import OCIEnvironmentPublisher, OCIRepository
 from lean_runtime.store import environment_identity, platform_record, source_snapshot_digest
 
 
@@ -181,3 +187,169 @@ def test_bundle_export_rejects_modified_checked_out_package(tmp_path: Path) -> N
     package.write_text("def sampleValue : Nat := 666\n")
     with pytest.raises(EnvironmentError, match="checked-out content mismatch"):
         producer.export_environment(environment_id, tmp_path / "tampered.oci.tar.gz")
+
+
+class _FakeToolchains:
+    def __init__(self, home: Path) -> None:
+        self.home = home
+
+    @property
+    def environment(self) -> dict[str, str]:
+        return os.environ.copy()
+
+    def command(self, _toolchain: str, _executable: str, *_args: str) -> list[str]:
+        return [sys.executable, "-c", "raise SystemExit(0)"]
+
+
+def test_transparent_authenticated_oci_pull_and_blob_reuse(tmp_path: Path) -> None:
+    producer, environment_id, lock = _published_runtime(tmp_path / "producer")
+    bundle = tmp_path / "environment.oci.tar.gz"
+    producer.export_environment(environment_id, bundle)
+    entries = _archive_entries(bundle)
+    index = json.loads(entries["index.json"])
+    manifest_descriptor = index["manifests"][0]
+    manifest_digest = manifest_descriptor["digest"]
+    manifest = entries["blobs/sha256/" + manifest_digest.removeprefix("sha256:")]
+    requests: list[str] = []
+    ranges: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            requests.append(self.path)
+            if self.path.startswith("/token"):
+                self._send(json.dumps({"token": "test-token"}).encode(), "application/json")
+                return
+            if self.headers.get("Authorization") != "Bearer test-token":
+                realm = f"http://127.0.0.1:{server.server_port}/token"
+                self.send_response(401)
+                self.send_header(
+                    "WWW-Authenticate",
+                    f'Bearer realm="{realm}",service="fixture",scope="repository:owner/cache:pull"',
+                )
+                self.end_headers()
+                return
+            prefix = "/v2/owner/cache/manifests/"
+            if self.path == prefix + lock.lock_id:
+                data = entries["index.json"]
+                self._send(data, "application/vnd.oci.image.index.v1+json")
+                return
+            if self.path == prefix + urllib.parse.quote(manifest_digest, safe=":"):
+                self._send(manifest, "application/vnd.oci.image.manifest.v1+json")
+                return
+            blob_prefix = "/v2/owner/cache/blobs/"
+            if self.path.startswith(blob_prefix):
+                digest = self.path.removeprefix(blob_prefix)
+                blob_data = entries.get("blobs/sha256/" + digest.removeprefix("sha256:"))
+                if blob_data is not None:
+                    range_header = self.headers.get("Range")
+                    if range_header:
+                        ranges.append(range_header)
+                        offset = int(range_header.removeprefix("bytes=").removesuffix("-"))
+                        self._send(
+                            blob_data[offset:],
+                            "application/octet-stream",
+                            status=206,
+                            content_range=f"bytes {offset}-{len(blob_data) - 1}/{len(blob_data)}",
+                            digest_source=blob_data,
+                        )
+                    else:
+                        self._send(blob_data, "application/octet-stream")
+                    return
+            self.send_response(404)
+            self.end_headers()
+
+        def _send(
+            self,
+            data: bytes,
+            content_type: str,
+            *,
+            status: int = 200,
+            content_range: str | None = None,
+            digest_source: bytes | None = None,
+        ) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            if content_range:
+                self.send_header("Content-Range", content_range)
+            digest_data = digest_source if digest_source is not None else data
+            self.send_header(
+                "Docker-Content-Digest", "sha256:" + hashlib.sha256(digest_data).hexdigest()
+            )
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    cache = f"oci+http://127.0.0.1:{server.server_port}/owner/cache"
+    try:
+        consumer_home = tmp_path / "consumer"
+        runtime = Runtime(
+            toolchains=_FakeToolchains(consumer_home),  # type: ignore[arg-type]
+            prebuilt="require",
+            caches=[cache],
+        )
+        manifest_value = json.loads(manifest)
+        resumed_descriptor = manifest_value["layers"][0]
+        resumed_data = entries[
+            "blobs/sha256/" + resumed_descriptor["digest"].removeprefix("sha256:")
+        ]
+        partial = runtime.store.oci_blobs / (
+            "." + resumed_descriptor["digest"].removeprefix("sha256:") + ".partial"
+        )
+        partial.write_bytes(resumed_data[: len(resumed_data) // 2])
+        imported = runtime.ensure(lock)
+        assert imported.id == environment_id
+        imported_metadata = json.loads((imported.root / "metadata.json").read_text())
+        assert imported_metadata["origin"]["registry"] == cache
+        first_blob_requests = len([path for path in requests if "/blobs/" in path])
+        assert ranges
+
+        shutil.rmtree(runtime.store.environment_path(environment_id))
+        runtime.ensure(lock)
+        assert len([path for path in requests if "/blobs/" in path]) == first_blob_requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_oci_publisher_uploads_blobs_before_manifests(tmp_path: Path) -> None:
+    producer, environment_id, lock = _published_runtime(tmp_path / "producer")
+    publisher = OCIEnvironmentPublisher(
+        OCIRepository.parse("oci://registry.example/owner/cache"),
+        producer.store,
+        producer.bundles,
+        producer.events,
+    )
+    operations: list[tuple[str, str]] = []
+
+    class FakeClient:
+        def manifest_exists(self, _digest: str) -> bool:
+            return True
+
+        def blob_exists(self, digest: str) -> bool:
+            operations.append(("exists", digest))
+            return False
+
+        def upload_blob(self, path: Path, digest: str) -> None:
+            assert path.is_file()
+            assert "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() == digest
+            operations.append(("blob", digest))
+
+        def publish_manifest(self, reference: str, data: bytes, _media_type: str) -> str:
+            operations.append(("manifest", reference))
+            return "sha256:" + hashlib.sha256(data).hexdigest()
+
+    publisher.client = FakeClient()  # type: ignore[assignment]
+    result = publisher.publish(environment_id, tags=("v1",))
+    kinds = [kind for kind, _value in operations]
+    first_manifest = kinds.index("manifest")
+    assert all(kind in {"exists", "blob"} for kind in kinds[:first_manifest])
+    assert result.lock_id == lock.lock_id
+    assert result.uploaded_blobs == 3
+    assert operations[-2:] == [("manifest", lock.lock_id), ("manifest", "v1")]

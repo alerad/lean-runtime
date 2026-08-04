@@ -14,6 +14,21 @@ runtime.replay_capture("run.json")  # replay a capture
 runtime.gc(dry_run=True)  # inspect reclaimable environments
 ```
 
+Configure transparent prebuilt environments and publish them through OCI:
+
+```python
+runtime = Runtime(
+    caches=["oci://ghcr.io/alerad/leancert-runtime"],
+    prebuilt="auto",
+)
+environment = runtime.ensure(lock)
+published = runtime.publish_environment(
+    environment.id,
+    "oci://ghcr.io/alerad/leancert-runtime",
+    tags=["v4.32.2.4"],
+)
+```
+
 Package-reference discovery is also exposed in separable stages:
 
 ```python

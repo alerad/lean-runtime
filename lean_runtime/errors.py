@@ -40,6 +40,10 @@ class EnvironmentError(LeanRuntimeError):
     """A content-addressed environment could not be opened or built."""
 
 
+class PrebuiltUnavailable(EnvironmentError):
+    """A prebuilt cache had no usable artifact or could not be reached."""
+
+
 class MaterializationError(EnvironmentError):
     """Locked sources or build artifacts could not be materialized."""
 

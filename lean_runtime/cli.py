@@ -71,6 +71,17 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="lean-runtime")
     root.add_argument("--home", help="runtime store root")
     root.add_argument("--quiet", action="store_true", help="suppress progress events")
+    root.add_argument(
+        "--cache",
+        action="append",
+        dest="caches",
+        help="OCI cache repository; repeatable (oci://registry/owner/repository)",
+    )
+    root.add_argument("--prebuilt", choices=("auto", "require", "never"), default=None)
+    root.add_argument("--signatures", choices=("ignore", "require"), default="ignore")
+    root.add_argument("--trusted-identity")
+    root.add_argument("--trusted-issuer")
+    root.add_argument("--cosign", default="cosign")
     commands = root.add_subparsers(dest="command", required=True)
 
     resolve = commands.add_parser("resolve", help="compile a TOML/JSON spec into a lock")
@@ -81,6 +92,32 @@ def parser() -> argparse.ArgumentParser:
     ensure = commands.add_parser("ensure", help="build or reopen a locked environment")
     ensure.add_argument("lock", type=Path)
     ensure.add_argument("--name")
+
+    pull = commands.add_parser("pull", help="require and import a prebuilt locked environment")
+    pull.add_argument("lock", type=Path)
+    pull.add_argument("--name")
+
+    push = commands.add_parser(
+        "build-and-push", help="ensure a lock and publish its prebuilt environment"
+    )
+    push.add_argument("lock", type=Path)
+    push.add_argument("--push-to", required=True)
+    push.add_argument("--tag", action="append", default=[])
+    push.add_argument("--name")
+    push.add_argument(
+        "--platform-only",
+        action="store_true",
+        help="publish blobs and platform manifest without updating the lock index",
+    )
+    push.add_argument("--sign", action="store_true", help="sign the published lock index")
+
+    publish_index = commands.add_parser(
+        "publish-index", help="finalize a lock index from platform-result JSON files"
+    )
+    publish_index.add_argument("lock_id")
+    publish_index.add_argument("platform_results", nargs="+", type=Path)
+    publish_index.add_argument("--repository", required=True)
+    publish_index.add_argument("--tag", action="append", default=[])
 
     export = commands.add_parser("export", help="export a deterministic OCI environment bundle")
     export.add_argument("environment")
@@ -153,7 +190,16 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    runtime = Runtime(home=args.home, on_event=None if args.quiet else _progress)
+    runtime = Runtime(
+        home=args.home,
+        on_event=None if args.quiet else _progress,
+        prebuilt=args.prebuilt,
+        caches=args.caches,
+        signatures=args.signatures,
+        trusted_identity=args.trusted_identity,
+        trusted_issuer=args.trusted_issuer,
+        cosign=args.cosign,
+    )
     try:
         if args.command == "install":
             print(runtime.toolchains.ensure(args.toolchain))
@@ -169,6 +215,36 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "ensure":
             environment = runtime.ensure(EnvironmentLock.load(args.lock), name=args.name)
             _json(environment.inspect().to_dict())
+            return 0
+        if args.command == "pull":
+            runtime.prebuilt = "require"
+            environment = runtime.ensure(EnvironmentLock.load(args.lock), name=args.name)
+            _json(environment.inspect().to_dict())
+            return 0
+        if args.command == "build-and-push":
+            environment = runtime.ensure(EnvironmentLock.load(args.lock), name=args.name)
+            _json(
+                runtime.publish_environment(
+                    environment.id,
+                    args.push_to,
+                    tags=args.tag,
+                    finalize=not args.platform_only,
+                    sign=args.sign,
+                ).to_dict()
+            )
+            return 0
+        if args.command == "publish-index":
+            descriptors = []
+            for path in args.platform_results:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                descriptor = value.get("platform_descriptor") if isinstance(value, dict) else None
+                if not isinstance(descriptor, dict):
+                    raise ValueError(f"invalid platform result: {path}")
+                descriptors.append(descriptor)
+            digest = runtime.publish_environment_index(
+                args.repository, args.lock_id, descriptors, tags=args.tag
+            )
+            _json({"lock_id": args.lock_id, "index_digest": digest})
             return 0
         if args.command == "export":
             _json(runtime.export_environment(args.environment, args.output).to_dict())

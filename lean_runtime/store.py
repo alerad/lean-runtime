@@ -151,6 +151,7 @@ class StoreStatus:
     environments: int
     locks: int
     sources: int
+    oci_blobs: int
     executions: int
     aliases: int
     bytes_used: int
@@ -162,6 +163,7 @@ class StoreStatus:
             "environments": self.environments,
             "locks": self.locks,
             "sources": self.sources,
+            "oci_blobs": self.oci_blobs,
             "executions": self.executions,
             "aliases": self.aliases,
             "bytes_used": self.bytes_used,
@@ -182,6 +184,7 @@ class EnvironmentStore:
         self.executions = home / "executions"
         self.usage = home / "usage"
         self.leases = home / "leases"
+        self.oci_blobs = home / "oci" / "blobs" / "sha256"
         self.lock_dir = home / ".locks"
         for path in (
             self.sources,
@@ -192,6 +195,7 @@ class EnvironmentStore:
             self.executions,
             self.usage,
             self.leases,
+            self.oci_blobs,
             self.lock_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
@@ -430,6 +434,7 @@ class EnvironmentStore:
             environments=sum(1 for path in self.environments.glob("env_*") if path.is_dir()),
             locks=sum(1 for path in self.locks.glob("lock_*") if path.is_dir()),
             sources=sum(1 for path in self.sources.glob("source_*") if path.is_dir()),
+            oci_blobs=sum(1 for path in self.oci_blobs.glob("[0-9a-f]" * 64) if path.is_file()),
             executions=sum(1 for path in self.executions.glob("execution_*.json")),
             aliases=len(self.aliases()),
             bytes_used=bytes_used,
@@ -441,7 +446,7 @@ class EnvironmentStore:
     ) -> GarbageCollectionReport:
         """Remove old environments not reachable through a name.
 
-        Locks and immutable sources are retained in the first store schema.
+        Locks, immutable sources, and OCI blobs are retained in the current store schema.
         """
         referenced = set(self.aliases().values())
         now = time.time()

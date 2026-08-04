@@ -9,22 +9,37 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from .backends import Backend, LocalBackend
 from .bundles import BundleInfo, EnvironmentBundles
 from .diagnostics import error_diagnostic, parse_diagnostics
 from .environments import Environment, EnvironmentManager, ExecutionCapture
-from .errors import ProjectError, SpecificationError, ToolchainError
+from .errors import (
+    EnvironmentError,
+    PrebuiltUnavailable,
+    ProjectError,
+    SpecificationError,
+    ToolchainError,
+)
 from .events import EventCallback, EventEmitter
 from .health import DoctorReport, diagnose
 from .lockfiles import EnvironmentLock
 from .models import ExecutionProvenance, ExecutionResult
+from .oci import OCIEnvironmentCache, OCIEnvironmentPublisher, OCIRepository, PublishInfo
 from .policies import ExecutionPolicy
 from .references import PackageReference, discover_package, normalize_references
 from .resolver import EnvironmentResolver
 from .serialization import sha256_id, sha256_text
+from .signatures import CosignVerifier
 from .specs import EnvironmentSpec, GitPackage
-from .store import EnvironmentStore, GarbageCollectionReport, StoreStatus, platform_record
+from .store import (
+    EnvironmentStore,
+    GarbageCollectionReport,
+    StoreStatus,
+    environment_identity,
+    platform_record,
+)
 from .toolchains import ToolchainManager, normalize_toolchain
 
 EnvironmentReference = Environment | EnvironmentSpec | EnvironmentLock | str
@@ -49,7 +64,20 @@ class Runtime:
         toolchains: ToolchainManager | None = None,
         backend: Backend | None = None,
         on_event: EventCallback | None = None,
+        prebuilt: str | None = None,
+        caches: Sequence[str] | None = None,
+        signatures: str = "ignore",
+        trusted_identity: str | None = None,
+        trusted_issuer: str | None = None,
+        cosign: str | os.PathLike[str] = "cosign",
     ) -> None:
+        prebuilt = prebuilt or os.environ.get("LEAN_RUNTIME_PREBUILT", "auto")
+        if prebuilt not in {"auto", "require", "never"}:
+            raise ValueError("prebuilt must be 'auto', 'require', or 'never'")
+        if signatures not in {"ignore", "require"}:
+            raise ValueError("signatures must be 'ignore' or 'require'")
+        if signatures == "require" and (not trusted_identity or not trusted_issuer):
+            raise ValueError("required signatures need trusted_identity and trusted_issuer")
         self.toolchains = toolchains or ToolchainManager(home)
         self.home = self.toolchains.home
         self.backend = backend or LocalBackend()
@@ -60,6 +88,30 @@ class Runtime:
             self.store, self.toolchains, self.backend, self.events
         )
         self.bundles = EnvironmentBundles(self.store, self.toolchains, self.backend, self.events)
+        configured_caches = caches
+        if configured_caches is None:
+            configured_caches = tuple(
+                item.strip()
+                for item in os.environ.get("LEAN_RUNTIME_CACHES", "").split(",")
+                if item.strip()
+            )
+        self.prebuilt = prebuilt
+        self.cosign_executable = cosign
+        self.signature_verifier = (
+            CosignVerifier(trusted_identity, trusted_issuer, executable=cosign)
+            if signatures == "require"
+            else None
+        )
+        self.caches = tuple(
+            OCIEnvironmentCache(
+                OCIRepository.parse(value),
+                self.store,
+                self.bundles,
+                self.events,
+                self.signature_verifier,
+            )
+            for value in configured_caches
+        )
 
     def resolve(self, spec: EnvironmentSpec, *, timeout: float = 900) -> EnvironmentLock:
         return self.resolver.resolve(spec, timeout=timeout)
@@ -71,6 +123,28 @@ class Runtime:
         name: str | None = None,
         build_profile: str = "release",
     ) -> Environment:
+        environment_id = environment_identity(lock, build_profile)
+        destination = self.store.environment_path(environment_id)
+        if not destination.is_dir() and self.prebuilt != "never":
+            imported = False
+            for cache in self.caches:
+                try:
+                    cache.pull(lock, name=name)
+                    imported = True
+                    break
+                except PrebuiltUnavailable as exc:
+                    self.events.emit(
+                        "prebuilt.fallback",
+                        "Prebuilt environment is unavailable",
+                        registry=cache.repository.display,
+                        reason=str(exc),
+                    )
+            if not imported and self.prebuilt == "require":
+                if not self.caches:
+                    raise EnvironmentError(
+                        "prebuilt environments are required but no caches configured"
+                    )
+                raise EnvironmentError("no configured cache provided a compatible environment")
         return self.environments.ensure(lock, name=name, build_profile=build_profile)
 
     def open(self, identifier: str) -> Environment:
@@ -92,6 +166,43 @@ class Runtime:
         """Verify and atomically import a local OCI environment bundle."""
         info = self.bundles.import_bundle(Path(bundle), name=name, probe=probe)
         return self.open(info.environment_id)
+
+    def publish_environment(
+        self,
+        identifier: str,
+        repository: str,
+        *,
+        tags: Sequence[str] = (),
+        finalize: bool = True,
+        sign: bool = False,
+    ) -> PublishInfo:
+        """Publish a built environment and its lock-level OCI index."""
+        environment = self.open(identifier)
+        publisher = OCIEnvironmentPublisher(
+            OCIRepository.parse(repository), self.store, self.bundles, self.events
+        )
+        result = publisher.publish(environment.id, tags=tuple(tags), finalize=finalize)
+        if sign:
+            if result.index_digest is None:
+                raise ValueError("platform-only publishing cannot sign a lock index")
+            CosignVerifier(executable=self.cosign_executable).sign(
+                publisher.repository, result.index_digest
+            )
+        return result
+
+    def publish_environment_index(
+        self,
+        repository: str,
+        lock_id: str,
+        platform_descriptors: Sequence[dict[str, Any]],
+        *,
+        tags: Sequence[str] = (),
+    ) -> str:
+        """Finalize a deterministic multi-platform lock index."""
+        publisher = OCIEnvironmentPublisher(
+            OCIRepository.parse(repository), self.store, self.bundles, self.events
+        )
+        return publisher.publish_index(lock_id, list(platform_descriptors), tags=tuple(tags))
 
     def create_environment(
         self,

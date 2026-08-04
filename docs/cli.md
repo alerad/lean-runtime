@@ -29,8 +29,10 @@ lean-runtime check Main.lean \
 ```bash
 lean-runtime resolve environment.toml --output environment.lock.json
 lean-runtime ensure environment.lock.json --name research-stack
+lean-runtime --cache oci://ghcr.io/owner/cache pull environment.lock.json
 lean-runtime export research-stack --output research-stack.oci.tar.gz
 lean-runtime --home /tmp/fresh import research-stack.oci.tar.gz --name research-stack
+lean-runtime build-and-push environment.lock.json --push-to oci://ghcr.io/owner/cache
 lean-runtime check research-stack Main.lean --json
 lean-runtime inspect research-stack --packages
 lean-runtime env-list
@@ -77,3 +79,11 @@ lean-runtime check research-stack Main.lean --include Support/Defs.lean
 
 Resolution and materialization print structured lifecycle progress to stderr.
 Pass global `--quiet` before the subcommand to suppress it.
+
+Global `--cache` is repeatable and `--prebuilt auto|require|never` controls
+transparent cache acquisition. `LEAN_RUNTIME_CACHES` accepts a comma-separated
+equivalent and `LEAN_RUNTIME_PREBUILT` sets the default policy.
+
+Use global `--signatures require --trusted-identity ID --trusted-issuer ISSUER`
+to require a Cosign-verified publisher. `build-and-push --sign` signs the
+published lock-index digest using Cosign's configured keyless or keyed context.

@@ -13,6 +13,7 @@ from .errors import (
     LeanRuntimeError,
     MaterializationError,
     PolicyError,
+    PrebuiltUnavailable,
     ProjectError,
     ResolutionError,
     SpecificationError,
@@ -22,6 +23,7 @@ from .events import EventCallback, RuntimeEvent
 from .health import DoctorCheck, DoctorReport
 from .lockfiles import EnvironmentLock, LockedPackage
 from .models import Diagnostic, ExecutionProvenance, ExecutionResult, PackageProvenance
+from .oci import OCIRepository, PublishInfo
 from .policies import ExecutionPolicy
 from .references import DiscoveredPackage, PackageReference
 from .runtime import Runtime, project_toolchain
@@ -56,10 +58,13 @@ __all__ = [
     "PackageReference",
     "PackageProvenance",
     "PolicyError",
+    "PublishInfo",
+    "PrebuiltUnavailable",
     "ProjectError",
     "ResolutionError",
     "Runtime",
     "RuntimeEvent",
+    "OCIRepository",
     "SpecificationError",
     "StoreStatus",
     "ToolchainError",

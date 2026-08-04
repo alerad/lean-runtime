@@ -1,16 +1,78 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import http.server
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
+import threading
+import urllib.parse
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
-from lean_runtime import PackageReference, Runtime
+from lean_runtime import PackageReference, Runtime, RuntimeEvent
+
+
+@contextmanager
+def _bundle_registry(bundle: Path, lock_id: str) -> Iterator[str]:
+    entries: dict[str, bytes] = {}
+    with tarfile.open(bundle, "r:gz") as archive:
+        for member in archive:
+            source = archive.extractfile(member)
+            assert source is not None
+            entries[member.name] = source.read()
+    index = json.loads(entries["index.json"])
+    manifest_digest = index["manifests"][0]["digest"]
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            manifest_prefix = "/v2/owner/cache/manifests/"
+            if self.path == manifest_prefix + lock_id:
+                self._send(entries["index.json"], "application/vnd.oci.image.index.v1+json")
+                return
+            if self.path == manifest_prefix + urllib.parse.quote(manifest_digest, safe=":"):
+                self._send(
+                    entries["blobs/sha256/" + manifest_digest.removeprefix("sha256:")],
+                    "application/vnd.oci.image.manifest.v1+json",
+                )
+                return
+            blob_prefix = "/v2/owner/cache/blobs/"
+            if self.path.startswith(blob_prefix):
+                digest = self.path.removeprefix(blob_prefix)
+                data = entries.get("blobs/sha256/" + digest.removeprefix("sha256:"))
+                if data is not None:
+                    self._send(data, "application/octet-stream")
+                    return
+            self.send_response(404)
+            self.end_headers()
+
+        def _send(self, data: bytes, media_type: str) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", media_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Docker-Content-Digest", "sha256:" + hashlib.sha256(data).hexdigest())
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"oci+http://127.0.0.1:{server.server_port}/owner/cache"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def _sample_package(path: Path) -> str:
@@ -61,7 +123,7 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     revision = _sample_package(package)
     resolver_home = tmp_path / "resolver-runtime"
     runtime_home = tmp_path / "consumer-runtime"
-    events = []
+    events: list[RuntimeEvent] = []
     runtime = Runtime(home=resolver_home, on_event=events.append)
     spec = runtime.spec_from_references([PackageReference.git(package.as_uri(), "v1.0.0")])
     assert spec.toolchain == "leanprover/lean4:v4.32.0"
@@ -126,13 +188,17 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     assert repeated.provenance.request_digest == first.provenance.request_digest
     bundle_path = tmp_path / "environment.oci.tar.gz"
     exported = runtime.export_environment(environment.id, bundle_path)
-    imported_runtime = Runtime(home=tmp_path / "imported-runtime")
-    imported = imported_runtime.import_environment(bundle_path, name="imported")
-    assert imported.id == environment.id
-    assert exported.lock_id == lock.lock_id
-    imported_check = imported.check(source)
-    assert imported_check.ok
-    assert imported_check.lock_id == lock.lock_id
+    with _bundle_registry(bundle_path, lock.lock_id) as cache:
+        imported_runtime = Runtime(
+            home=tmp_path / "imported-runtime", caches=[cache], prebuilt="require"
+        )
+        imported = imported_runtime.ensure(lock, name="imported")
+        assert imported.id == environment.id
+        assert exported.lock_id == lock.lock_id
+        assert not imported_runtime.store.source_path(lock.packages[0].source_id).exists()
+        imported_check = imported.check(source)
+        assert imported_check.ok
+        assert imported_check.lock_id == lock.lock_id
     assert (runtime.store.executions / f"{first.execution_id}.json").is_file()
     assert (runtime.store.executions / f"{repeated.execution_id}.json").is_file()
     version = environment.execute(["lean", "--version"])
