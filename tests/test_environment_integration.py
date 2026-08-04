@@ -146,7 +146,7 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     child_environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
     ensure_code = (
         "import sys; from lean_runtime import EnvironmentLock,Runtime; "
-        "runtime=Runtime(home=sys.argv[1]); "
+        "runtime=Runtime(home=sys.argv[1],caches=[]); "
         "environment=runtime.ensure(EnvironmentLock.load(sys.argv[2]), name='demo'); "
         "print(environment.id)"
     )
@@ -175,6 +175,10 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     runtime = Runtime(home=runtime_home)
     environment = runtime.open("demo")
     assert identities == {environment.id}
+    audit = runtime.audit("demo", rebuild=True)
+    assert audit.ok
+    assert audit.rebuilt_artifacts is not None
+    assert isinstance(audit.artifact_match, bool)
     source = "import Sample\nexample : sampleValue = 41 := by rfl\n"
     first = environment.check(source)
     assert first.ok

@@ -34,6 +34,9 @@ executable build output: these checks do not prove that its builder compiled the
 locked sources faithfully. Registry authentication is not a builder signature.
 Required Cosign policy authenticates an expected publisher workflow and index
 digest, but still trusts that workflow to compile the locked sources faithfully.
+Publishers can attach a signed source/probe/build-inventory attestation, and
+`lean-runtime audit --rebuild` independently reacquires the locked sources,
+rebuilds them, reruns the Lean probe, and compares artifact inventories.
 
 ## Reproducibility boundary
 
@@ -45,8 +48,7 @@ package scripts are not promised to be byte-for-byte deterministic.
 ## Deliberately deferred
 
 - semantic version solving, floating branches, and editable dependencies;
-- native in-process signature verification and rebuild attestations;
-- automatic garbage collection of unreferenced OCI blobs;
+- native in-process signature and attestation verification;
 - untrusted sandboxed execution;
 - remote workers;
 - automatic package conflict explanations.

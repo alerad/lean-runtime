@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .errors import EnvironmentError
@@ -103,6 +104,30 @@ class CosignVerifier:
             raise EnvironmentError(
                 "prebuilt environment signing failed: " + (result.stdout + result.stderr)[-2000:]
             )
+
+    def attest(self, repository: OCIRepository, digest: str, predicate: dict[str, object]) -> None:
+        with tempfile.TemporaryDirectory(prefix="lean-runtime-attest-") as temporary:
+            path = Path(temporary) / "predicate.json"
+            path.write_text(json.dumps(predicate, sort_keys=True), encoding="utf-8")
+            command = [
+                self.executable,
+                "attest",
+                "--yes",
+                "--predicate",
+                str(path),
+                "--type",
+                "https://lean-runtime.dev/attestation/environment/v1",
+            ]
+            if repository.insecure:
+                command.append("--allow-http-registry")
+            self._registry_credentials(command)
+            command.append(self._subject(repository, digest))
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+            if result.returncode:
+                raise EnvironmentError(
+                    "prebuilt environment attestation failed: "
+                    + (result.stdout + result.stderr)[-2000:]
+                )
 
     @staticmethod
     def _registry_credentials(command: list[str]) -> None:

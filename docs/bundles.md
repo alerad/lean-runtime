@@ -27,6 +27,12 @@ disk-backed and streamed. Peak memory does not scale with package-layer size.
 
 ## OCI global caches
 
+By default, Lean Runtime checks the public
+`oci://ghcr.io/alerad/lean-runtime-cache` mirror. A miss or availability failure
+falls back to the existing source build, so environment specifications do not
+change. Set `LEAN_RUNTIME_CACHES=` or construct `Runtime(caches=[])` to disable
+all remote cache lookups.
+
 Configure one or more cache repositories without changing the environment
 specification or lock:
 
@@ -61,6 +67,18 @@ lean-runtime \
 Registry blobs are retained content-addressed under the runtime home. Pulling a
 second environment with an identical package layer reuses it without another
 download.
+
+Old blobs can be included in garbage collection explicitly:
+
+```bash
+# Preview, then apply after reviewing the candidates.
+lean-runtime gc --include-blobs
+lean-runtime gc --include-blobs --execute
+```
+
+Blobs referenced by an imported environment or leased by an active pull are
+retained. Collection rechecks both conditions while holding the same per-blob
+lock used by downloads.
 
 ### Required publisher signatures
 
@@ -97,7 +115,7 @@ export LEAN_RUNTIME_REGISTRY_PASSWORD="$GHCR_TOKEN"
 lean-runtime build-and-push environment.lock.json \
   --push-to oci://ghcr.io/alerad/leancert-runtime \
   --tag v4.32.2.4 \
-  --sign
+  --sign --attest
 ```
 
 The publisher checks for existing blobs, uploads only missing content, publishes
@@ -147,6 +165,32 @@ lean-runtime publish-index "$LOCK_ID" results/*.json \
 The finalizer rejects duplicate OS/architecture/ABI entries. Publishing the
 index only after every required platform succeeds prevents partial build
 matrices from replacing a complete cache release.
+
+`--attest` runs package-source verification and the Lean import probe, records a
+stable inventory of all Lake build outputs, and publishes that predicate as a
+keyless Cosign attestation bound to the platform manifest (or finalized index).
+It requires Cosign and an OIDC-capable publishing environment.
+
+## Auditing
+
+Verify the embedded source markers, Git commits and trees, root lock material,
+Lean probe, and build-output inventory at any time:
+
+```bash
+lean-runtime audit research-stack
+```
+
+For an independent check, reacquire and rebuild the exact lock in a temporary
+store and compare normalized artifact inventories:
+
+```bash
+lean-runtime audit research-stack --rebuild
+```
+
+`source_verified` and `probe_passed` are the trust result. `artifact_match` is a
+separate byte-reproducibility measurement: a mismatch is reported but is not
+treated as a failed proof audit, because native toolchains and package build
+steps are not promised to produce byte-identical artifacts.
 
 ## Format version 1
 

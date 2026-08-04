@@ -110,6 +110,9 @@ def parser() -> argparse.ArgumentParser:
         help="publish blobs and platform manifest without updating the lock index",
     )
     push.add_argument("--sign", action="store_true", help="sign the published lock index")
+    push.add_argument(
+        "--attest", action="store_true", help="publish a signed source/probe attestation"
+    )
 
     publish_index = commands.add_parser(
         "publish-index", help="finalize a lock index from platform-result JSON files"
@@ -161,6 +164,12 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("cache-status", help="show cache counts and disk usage")
     commands.add_parser("doctor", help="check local prerequisites and cache health")
 
+    audit = commands.add_parser("audit", help="verify locked sources and build artifacts")
+    audit.add_argument("environment")
+    audit.add_argument(
+        "--rebuild", action="store_true", help="rebuild the exact lock and compare artifacts"
+    )
+
     replay = commands.add_parser("replay", help="replay a canonical execution capture")
     replay.add_argument("capture", type=Path)
     replay.add_argument("--json", action="store_true")
@@ -168,6 +177,9 @@ def parser() -> argparse.ArgumentParser:
     gc = commands.add_parser("gc", help="collect old unreferenced environments")
     gc.add_argument("--execute", action="store_true", help="remove candidates; default is dry-run")
     gc.add_argument("--minimum-age-hours", type=float, default=24 * 30)
+    gc.add_argument(
+        "--include-blobs", action="store_true", help="also collect unreferenced OCI blobs"
+    )
 
     raw = commands.add_parser("raw-check", help="check without a managed environment")
     raw.add_argument("file", type=Path, help="Lean source file, or - for stdin")
@@ -230,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
                     tags=args.tag,
                     finalize=not args.platform_only,
                     sign=args.sign,
+                    attest=args.attest,
                 ).to_dict()
             )
             return 0
@@ -274,6 +287,10 @@ def main(argv: list[str] | None = None) -> int:
             doctor_report = runtime.doctor()
             _json(doctor_report.to_dict())
             return 0 if doctor_report.ok else 2
+        if args.command == "audit":
+            audit_report = runtime.audit(args.environment, rebuild=args.rebuild)
+            _json(audit_report.to_dict())
+            return 0 if audit_report.ok else 2
         if args.command == "replay":
             capture = ExecutionCapture.load(args.capture)
             result = runtime.replay_capture(capture)
@@ -286,7 +303,13 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=not args.execute,
                 minimum_age_seconds=args.minimum_age_hours * 3600,
             )
-            _json(gc_report.to_dict())
+            gc_payload: dict[str, Any] = {"environments": gc_report.to_dict()}
+            if args.include_blobs:
+                gc_payload["oci_blobs"] = runtime.gc_oci_blobs(
+                    dry_run=not args.execute,
+                    minimum_age_seconds=args.minimum_age_hours * 3600,
+                ).to_dict()
+            _json(gc_payload if args.include_blobs else gc_report.to_dict())
             return 0
         if args.command == "check":
             if args.package_refs:

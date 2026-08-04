@@ -1,5 +1,6 @@
 """Content-addressed execution environments for Lean 4."""
 
+from .audit import ArtifactInventory, AuditReport
 from .bundles import BundleInfo
 from .environments import (
     Environment,
@@ -23,17 +24,21 @@ from .events import EventCallback, RuntimeEvent
 from .health import DoctorCheck, DoctorReport
 from .lockfiles import EnvironmentLock, LockedPackage
 from .models import Diagnostic, ExecutionProvenance, ExecutionResult, PackageProvenance
-from .oci import OCIRepository, PublishInfo
+from .oci import DEFAULT_CACHE_REPOSITORIES, OCIRepository, PublishInfo
 from .policies import ExecutionPolicy
 from .references import DiscoveredPackage, PackageReference
 from .runtime import Runtime, project_toolchain
 from .specs import EnvironmentSpec, GitPackage, Package
-from .store import GarbageCollectionReport, StoreStatus
+from .store import BlobGarbageCollectionReport, GarbageCollectionReport, StoreStatus
 from .toolchains import ToolchainManager, normalize_toolchain
 
 __all__ = [
     "Diagnostic",
     "BundleInfo",
+    "ArtifactInventory",
+    "AuditReport",
+    "BlobGarbageCollectionReport",
+    "DEFAULT_CACHE_REPOSITORIES",
     "DiscoveredPackage",
     "DoctorCheck",
     "DoctorReport",
