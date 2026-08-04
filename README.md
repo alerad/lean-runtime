@@ -125,15 +125,15 @@ and the `lean-runtime` operations CLI.
 
 ## Documentation
 
-- [Getting started](https://alerad.github.io/lean-runtime/getting-started/)
-- [Python API](https://alerad.github.io/lean-runtime/python-api/)
-- [`lean-run` and operations CLI](https://alerad.github.io/lean-runtime/cli/)
-- [Managed environments](https://alerad.github.io/lean-runtime/environments/)
-- [Local Lake projects](https://alerad.github.io/lean-runtime/local-projects/)
-- [Environment bundles and OCI caches](https://alerad.github.io/lean-runtime/bundles/)
-- [Architecture](https://alerad.github.io/lean-runtime/architecture/)
-- [Trust and limitations](https://alerad.github.io/lean-runtime/trust-and-limitations/)
-- [V1 release case study](https://alerad.github.io/lean-runtime/case-study-v1/)
+- [Getting started](https://github.com/alerad/lean-runtime/blob/main/docs/getting-started.md)
+- [Python API](https://github.com/alerad/lean-runtime/blob/main/docs/python-api.md)
+- [`lean-run` and operations CLI](https://github.com/alerad/lean-runtime/blob/main/docs/cli.md)
+- [Managed environments](https://github.com/alerad/lean-runtime/blob/main/docs/environments.md)
+- [Local Lake projects](https://github.com/alerad/lean-runtime/blob/main/docs/local-projects.md)
+- [Environment bundles and OCI caches](https://github.com/alerad/lean-runtime/blob/main/docs/bundles.md)
+- [Architecture](https://github.com/alerad/lean-runtime/blob/main/docs/architecture.md)
+- [Trust and limitations](https://github.com/alerad/lean-runtime/blob/main/docs/trust-and-limitations.md)
+- [V1 release case study](https://github.com/alerad/lean-runtime/blob/main/docs/case-study-v1.md)
 
 ## License
 
