@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -31,7 +32,6 @@ from .store import (
     environment_identity,
     platform_compatibility,
     platform_record,
-    source_snapshot_digest,
 )
 from .toolchains import ToolchainManager
 
@@ -273,8 +273,11 @@ def _verify_package(root: Path, package: LockedPackage) -> None:
     if any(marker_value.get(key) != value for key, value in expected_marker.items()):
         raise EnvironmentError(f"bundled package source marker mismatch: {package.name}")
     content_hash = marker_value.get("content_hash")
-    if not isinstance(content_hash, str) or source_snapshot_digest(root) != content_hash:
-        raise EnvironmentError(f"bundled package checked-out content mismatch: {package.name}")
+    if (
+        not isinstance(content_hash, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", content_hash) is None
+    ):
+        raise EnvironmentError(f"bundled package source marker mismatch: {package.name}")
     observed: list[str] = []
     for revision in ("HEAD", "HEAD^{tree}"):
         result = subprocess.run(
@@ -288,6 +291,29 @@ def _verify_package(root: Path, package: LockedPackage) -> None:
         observed.append(result.stdout.strip().lower())
     if observed != [package.revision.lower(), package.tree_hash.lower()]:
         raise EnvironmentError(f"bundled package source mismatch: {package.name}")
+    status = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=no",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if status.returncode:
+        raise EnvironmentError(f"bundled package Git metadata is invalid: {package.name}")
+    changes = [
+        line
+        for line in status.stdout.splitlines()
+        if line and line != "?? .lean-runtime-source.json" and not line.startswith("?? .lake/")
+    ]
+    if changes:
+        raise EnvironmentError(f"bundled package checked-out content mismatch: {package.name}")
 
 
 def _verify_workspace_lock(workspace: Path, lock: EnvironmentLock) -> None:
@@ -333,6 +359,13 @@ class EnvironmentBundles:
         workspace = root / "workspace"
         packages_dir = workspace.joinpath(*_packages_directory(lock).parts)
         _verify_workspace_lock(workspace, lock)
+        package_roots: list[tuple[LockedPackage, Path]] = []
+        for package in sorted(lock.packages, key=lambda item: item.name):
+            package_root = packages_dir / package.name
+            if not package_root.is_dir():
+                raise EnvironmentError(f"environment package is missing: {package.name}")
+            _verify_package(package_root, package)
+            package_roots.append((package, package_root))
         output.parent.mkdir(parents=True, exist_ok=True)
         temporary = output.with_name(f".{output.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         try:
@@ -353,11 +386,7 @@ class EnvironmentBundles:
                 entries["blobs/sha256/" + str(layers[-1]["digest"]).removeprefix("sha256:")] = (
                     root_layer
                 )
-                for index, package in enumerate(sorted(lock.packages, key=lambda item: item.name)):
-                    package_root = packages_dir / package.name
-                    if not package_root.is_dir():
-                        raise EnvironmentError(f"environment package is missing: {package.name}")
-                    _verify_package(package_root, package)
+                for index, (package, package_root) in enumerate(package_roots):
                     layer = staging / f"package-{index}.tar.gz"
                     _write_tar_gzip(package_root, layer)
                     descriptor = _blob_descriptor_path(
