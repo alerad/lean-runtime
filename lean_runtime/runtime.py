@@ -14,6 +14,7 @@ from typing import Any
 
 from .backends import Backend, LocalBackend
 from .bundles import BundleInfo, EnvironmentBundles
+from .capsules import CapsuleInfo, CapsuleManager, ExecutionCapsule, OCICapsuleRegistry
 from .decisions import Decision
 from .diagnostics import error_diagnostic, parse_diagnostics
 from .diffing import ContextDiff, DiffEntry, diff_locks
@@ -125,6 +126,7 @@ class Runtime:
             self.store, self.toolchains, self.backend, self.events
         )
         self.bundles = EnvironmentBundles(self.store, self.toolchains, self.backend, self.events)
+        self.capsules = CapsuleManager(self.store, self.backend, self.events)
         configured_caches = caches
         if configured_caches is None:
             configured = os.environ.get("LEAN_RUNTIME_CACHES")
@@ -203,6 +205,96 @@ class Runtime:
     def open(self, identifier: str) -> Environment:
         """Open a published environment without resolution or network access."""
         return self.environments.open(identifier)
+
+    def create_capsule(
+        self,
+        payload: str | os.PathLike[str],
+        *,
+        command: Sequence[str],
+        source_revision: str,
+        source_environment_id: str | None = None,
+        source_lock_id: str | None = None,
+        toolchain: str = "unknown",
+        capability_digest: str | None = None,
+    ) -> ExecutionCapsule:
+        """Create a content-addressed executable closure from an explicit payload."""
+        return self.capsules.create(
+            Path(payload),
+            command=command,
+            source_revision=source_revision,
+            source_environment_id=source_environment_id,
+            source_lock_id=source_lock_id,
+            toolchain=toolchain,
+            capability_digest=capability_digest,
+        )
+
+    def open_capsule(self, capsule_id: str) -> ExecutionCapsule:
+        """Open and revalidate a locally stored execution capsule."""
+        return self.capsules.open(capsule_id)
+
+    def export_capsule(self, capsule_id: str, output: str | os.PathLike[str]) -> CapsuleInfo:
+        """Export a thin executable capsule as a deterministic OCI archive."""
+        return self.capsules.export(capsule_id, Path(output))
+
+    def import_capsule(self, bundle: str | os.PathLike[str]) -> ExecutionCapsule:
+        """Verify and import a local thin executable capsule."""
+        return self.capsules.import_bundle(Path(bundle))
+
+    def pull_capsule(
+        self,
+        repository: str,
+        reference: str,
+        *,
+        expected_source_revision: str | None = None,
+    ) -> ExecutionCapsule:
+        """Pull the compatible capsule from an OCI index and verify its identity."""
+        registry = OCICapsuleRegistry(
+            OCIRepository.parse(repository),
+            self.store,
+            self.capsules,
+            self.events,
+            self.signature_verifier,
+        )
+        return registry.pull(reference, expected_source_revision=expected_source_revision)
+
+    def publish_capsule(
+        self,
+        capsule_id: str,
+        repository: str,
+        *,
+        tags: Sequence[str] = (),
+        sign: bool = False,
+    ) -> CapsuleInfo:
+        """Publish one platform capsule and optional immutable/release tags."""
+        registry = OCICapsuleRegistry(
+            OCIRepository.parse(repository), self.store, self.capsules, self.events
+        )
+        result = registry.publish(capsule_id, tags=tags)
+        if sign:
+            if result.manifest_digest is None:
+                raise EnvironmentError("published capsule did not retain a manifest digest")
+            CosignVerifier(executable=self.cosign_executable).sign(
+                registry.repository, result.manifest_digest
+            )
+        return result
+
+    def publish_capsule_index(
+        self,
+        repository: str,
+        source_revision: str,
+        platform_descriptors: Sequence[dict[str, Any]],
+        *,
+        tags: Sequence[str] = (),
+        sign: bool = False,
+    ) -> str:
+        """Finalize a multi-platform capsule index after platform publication."""
+        registry = OCICapsuleRegistry(
+            OCIRepository.parse(repository), self.store, self.capsules, self.events
+        )
+        digest = registry.publish_index(source_revision, platform_descriptors, tags=tags)
+        if sign:
+            CosignVerifier(executable=self.cosign_executable).sign(registry.repository, digest)
+        return digest
 
     def export_environment(self, identifier: str, output: str | os.PathLike[str]) -> BundleInfo:
         """Export a published environment as a deterministic OCI layout archive."""

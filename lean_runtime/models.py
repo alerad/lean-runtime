@@ -106,6 +106,8 @@ class ExecutionProvenance:
     source_digest: str
     started_at: str
     project: ProjectProvenance | None = None
+    capsule_id: str | None = None
+    capsule_manifest_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

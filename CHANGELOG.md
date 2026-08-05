@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.0
+
+- Add platform-specific, content-addressed execution capsules for small
+  precompiled services.
+- Add deterministic capsule OCI import/export, registry pull/push, exact source
+  revision fencing, and multi-platform index publication.
+- Record capsule identity separately from rebuildable environment identity in
+  execution provenance.
+
 ## 1.0.0
 
 Lean Runtime v1 establishes the concise `lean-run` and `lean.setup()` workflows while making

@@ -3,6 +3,7 @@
 from importlib.metadata import version as _distribution_version
 
 from .bundles import BundleInfo
+from .capsules import CapsuleInfo, CapsuleManifest, ExecutionCapsule, OCICapsuleRegistry
 from .decisions import Decision
 from .diffing import ContextDiff, DiffEntry
 from .environments import (
@@ -66,6 +67,8 @@ __all__ = [
     "Diagnostic",
     "Decision",
     "ContextDiff",
+    "CapsuleInfo",
+    "CapsuleManifest",
     "DiffEntry",
     "BundleInfo",
     "BlobGarbageCollectionReport",
@@ -80,6 +83,7 @@ __all__ = [
     "EnvironmentLock",
     "EnvironmentSpec",
     "ExecutionCapture",
+    "ExecutionCapsule",
     "ExecutionJob",
     "InteractiveSession",
     "ExecutionPolicy",
@@ -115,6 +119,7 @@ __all__ = [
     "SCHEMA_NAMES",
     "RuntimeEvent",
     "OCIRepository",
+    "OCICapsuleRegistry",
     "SpecificationError",
     "StoreStatus",
     "ToolchainError",

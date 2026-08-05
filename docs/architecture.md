@@ -1,5 +1,15 @@
 # Architecture
 
+## Execution capsules
+
+An execution capsule is a minimal platform-specific executable closure. It is
+content-addressed, its file inventory is verified before every open, and its OCI
+manifest retains the exact source revision and optional originating environment.
+Capsules are intentionally not called environments: they do not contain the
+source and compiler state needed for independent rebuilding. Use a capsule for
+fast checked-service execution and hydrate the full environment for kernel
+replay, custom compilation, or rebuild audits.
+
 ## Dominant abstraction
 
 Lean Runtime is an environment compiler:
