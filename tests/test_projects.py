@@ -70,7 +70,7 @@ def test_project_environment_checks_actual_relative_file_and_records_provenance(
     source = _project(tmp_path / "project")
     runtime = Runtime(
         toolchains=ProjectToolchains(tmp_path / "runtime"),
-        caches=[],  # type: ignore[arg-type]
+        libraries=[],  # type: ignore[arg-type]
     )
     project = runtime.project(source)
     result = project.check_file(source)
@@ -91,7 +91,7 @@ def test_runtime_check_file_discovers_project_and_source_checks_are_disposable(
     source = _project(tmp_path / "project")
     runtime = Runtime(
         toolchains=ProjectToolchains(tmp_path / "runtime"),
-        caches=[],  # type: ignore[arg-type]
+        libraries=[],  # type: ignore[arg-type]
     )
     assert runtime.check_file(source).ok
     project = runtime.project(source)
@@ -106,7 +106,7 @@ def test_project_request_identity_changes_with_local_workspace(tmp_path: Path) -
     dependency.write_text("def value := 1\n")
     runtime = Runtime(
         toolchains=ProjectToolchains(tmp_path / "runtime"),
-        caches=[],  # type: ignore[arg-type]
+        libraries=[],  # type: ignore[arg-type]
     )
     first = runtime.check_file(source)
     dependency.write_text("def value := 2\n")
@@ -121,7 +121,7 @@ def test_project_environment_rejects_files_outside_its_root(tmp_path: Path) -> N
     outside.write_text("example : True := by trivial\n")
     runtime = Runtime(
         toolchains=ProjectToolchains(tmp_path / "runtime"),
-        caches=[],  # type: ignore[arg-type]
+        libraries=[],  # type: ignore[arg-type]
     )
     with pytest.raises(ProjectError, match="outside the project root"):
         runtime.project(source).check_file(outside)
@@ -131,7 +131,7 @@ def test_project_check_propagates_cancellation_to_the_active_process(tmp_path: P
     source = _project(tmp_path / "project")
     runtime = Runtime(
         toolchains=ProjectToolchains(tmp_path / "runtime"),
-        caches=[],  # type: ignore[arg-type]
+        libraries=[],  # type: ignore[arg-type]
     )
     cancel = threading.Event()
     timer = threading.Timer(0.1, cancel.set)
@@ -149,7 +149,7 @@ def test_project_async_cancellation_waits_for_process_cleanup(tmp_path: Path) ->
     source = _project(tmp_path / "project")
     runtime = Runtime(
         toolchains=ProjectToolchains(tmp_path / "runtime"),
-        caches=[],  # type: ignore[arg-type]
+        libraries=[],  # type: ignore[arg-type]
     )
 
     async def cancel_check() -> None:

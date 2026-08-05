@@ -1,26 +1,26 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://lean-runtime.dev/schemas/gc-v1.schema.json",
+  "$id": "https://lean-runtime.dev/schemas/cleanup-v1.schema.json",
   "type": "object",
   "required": ["schema", "ok", "data", "warnings", "errors"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"const": "lean-runtime.gc/v1"},
+    "schema": {"const": "lean-runtime.cleanup/v1"},
     "ok": {"type": "boolean"},
     "data": {
       "type": "object",
-      "anyOf": [{"required": ["environments", "oci_blobs"]}, {"maxProperties": 0}],
+      "anyOf": [{"required": ["environments", "downloaded_files"]}, {"maxProperties": 0}],
       "additionalProperties": false,
       "properties": {
-        "environments": {"$ref": "#/$defs/gc"},
-        "oci_blobs": {"anyOf": [{"$ref": "#/$defs/blobGc"}, {"type": "null"}]}
+        "environments": {"$ref": "#/$defs/cleanup"},
+        "downloaded_files": {"anyOf": [{"$ref": "#/$defs/downloadCleanup"}, {"type": "null"}]}
       }
     },
     "warnings": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"},
     "errors": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"}
   },
   "$defs": {
-    "gc": {
+    "cleanup": {
       "type": "object",
       "required": ["candidates", "removed", "retained", "dry_run"],
       "additionalProperties": false,
@@ -31,7 +31,7 @@
         "dry_run": {"type": "boolean"}
       }
     },
-    "blobGc": {
+    "downloadCleanup": {
       "type": "object",
       "required": ["candidates", "removed", "retained", "reclaimed_bytes", "dry_run"],
       "additionalProperties": false,

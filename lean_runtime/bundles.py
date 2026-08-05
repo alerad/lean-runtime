@@ -1,4 +1,4 @@
-"""Deterministic, locally transportable OCI bundles for published environments."""
+"""Verified portable copies of published environments."""
 
 from __future__ import annotations
 
@@ -45,17 +45,17 @@ MAX_FILES = 2_000_000
 
 
 @dataclass(frozen=True, slots=True)
-class BundleInfo:
+class PortableCopyInfo:
     environment_id: str
-    lock_id: str
-    manifest_digest: str
+    exact_environment_id: str
+    copy_id: str
     path: str
 
     def to_dict(self) -> dict[str, str]:
         return {
             "environment_id": self.environment_id,
-            "lock_id": self.lock_id,
-            "manifest_digest": self.manifest_digest,
+            "exact_environment_id": self.exact_environment_id,
+            "copy_id": self.copy_id,
             "path": self.path,
         }
 
@@ -349,7 +349,7 @@ class EnvironmentBundles:
         self.backend = backend
         self.events = events
 
-    def export(self, environment_id: str, output: Path) -> BundleInfo:
+    def export(self, environment_id: str, output: Path) -> PortableCopyInfo:
         root = self.store.environment_path(environment_id)
         metadata = _json_object((root / "metadata.json").read_bytes(), "metadata")
         lock = self.store.load_lock(str(metadata["lock_id"]))
@@ -477,11 +477,13 @@ class EnvironmentBundles:
         self.events.emit(
             "bundle.exported", "Exported deterministic environment bundle", path=str(output)
         )
-        return BundleInfo(environment_id, lock.lock_id, manifest_descriptor["digest"], str(output))
+        return PortableCopyInfo(
+            environment_id, lock.lock_id, manifest_descriptor["digest"], str(output)
+        )
 
     def import_bundle(
         self, bundle: Path, *, name: str | None = None, probe: bool = True
-    ) -> BundleInfo:
+    ) -> PortableCopyInfo:
         with tempfile.TemporaryDirectory(prefix="lean-runtime-import-") as temporary:
             entries = self._extract_oci_archive(bundle, Path(temporary))
             if entries.get("oci-layout") is None or entries["oci-layout"].read_bytes() != (
@@ -494,7 +496,7 @@ class EnvironmentBundles:
             return self.import_layout(
                 _json_object(index_path.read_bytes(), "index"),
                 entries,
-                origin={"kind": "prebuilt", "bundle": str(bundle)},
+                origin={"kind": "portable_copy", "copy": str(bundle)},
                 name=name,
                 probe=probe,
             )
@@ -538,7 +540,7 @@ class EnvironmentBundles:
         origin: dict[str, Any],
         name: str | None = None,
         probe: bool = True,
-    ) -> BundleInfo:
+    ) -> PortableCopyInfo:
         """Verify and publish an OCI layout whose blobs are already on disk."""
         manifests = index.get("manifests")
         if (
@@ -673,7 +675,7 @@ class EnvironmentBundles:
             "Imported verified environment bundle",
             origin=origin,
         )
-        return BundleInfo(
+        return PortableCopyInfo(
             environment_id,
             lock.lock_id,
             str(manifest_descriptor["digest"]),

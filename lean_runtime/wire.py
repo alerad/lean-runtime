@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .diffing import ContextDiff
+from .comparison import EnvironmentComparison
 from .matrix import MatrixResult
 from .models import ExecutionResult
 from .profiling import ProfileReport
@@ -62,8 +62,8 @@ def serialize_verify_v1(report: VerificationReport) -> dict[str, Any]:
     )
 
 
-def serialize_diff_v1(result: ContextDiff) -> dict[str, Any]:
-    return envelope("lean-runtime.diff/v1", ok=True, data=result.to_dict())
+def serialize_comparison_v1(result: EnvironmentComparison) -> dict[str, Any]:
+    return envelope("lean-runtime.comparison/v1", ok=True, data=result.to_dict())
 
 
 def serialize_profile_v1(result: ProfileReport) -> dict[str, Any]:

@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 
 from lean_runtime import (
-    DEFAULT_CACHE_REPOSITORIES,
+    DEFAULT_ENVIRONMENT_LIBRARIES,
+    DownloadUnavailable,
     EnvironmentError,
     EnvironmentLock,
-    PrebuiltUnavailable,
     Runtime,
 )
 from lean_runtime.oci import _SafeRedirectHandler
@@ -44,26 +44,29 @@ def test_public_cache_is_default_and_empty_environment_override_disables_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime = Runtime(home=tmp_path / "default")
-    assert tuple(cache.repository.display for cache in runtime.caches) == DEFAULT_CACHE_REPOSITORIES
-    monkeypatch.setenv("LEAN_RUNTIME_CACHES", "")
-    assert Runtime(home=tmp_path / "disabled").caches == ()
+    assert (
+        tuple(cache.repository.display for cache in runtime.libraries)
+        == DEFAULT_ENVIRONMENT_LIBRARIES
+    )
+    monkeypatch.setenv("LEAN_RUNTIME_LIBRARIES", "")
+    assert Runtime(home=tmp_path / "disabled").libraries == ()
 
 
 def test_auto_falls_back_only_when_prebuilt_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runtime = Runtime(home=tmp_path, caches=[])
-    runtime.caches = (_Cache(PrebuiltUnavailable("cache miss")),)  # type: ignore[assignment]
+    runtime = Runtime(home=tmp_path, libraries=[])
+    runtime.libraries = (_Cache(DownloadUnavailable("cache miss")),)  # type: ignore[assignment]
     sentinel = object()
     monkeypatch.setattr(runtime.environments, "ensure", lambda *_args, **_kwargs: sentinel)
-    assert runtime.ensure(_lock()) is sentinel
+    assert runtime.open_exact(_lock()) is sentinel
 
 
 def test_auto_does_not_hide_prebuilt_integrity_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runtime = Runtime(home=tmp_path, caches=[])
-    runtime.caches = (_Cache(EnvironmentError("digest mismatch")),)  # type: ignore[assignment]
+    runtime = Runtime(home=tmp_path, libraries=[])
+    runtime.libraries = (_Cache(EnvironmentError("digest mismatch")),)  # type: ignore[assignment]
     source_build_called = False
 
     def source_build(*_args: object, **_kwargs: object) -> object:
@@ -73,14 +76,14 @@ def test_auto_does_not_hide_prebuilt_integrity_failures(
 
     monkeypatch.setattr(runtime.environments, "ensure", source_build)
     with pytest.raises(EnvironmentError, match="digest mismatch"):
-        runtime.ensure(_lock())
+        runtime.open_exact(_lock())
     assert not source_build_called
 
 
 def test_require_rejects_missing_cache_configuration(tmp_path: Path) -> None:
-    runtime = Runtime(home=tmp_path, prebuilt="require", caches=[])
-    with pytest.raises(EnvironmentError, match="no caches configured"):
-        runtime.ensure(_lock())
+    runtime = Runtime(home=tmp_path, availability="required", libraries=[])
+    with pytest.raises(EnvironmentError, match="no environment libraries are configured"):
+        runtime.open_exact(_lock())
 
 
 def test_registry_redirect_does_not_forward_authorization_cross_host() -> None:

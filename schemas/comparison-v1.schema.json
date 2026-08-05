@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://lean-runtime.dev/schemas/diff-v1.schema.json",
+  "$id": "https://lean-runtime.dev/schemas/comparison-v1.schema.json",
   "type": "object",
   "required": ["schema", "ok", "data", "warnings", "errors"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"const": "lean-runtime.diff/v1"},
+    "schema": {"const": "lean-runtime.comparison/v1"},
     "ok": {"type": "boolean"},
     "data": {
       "type": "object",

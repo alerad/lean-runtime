@@ -13,14 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from .backends import Backend, LocalBackend
-from .bundles import BundleInfo, EnvironmentBundles
+from .bundles import EnvironmentBundles, PortableCopyInfo
+from .comparison import ComparisonEntry, EnvironmentComparison, compare_locks
 from .decisions import Decision
 from .diagnostics import error_diagnostic, parse_diagnostics
-from .diffing import ContextDiff, DiffEntry, diff_locks
 from .environments import Environment, EnvironmentManager, ExecutionCapture
 from .errors import (
+    DownloadUnavailable,
     EnvironmentError,
-    PrebuiltUnavailable,
     ProjectError,
     SpecificationError,
     ToolchainError,
@@ -31,24 +31,24 @@ from .lockfiles import EnvironmentLock
 from .matrix import MatrixContext, MatrixResult, run_matrix
 from .models import ExecutionProvenance, ExecutionResult, PhaseTiming, ProjectProvenance
 from .oci import (
-    DEFAULT_CACHE_REPOSITORIES,
+    DEFAULT_ENVIRONMENT_LIBRARIES,
     OCIEnvironmentCache,
     OCIEnvironmentPublisher,
     OCIRepository,
-    PublishInfo,
+    PublicationInfo,
 )
 from .policies import ExecutionPolicy
 from .profiling import ProfileReport, run_profile
 from .projects import ProjectContext, ProjectEnvironment, discover_project
+from .publisher_verification import CosignVerifier
 from .references import PackageReference, discover_package, normalize_references
 from .resolver import EnvironmentResolver
 from .serialization import sha256_id, sha256_text
-from .signatures import CosignVerifier
 from .specs import EnvironmentSpec, GitPackage
 from .store import (
-    BlobGarbageCollectionReport,
+    CleanupReport,
+    DownloadCleanupReport,
     EnvironmentStore,
-    GarbageCollectionReport,
     StoreStatus,
     environment_identity,
     platform_compatibility,
@@ -65,11 +65,11 @@ from .verification import (
 EnvironmentReference = Environment | EnvironmentSpec | EnvironmentLock | str
 
 
-def _prebuilt_reason(error: Exception) -> str:
+def _download_reason(error: Exception) -> str:
     message = str(error).lower()
     if "platform" in message or "compatible" in message:
         return "platform_compatibility_mismatch"
-    if "signature" in message or "cosign" in message:
+    if "signature" in message or "verification_tool" in message:
         return "signature_policy_rejected"
     if "lock" in message and "mismatch" in message:
         return "lock_id_mismatch"
@@ -101,20 +101,22 @@ class Runtime:
         toolchains: ToolchainManager | None = None,
         backend: Backend | None = None,
         on_event: EventCallback | None = None,
-        prebuilt: str | None = None,
-        caches: Sequence[str] | None = None,
-        signatures: str = "ignore",
-        trusted_identity: str | None = None,
+        availability: str | None = None,
+        libraries: Sequence[str] | None = None,
+        publisher_verification: str = "ignore",
+        trusted_publisher: str | None = None,
         trusted_issuer: str | None = None,
-        cosign: str | os.PathLike[str] = "cosign",
+        verification_tool: str | os.PathLike[str] = "cosign",
     ) -> None:
-        prebuilt = prebuilt or os.environ.get("LEAN_RUNTIME_PREBUILT", "auto")
-        if prebuilt not in {"auto", "require", "never"}:
-            raise ValueError("prebuilt must be 'auto', 'require', or 'never'")
-        if signatures not in {"ignore", "require"}:
-            raise ValueError("signatures must be 'ignore' or 'require'")
-        if signatures == "require" and (not trusted_identity or not trusted_issuer):
-            raise ValueError("required signatures need trusted_identity and trusted_issuer")
+        availability = availability or os.environ.get("LEAN_RUNTIME_AVAILABILITY", "auto")
+        if availability not in {"auto", "required", "local"}:
+            raise ValueError("availability must be 'auto', 'required', or 'local'")
+        if publisher_verification not in {"ignore", "required"}:
+            raise ValueError("publisher_verification must be 'ignore' or 'required'")
+        if publisher_verification == "required" and (not trusted_publisher or not trusted_issuer):
+            raise ValueError(
+                "required publisher verification needs trusted_publisher and trusted_issuer"
+            )
         self.toolchains = toolchains or ToolchainManager(home)
         self.home = self.toolchains.home
         self.backend = backend or LocalBackend()
@@ -125,22 +127,22 @@ class Runtime:
             self.store, self.toolchains, self.backend, self.events
         )
         self.bundles = EnvironmentBundles(self.store, self.toolchains, self.backend, self.events)
-        configured_caches = caches
-        if configured_caches is None:
-            configured = os.environ.get("LEAN_RUNTIME_CACHES")
-            configured_caches = (
+        configured_libraries = libraries
+        if configured_libraries is None:
+            configured = os.environ.get("LEAN_RUNTIME_LIBRARIES")
+            configured_libraries = (
                 tuple(item.strip() for item in configured.split(",") if item.strip())
                 if configured is not None
-                else DEFAULT_CACHE_REPOSITORIES
+                else DEFAULT_ENVIRONMENT_LIBRARIES
             )
-        self.prebuilt = prebuilt
-        self.cosign_executable = cosign
+        self.availability = availability
+        self.verification_executable = verification_tool
         self.signature_verifier = (
-            CosignVerifier(trusted_identity, trusted_issuer, executable=cosign)
-            if signatures == "require"
+            CosignVerifier(trusted_publisher, trusted_issuer, executable=verification_tool)
+            if publisher_verification == "required"
             else None
         )
-        self.caches = tuple(
+        self.libraries = tuple(
             OCIEnvironmentCache(
                 OCIRepository.parse(value),
                 self.store,
@@ -148,10 +150,10 @@ class Runtime:
                 self.events,
                 self.signature_verifier,
             )
-            for value in configured_caches
+            for value in configured_libraries
         )
 
-    def resolve(
+    def prepare(
         self,
         spec: EnvironmentSpec,
         *,
@@ -160,7 +162,7 @@ class Runtime:
     ) -> EnvironmentLock:
         return self.resolver.resolve(spec, timeout=timeout, cancel=cancel)
 
-    def ensure(
+    def open_exact(
         self,
         lock: EnvironmentLock,
         *,
@@ -170,84 +172,87 @@ class Runtime:
     ) -> Environment:
         environment_id = environment_identity(lock, build_profile)
         destination = self.store.environment_path(environment_id)
-        if not destination.is_dir() and self.prebuilt != "never":
+        if not destination.is_dir() and self.availability != "local":
             imported = False
             rejections: list[str] = []
-            for cache in self.caches:
+            for library in self.libraries:
                 try:
-                    cache.pull(lock, name=name)
+                    library.pull(lock, name=name)
                     imported = True
                     break
-                except PrebuiltUnavailable as exc:
-                    reason_code = _prebuilt_reason(exc)
-                    rejections.append(f"{cache.repository.display}: {reason_code} ({exc})")
+                except DownloadUnavailable as exc:
+                    reason_code = _download_reason(exc)
+                    rejections.append(f"{library.repository.display}: {reason_code} ({exc})")
                     self.events.emit(
-                        "prebuilt.fallback",
-                        "Prebuilt environment is unavailable",
-                        registry=cache.repository.display,
+                        "availability.fallback",
+                        "Downloadable environment is unavailable",
+                        library=library.repository.display,
                         reason=str(exc),
                         reason_code=reason_code,
                     )
-            if not imported and self.prebuilt == "require":
-                if not self.caches:
+            if not imported and self.availability == "required":
+                if not self.libraries:
                     raise EnvironmentError(
-                        "prebuilt environments are required but no caches configured"
+                        "a downloadable environment is required but no environment libraries "
+                        "are configured"
                     )
                 nearest = f" Nearest candidates: {'; '.join(rejections)}" if rejections else ""
                 raise EnvironmentError(
-                    "no compatible prebuilt environment was found; prebuilt=require "
+                    "no compatible downloadable environment was found; availability=required "
                     "does not permit a source build." + nearest
                 )
         return self.environments.ensure(lock, name=name, build_profile=build_profile, cancel=cancel)
 
-    def open(self, identifier: str) -> Environment:
+    def environment(self, identifier: str) -> Environment:
         """Open a published environment without resolution or network access."""
         return self.environments.open(identifier)
 
-    def export_environment(self, identifier: str, output: str | os.PathLike[str]) -> BundleInfo:
-        """Export a published environment as a deterministic OCI layout archive."""
-        environment = self.open(identifier)
+    def save_portable_copy(
+        self, identifier: str, output: str | os.PathLike[str]
+    ) -> PortableCopyInfo:
+        """Save a published environment as a verified portable copy."""
+        environment = self.environment(identifier)
         return self.bundles.export(environment.id, Path(output))
 
-    def import_environment(
+    def open_portable_copy(
         self,
-        bundle: str | os.PathLike[str],
+        copy: str | os.PathLike[str],
         *,
         name: str | None = None,
         probe: bool = True,
     ) -> Environment:
-        """Verify and atomically import a local OCI environment bundle."""
-        info = self.bundles.import_bundle(Path(bundle), name=name, probe=probe)
-        return self.open(info.environment_id)
+        """Verify and atomically open a portable environment copy."""
+        info = self.bundles.import_bundle(Path(copy), name=name, probe=probe)
+        return self.environment(info.environment_id)
 
     def publish_environment(
         self,
         identifier: str,
-        repository: str,
+        library: str,
         *,
         tags: Sequence[str] = (),
         finalize: bool = True,
         sign: bool = False,
         attest: bool = False,
-    ) -> PublishInfo:
-        """Publish a built environment and its lock-level OCI index."""
-        environment = self.open(identifier)
+    ) -> PublicationInfo:
+        """Publish a built environment to an environment library."""
+        environment = self.environment(identifier)
         publisher = OCIEnvironmentPublisher(
-            OCIRepository.parse(repository), self.store, self.bundles, self.events
+            OCIRepository.parse(library), self.store, self.bundles, self.events
         )
         result = publisher.publish(environment.id, tags=tuple(tags), finalize=finalize)
         if sign:
-            if result.index_digest is None:
+            if result.publication_id is None:
                 raise ValueError("platform-only publishing cannot sign a lock index")
-            CosignVerifier(executable=self.cosign_executable).sign(
-                publisher.repository, result.index_digest
+            CosignVerifier(executable=self.verification_executable).sign(
+                publisher.repository, result.publication_id
             )
         if attest:
             report = self.verify(environment.id)
             report.raise_for_error()
-            CosignVerifier(executable=self.cosign_executable).attest(
+            CosignVerifier(executable=self.verification_executable).attest(
                 publisher.repository,
-                result.index_digest or result.manifest_digest,
+                result.publication_id or result.computer_copy_id,
                 report.to_dict(),
             )
         return result
@@ -304,26 +309,26 @@ class Runtime:
                     lock.lock_id,
                     environment_id,
                 )
-        environment = self.open(str(subject))
+        environment = self.environment(str(subject))
         return verify_environment(self, environment, rebuild=rebuild, offline=offline)
 
-    def diff(
+    def compare(
         self,
         left: str | os.PathLike[str],
         right: str | os.PathLike[str],
-    ) -> ContextDiff:
+    ) -> EnvironmentComparison:
         """Compare the semantic identity inputs of two locks or environments."""
 
-        def resolve(value: str | os.PathLike[str]) -> tuple[EnvironmentLock, Environment | None]:
+        def prepare(value: str | os.PathLike[str]) -> tuple[EnvironmentLock, Environment | None]:
             path = Path(value).expanduser()
             if path.is_file():
                 return EnvironmentLock.load(path), None
-            environment = self.open(str(value))
+            environment = self.environment(str(value))
             return environment.lock, environment
 
-        left_lock, left_environment = resolve(left)
-        right_lock, right_environment = resolve(right)
-        result = diff_locks(left_lock, right_lock)
+        left_lock, left_environment = prepare(left)
+        right_lock, right_environment = prepare(right)
+        result = compare_locks(left_lock, right_lock)
         changes = list(result.changes)
         left_info = dict(result.left)
         right_info = dict(result.right)
@@ -336,8 +341,8 @@ class Runtime:
                 before = left_environment.inspect().to_dict()[field]
                 after = right_environment.inspect().to_dict()[field]
                 if before != after:
-                    changes.append(DiffEntry(field, "changed", True, before, after))
-        return ContextDiff(left_info, right_info, tuple(changes))
+                    changes.append(ComparisonEntry(field, "changed", True, before, after))
+        return EnvironmentComparison(left_info, right_info, tuple(changes))
 
     def profile(
         self,
@@ -350,7 +355,7 @@ class Runtime:
         """Repeatedly check one file in fresh instances of a published environment."""
         path = Path(file).expanduser().resolve()
         return run_profile(
-            self.open(environment),
+            self.environment(environment),
             path.read_text(encoding="utf-8"),
             filename=path.name,
             warmup=warmup,
@@ -399,7 +404,7 @@ class Runtime:
                     reason=None if exists else "source_build_or_remote_pull_required",
                 ),
             )
-        environment = self.open(str(subject))
+        environment = self.environment(str(subject))
         origin = environment._record.get("origin", {"kind": "local"})
         return (
             Decision(
@@ -422,17 +427,17 @@ class Runtime:
             ),
         )
 
-    def publish_environment_index(
+    def finalize_publication(
         self,
-        repository: str,
+        library: str,
         lock_id: str,
         platform_descriptors: Sequence[dict[str, Any]],
         *,
         tags: Sequence[str] = (),
     ) -> str:
-        """Finalize a deterministic multi-platform lock index."""
+        """Finalize a deterministic publication for multiple computer types."""
         publisher = OCIEnvironmentPublisher(
-            OCIRepository.parse(repository), self.store, self.bundles, self.events
+            OCIRepository.parse(library), self.store, self.bundles, self.events
         )
         return publisher.publish_index(lock_id, list(platform_descriptors), tags=tuple(tags))
 
@@ -445,7 +450,7 @@ class Runtime:
         timeout: float = 900,
     ) -> Environment:
         spec = EnvironmentSpec(toolchain, tuple(packages))
-        return self.ensure(self.resolve(spec, timeout=timeout), name=name)
+        return self.open_exact(self.prepare(spec, timeout=timeout), name=name)
 
     def spec_from_references(
         self,
@@ -504,7 +509,7 @@ class Runtime:
                     )
         return EnvironmentSpec(selected, tuple(package.package for package in discovered))
 
-    def resolve_references(
+    def prepare_references(
         self,
         packages: Sequence[str | PackageReference],
         *,
@@ -513,13 +518,13 @@ class Runtime:
         cancel: threading.Event | None = None,
     ) -> EnvironmentLock:
         """Discover package references and resolve their exact Lake graph."""
-        return self.resolve(
+        return self.prepare(
             self.spec_from_references(packages, toolchain=toolchain),
             timeout=timeout,
             cancel=cancel,
         )
 
-    def ensure_references(
+    def open_references(
         self,
         packages: Sequence[str | PackageReference],
         *,
@@ -529,8 +534,8 @@ class Runtime:
         cancel: threading.Event | None = None,
     ) -> Environment:
         """Build or reopen the environment described by package references."""
-        return self.ensure(
-            self.resolve_references(packages, toolchain=toolchain, timeout=timeout, cancel=cancel),
+        return self.open_exact(
+            self.prepare_references(packages, toolchain=toolchain, timeout=timeout, cancel=cancel),
             name=name,
             cancel=cancel,
         )
@@ -559,7 +564,7 @@ class Runtime:
         if project is not None and packages:
             raise SpecificationError("check cannot combine project= with packages=")
         if packages:
-            resolved = self.ensure_references(packages, toolchain=toolchain, cancel=cancel)
+            resolved = self.open_references(packages, toolchain=toolchain, cancel=cancel)
             return resolved.check(source, filename=filename, policy=selected_policy, cancel=cancel)
         if environment is not None:
             resolved = self._environment(environment)
@@ -658,15 +663,15 @@ class Runtime:
             context = replace(context, toolchain=normalize_toolchain(toolchain))
         return ProjectEnvironment(self, context)
 
-    def gc(
+    def clean(
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
-    ) -> GarbageCollectionReport:
-        return self.store.gc(dry_run=dry_run, minimum_age_seconds=minimum_age_seconds)
+    ) -> CleanupReport:
+        return self.store.clean(dry_run=dry_run, minimum_age_seconds=minimum_age_seconds)
 
-    def gc_oci_blobs(
+    def clean_downloads(
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
-    ) -> BlobGarbageCollectionReport:
-        return self.store.gc_oci_blobs(dry_run=dry_run, minimum_age_seconds=minimum_age_seconds)
+    ) -> DownloadCleanupReport:
+        return self.store.clean_downloads(dry_run=dry_run, minimum_age_seconds=minimum_age_seconds)
 
     def doctor(self) -> DoctorReport:
         return diagnose(self.toolchains, self.store)
@@ -708,7 +713,7 @@ class Runtime:
         )
         if resolved.operation != "check":
             raise ProjectError(f"unsupported capture operation: {resolved.operation}")
-        environment = self.ensure(resolved.lock)
+        environment = self.open_exact(resolved.lock)
         return environment.check_files(
             resolved.files,
             entrypoint=resolved.entrypoint,
@@ -719,10 +724,10 @@ class Runtime:
         if isinstance(value, Environment):
             return value
         if isinstance(value, EnvironmentSpec):
-            return self.ensure(self.resolve(value))
+            return self.open_exact(self.prepare(value))
         if isinstance(value, EnvironmentLock):
-            return self.ensure(value)
-        return self.open(value)
+            return self.open_exact(value)
+        return self.environment(value)
 
     def _raw_check(
         self,
@@ -743,7 +748,7 @@ class Runtime:
         safe_filename = Path(filename).name
         if not safe_filename.endswith(".lean"):
             safe_filename += ".lean"
-        with tempfile.TemporaryDirectory(prefix="raw-check-", dir=self.store.jobs) as raw:
+        with tempfile.TemporaryDirectory(prefix="check-file-", dir=self.store.jobs) as raw:
             source_path = Path(raw) / safe_filename
             source_path.write_text(source, encoding="utf-8")
             if project_root is None:

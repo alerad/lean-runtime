@@ -124,7 +124,7 @@ def test_local_lake_project_build_and_file_check(tmp_path: Path) -> None:
     main = library / "Main.lean"
     main.write_text("import LocalProject.Defs\nexample : answer = 42 := by rfl\n")
 
-    runtime = Runtime(home=tmp_path / "runtime", caches=[])
+    runtime = Runtime(home=tmp_path / "runtime", libraries=[])
     project = runtime.project(main)
     assert project.build(["LocalProject"]).ok
     result = project.check_file(main)
@@ -147,7 +147,7 @@ def test_local_lake_project_build_and_file_check(tmp_path: Path) -> None:
             "--home",
             str(tmp_path / "runtime"),
             "--quiet",
-            "raw-check",
+            "check-file",
             str(main),
             "--json",
         ],
@@ -199,7 +199,7 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     assert spec.toolchain == "leanprover/lean4:v4.32.0"
     assert spec.packages[0].rev == revision
     assert spec.packages[0].module == "Sample"
-    lock = runtime.resolve(spec)
+    lock = runtime.prepare(spec)
     assert lock.packages[0].requested_revision == revision
     assert lock.packages[0].revision == revision
     assert revision in lock.root_lakefile
@@ -216,8 +216,8 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     child_environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
     ensure_code = (
         "import sys; from lean_runtime import EnvironmentLock,Runtime; "
-        "runtime=Runtime(home=sys.argv[1],caches=[]); "
-        "environment=runtime.ensure(EnvironmentLock.load(sys.argv[2]), name='demo'); "
+        "runtime=Runtime(home=sys.argv[1],libraries=[]); "
+        "environment=runtime.open_exact(EnvironmentLock.load(sys.argv[2]), name='demo'); "
         "print(environment.id)"
     )
     builders = [
@@ -243,7 +243,7 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     identities = {stdout.strip() for stdout, _ in built}
     assert len(identities) == 1
     runtime = Runtime(home=runtime_home)
-    environment = runtime.open("demo")
+    environment = runtime.environment("demo")
     assert identities == {environment.id}
     rebuilt_verification = runtime.verify("demo", rebuild=True)
     assert rebuilt_verification.ok
@@ -262,7 +262,7 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     verification = runtime.verify("demo", offline=True)
     assert verification.ok
     assert any(item.code == "offline_retained_state_verified" for item in verification.checks)
-    assert runtime.diff(lock_path, "demo").equal
+    assert runtime.compare(lock_path, "demo").equal
     profile_source = tmp_path / "Profile.lean"
     profile_source.write_text(source)
     profile = runtime.profile("demo", profile_source, warmup=0, repeat=2)
@@ -279,14 +279,14 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     assert matrix.ok
     assert [item.context for item in matrix.entries] == ["first", "second"]
     bundle_path = tmp_path / "environment.oci.tar.gz"
-    exported = runtime.export_environment(environment.id, bundle_path)
+    exported = runtime.save_portable_copy(environment.id, bundle_path)
     with _bundle_registry(bundle_path, lock.lock_id) as cache:
         imported_runtime = Runtime(
-            home=tmp_path / "imported-runtime", caches=[cache], prebuilt="require"
+            home=tmp_path / "imported-runtime", libraries=[cache], availability="required"
         )
-        imported = imported_runtime.ensure(lock, name="imported")
+        imported = imported_runtime.open_exact(lock, name="imported")
         assert imported.id == environment.id
-        assert exported.lock_id == lock.lock_id
+        assert exported.exact_environment_id == lock.lock_id
         assert not imported_runtime.store.source_path(lock.packages[0].source_id).exists()
         imported_check = imported.check(source)
         assert imported_check.ok
@@ -314,7 +314,7 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     assert multi.ok
     asynchronous = asyncio.run(environment.check_files_async(files))
     assert asynchronous.ok
-    assert runtime.open("demo").id == environment.id
+    assert runtime.environment("demo").id == environment.id
     capture_path = tmp_path / "execution.capture.json"
     environment.capture_files(files, expected_ok=True).write(capture_path)
 

@@ -25,7 +25,7 @@ result = Runtime().check_file("./my-project/MyProject/Main.lean")
 The CLI equivalent is:
 
 ```bash
-lean-runtime raw-check ./my-project/MyProject/Main.lean
+lean-runtime check-file ./my-project/MyProject/Main.lean
 ```
 
 The actual project-relative file is passed to `lake env lean`, so imports of

@@ -1,0 +1,42 @@
+name: Publish a Lean environment
+description: Build an exact Lean environment and publish a ready-to-use copy
+
+inputs:
+  lock:
+    description: Path to environment.lock.json
+    required: true
+  library:
+    description: Environment library, for example ghcr.io/owner/lean-environments
+    required: true
+  tag:
+    description: Optional human-readable version name
+    required: false
+    default: ""
+  username:
+    description: Environment library username
+    required: true
+  password:
+    description: Environment library token or password
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+    - name: Install Lean Runtime
+      shell: bash
+      run: python -m pip install "${GITHUB_ACTION_PATH}/../../.."
+    - name: Build and publish environment
+      shell: bash
+      env:
+        LEAN_RUNTIME_REGISTRY_USERNAME: ${{ inputs.username }}
+        LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ inputs.password }}
+      run: |
+        args=(build-and-publish "${{ inputs.lock }}" --publish-to "${{ inputs.library }}")
+        if [[ -n "${{ inputs.tag }}" ]]; then
+          args+=(--tag "${{ inputs.tag }}")
+        fi
+        lean-runtime "${args[@]}"

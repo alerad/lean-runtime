@@ -7,9 +7,9 @@ from pathlib import Path
 
 SCHEMA_NAMES = frozenset(
     {
-        "diff-v1.schema.json",
+        "comparison-v1.schema.json",
         "execution-v1.schema.json",
-        "gc-v1.schema.json",
+        "cleanup-v1.schema.json",
         "inspect-v1.schema.json",
         "matrix-v1.schema.json",
         "profile-v1.schema.json",

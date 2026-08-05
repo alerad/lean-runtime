@@ -88,6 +88,6 @@ serializing concurrent checks. Locks and source snapshots remain retained in
 the current store schema.
 
 ```python
-report = runtime.gc(dry_run=True)
-report = runtime.gc(dry_run=False, minimum_age_seconds=30 * 24 * 60 * 60)
+report = runtime.clean(dry_run=True)
+report = runtime.clean(dry_run=False, minimum_age_seconds=30 * 24 * 60 * 60)
 ```

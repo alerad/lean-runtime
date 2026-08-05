@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.0.0
+
+Version 2 gives the public interface the language used by Lean users rather
+than the language of its storage implementation. The environment format stays
+compatible; command names, Python names, configuration, events, and public
+metadata intentionally change without aliases.
+
+### Public terminology
+
+- Environment libraries replace OCI caches in ordinary configuration and docs.
+- Downloadable environments replace prebuilt artifacts.
+- Portable copies replace OCI bundles.
+- Publisher verification replaces signature-policy terminology.
+- Cleanup and storage replace garbage-collection and blob terminology.
+
+### Main migrations
+
+- `Runtime(caches=..., prebuilt=...)` becomes
+  `Runtime(libraries=..., availability=...)`.
+- `resolve`, `ensure`, and named `open` become `prepare`, `open_exact`, and
+  `environment` in the explicit Python API.
+- `export_environment` and `import_environment` become `save_portable_copy`
+  and `open_portable_copy`.
+- CLI workflows use `prepare`, `open`, `download`, `build-and-publish`,
+  `save-copy`, `open-copy`, `compare`, `storage`, and `clean`.
+- Environment libraries accept friendly `ghcr.io/owner/name` locations; the
+  OCI transport remains an advanced implementation detail.
+
 ## 1.0.0
 
 Lean Runtime v1 establishes the concise `lean-run` and `lean.setup()` workflows while making

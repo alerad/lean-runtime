@@ -89,7 +89,7 @@ class CosignVerifier:
         result = subprocess.run(command, text=True, capture_output=True, check=False)
         if result.returncode:
             raise EnvironmentError(
-                "prebuilt environment signature verification failed: "
+                "downloadable environment signature verification failed: "
                 + (result.stdout + result.stderr)[-2000:]
             )
 
@@ -102,7 +102,7 @@ class CosignVerifier:
         result = subprocess.run(command, text=True, capture_output=True, check=False)
         if result.returncode:
             raise EnvironmentError(
-                "prebuilt environment signing failed: " + (result.stdout + result.stderr)[-2000:]
+                "environment publisher signing failed: " + (result.stdout + result.stderr)[-2000:]
             )
 
     def attest(self, repository: OCIRepository, digest: str, predicate: dict[str, object]) -> None:
@@ -125,7 +125,7 @@ class CosignVerifier:
             result = subprocess.run(command, text=True, capture_output=True, check=False)
             if result.returncode:
                 raise EnvironmentError(
-                    "prebuilt environment attestation failed: "
+                    "downloadable environment attestation failed: "
                     + (result.stdout + result.stderr)[-2000:]
                 )
 

@@ -44,26 +44,26 @@ stdout, stderr, environment and execution identities, and complete provenance.
 operations directly:
 
 ```python
-runtime.resolve(spec)  # -> EnvironmentLock
-runtime.ensure(lock, name="friendly-name")  # -> Environment
-runtime.open("friendly-name")  # -> Environment, offline
+runtime.prepare(spec)  # -> exact EnvironmentLock
+runtime.open_exact(lock, name="friendly-name")  # -> Environment
+runtime.environment("friendly-name")  # reopen a ready environment, offline
 runtime.check(source, environment=spec)  # convenience path
 runtime.check(source, packages=["github:owner/repository@v1.0.0"])
 runtime.replay_capture("run.json")  # replay a capture
-runtime.gc(dry_run=True)  # inspect reclaimable environments
+runtime.clean(dry_run=True)  # inspect reclaimable environments (advanced API)
 ```
 
-Configure transparent prebuilt environments and publish them through OCI:
+Configure environment libraries and publish ready-to-use environments:
 
 ```python
 runtime = Runtime(
-    caches=["oci://ghcr.io/alerad/leancert-runtime"],
-    prebuilt="auto",
+    libraries=["ghcr.io/alerad/lean-environments"],
+    availability="auto",
 )
-environment = runtime.ensure(lock)
+environment = runtime.open_exact(lock)
 published = runtime.publish_environment(
     environment.id,
-    "oci://ghcr.io/alerad/leancert-runtime",
+    "ghcr.io/alerad/lean-environments",
     tags=["v4.32.2.4"],
 )
 ```
@@ -72,8 +72,8 @@ Package-reference discovery is also exposed in separable stages:
 
 ```python
 spec = runtime.spec_from_references(["github:alerad/leancert@v4.32.2.4"])
-lock = runtime.resolve_references(["github:alerad/leancert@v4.32.2.4"])
-environment = runtime.ensure_references(
+lock = runtime.prepare_references(["github:alerad/leancert@v4.32.2.4"])
+environment = runtime.open_references(
     ["github:alerad/leancert@v4.32.2.4"],
     name="leancert-4.32.2.4",
 )
@@ -134,10 +134,10 @@ results = await environment.check_many_async(sources, concurrency=8)
 
 Mutable project checks and `check_matrix_async()` use the same cancellation signal; cancelling
 the coroutine terminates active local Lean processes before control returns to the caller.
-Synchronous `setup()`, `check()`, and `Runtime.resolve()` accept a `threading.Event` through
+Synchronous `setup()`, `check()`, and `Runtime.prepare()` accept a `threading.Event` through
 `cancel=`. The signal interrupts toolchain installation, Lake resolution, environment builds,
 and waits for another process materializing the same environment. Initial shorthand-reference
-discovery and OCI transfers remain bounded by their transport timeouts.
+discovery and library downloads remain bounded by their transport timeouts.
 
 ## Interactive sessions
 

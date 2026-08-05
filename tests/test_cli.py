@@ -3,13 +3,33 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from lean_runtime.bundles import BundleInfo
-from lean_runtime.cli import main
+from lean_runtime.bundles import PortableCopyInfo
+from lean_runtime.cli import main, parser
 from lean_runtime.models import ExecutionResult
 from lean_runtime.verification import VerificationCheck, VerificationReport
 
 
-def test_raw_check_cli_json_result(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_removed_v1_commands_are_absent() -> None:
+    commands = set(parser()._subparsers._group_actions[0].choices)
+    removed = {
+        "resolve",
+        "ensure",
+        "pull",
+        "build-and-push",
+        "publish-index",
+        "export",
+        "import",
+        "env-list",
+        "cache-status",
+        "diff",
+        "gc",
+        "raw-check",
+        "project-build",
+    }
+    assert commands.isdisjoint(removed)
+
+
+def test_check_file_cli_json_result(monkeypatch, tmp_path: Path, capsys) -> None:
     source = tmp_path / "Main.lean"
     source.write_text("example : True := by trivial")
     result = ExecutionResult(
@@ -23,7 +43,7 @@ def test_raw_check_cli_json_result(monkeypatch, tmp_path: Path, capsys) -> None:
         elapsed_seconds=0.01,
     )
     monkeypatch.setattr("lean_runtime.cli.Runtime.check", lambda *args, **kwargs: result)
-    assert main(["raw-check", str(source), "--toolchain", "4.32.0", "--json"]) == 0
+    assert main(["check-file", str(source), "--toolchain", "4.32.0", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["schema"] == "lean-runtime.execution/v1"
@@ -52,7 +72,7 @@ def test_managed_check_cli_accepts_supporting_files(monkeypatch, tmp_path: Path,
             observed.update(files=files, entrypoint=entrypoint, policy=policy)
             return result
 
-    monkeypatch.setattr("lean_runtime.cli.Runtime.open", lambda *_args: FakeEnvironment())
+    monkeypatch.setattr("lean_runtime.cli.Runtime.environment", lambda *_args: FakeEnvironment())
     assert (
         main(
             [
@@ -91,11 +111,11 @@ def test_check_cli_discovers_with_packages(monkeypatch, tmp_path: Path, capsys) 
             observed.update(files=files, entrypoint=entrypoint, policy=policy)
             return result
 
-    def ensure_references(_runtime, references, *, toolchain=None):
+    def open_references(_runtime, references, *, toolchain=None):
         observed.update(references=references, toolchain=toolchain)
         return FakeEnvironment()
 
-    monkeypatch.setattr("lean_runtime.cli.Runtime.ensure_references", ensure_references)
+    monkeypatch.setattr("lean_runtime.cli.Runtime.open_references", open_references)
     assert (
         main(
             [
@@ -113,17 +133,17 @@ def test_check_cli_discovers_with_packages(monkeypatch, tmp_path: Path, capsys) 
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
-def test_export_cli_reports_bundle_identity(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_save_copy_cli_reports_copy_identity(monkeypatch, tmp_path: Path, capsys) -> None:
     output = tmp_path / "environment.oci.tar.gz"
-    info = BundleInfo(
+    info = PortableCopyInfo(
         environment_id="env_" + "a" * 64,
-        lock_id="lock_" + "b" * 64,
-        manifest_digest="sha256:" + "c" * 64,
+        exact_environment_id="lock_" + "b" * 64,
+        copy_id="sha256:" + "c" * 64,
         path=str(output),
     )
-    monkeypatch.setattr("lean_runtime.cli.Runtime.export_environment", lambda *_args: info)
-    assert main(["--quiet", "export", "demo", "--output", str(output)]) == 0
-    assert json.loads(capsys.readouterr().out)["manifest_digest"] == info.manifest_digest
+    monkeypatch.setattr("lean_runtime.cli.Runtime.save_portable_copy", lambda *_args: info)
+    assert main(["--quiet", "save-copy", "demo", "--output", str(output)]) == 0
+    assert json.loads(capsys.readouterr().out)["copy_id"] == info.copy_id
 
 
 def test_verify_cli_is_concise_and_json_is_versioned(monkeypatch, capsys) -> None:
