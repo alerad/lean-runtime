@@ -158,6 +158,49 @@ def parser() -> argparse.ArgumentParser:
     import_bundle.add_argument("--name")
     import_bundle.add_argument("--no-probe", action="store_true", help="skip the Lean import probe")
 
+    capsule_create = commands.add_parser(
+        "capsule-create", help="create a thin content-addressed executable capsule"
+    )
+    capsule_create.add_argument("payload", type=Path)
+    capsule_create.add_argument("--command", dest="capsule_command", nargs="+", required=True)
+    capsule_create.add_argument("--source-revision", required=True)
+    capsule_create.add_argument("--source-environment-id")
+    capsule_create.add_argument("--source-lock-id")
+    capsule_create.add_argument("--toolchain", default="unknown")
+    capsule_create.add_argument("--capability-digest")
+
+    capsule_export = commands.add_parser(
+        "capsule-export", help="export a thin capsule as an OCI archive"
+    )
+    capsule_export.add_argument("capsule_id")
+    capsule_export.add_argument("--output", required=True, type=Path)
+
+    capsule_import = commands.add_parser(
+        "capsule-import", help="verify and import a local capsule OCI archive"
+    )
+    capsule_import.add_argument("bundle", type=Path)
+
+    capsule_pull = commands.add_parser(
+        "capsule-pull", help="pull a compatible thin capsule from OCI"
+    )
+    capsule_pull.add_argument("repository")
+    capsule_pull.add_argument("reference")
+    capsule_pull.add_argument("--source-revision")
+
+    capsule_push = commands.add_parser("capsule-push", help="publish a platform capsule to OCI")
+    capsule_push.add_argument("capsule_id")
+    capsule_push.add_argument("--repository", required=True)
+    capsule_push.add_argument("--tag", action="append", default=[])
+    capsule_push.add_argument("--sign", action="store_true")
+
+    capsule_index = commands.add_parser(
+        "capsule-publish-index", help="finalize a multi-platform capsule OCI index"
+    )
+    capsule_index.add_argument("source_revision")
+    capsule_index.add_argument("platform_results", nargs="+", type=Path)
+    capsule_index.add_argument("--repository", required=True)
+    capsule_index.add_argument("--tag", action="append", default=[])
+
     check = commands.add_parser(
         "check", help="check with --with packages or in a published environment"
     )
@@ -337,6 +380,65 @@ def main(argv: list[str] | None = None) -> int:
                 args.bundle, name=args.name, probe=not args.no_probe
             )
             _json(environment.inspect().to_dict())
+            return 0
+        if args.command == "capsule-create":
+            capsule = runtime.create_capsule(
+                args.payload,
+                command=args.capsule_command,
+                source_revision=args.source_revision,
+                source_environment_id=args.source_environment_id,
+                source_lock_id=args.source_lock_id,
+                toolchain=args.toolchain,
+                capability_digest=args.capability_digest,
+            )
+            _json(
+                {
+                    "capsule_id": capsule.id,
+                    "manifest": capsule.manifest.to_dict(),
+                    "path": str(capsule.root),
+                }
+            )
+            return 0
+        if args.command == "capsule-export":
+            _json(runtime.export_capsule(args.capsule_id, args.output).to_dict())
+            return 0
+        if args.command == "capsule-import":
+            capsule = runtime.import_capsule(args.bundle)
+            _json({"capsule_id": capsule.id, "manifest": capsule.manifest.to_dict()})
+            return 0
+        if args.command == "capsule-pull":
+            capsule = runtime.pull_capsule(
+                args.repository,
+                args.reference,
+                expected_source_revision=args.source_revision,
+            )
+            _json({"capsule_id": capsule.id, "manifest": capsule.manifest.to_dict()})
+            return 0
+        if args.command == "capsule-push":
+            _json(
+                runtime.publish_capsule(
+                    args.capsule_id,
+                    args.repository,
+                    tags=args.tag,
+                    sign=args.sign,
+                ).to_dict()
+            )
+            return 0
+        if args.command == "capsule-publish-index":
+            descriptors = []
+            for path in args.platform_results:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                descriptor = value.get("platform_descriptor") if isinstance(value, dict) else None
+                if not isinstance(descriptor, dict):
+                    raise ValueError(f"invalid capsule platform result: {path}")
+                descriptors.append(descriptor)
+            digest = runtime.publish_capsule_index(
+                args.repository,
+                args.source_revision,
+                descriptors,
+                tags=args.tag,
+            )
+            _json({"source_revision": args.source_revision, "index_digest": digest})
             return 0
         if args.command == "inspect":
             subject_path = Path(args.environment).expanduser()
