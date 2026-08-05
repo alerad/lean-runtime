@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ._git import git_command
+from ._paths import remove_tree
 from .errors import EnvironmentError
 from .lockfiles import EnvironmentLock
 from .locking import FileLock
@@ -348,7 +349,7 @@ class EnvironmentStore:
                     # Failed Git checkouts can leave locked pack files on
                     # Windows. Cleanup must not mask the actionable Git error.
                     with suppress(OSError):
-                        shutil.rmtree(stage)
+                        remove_tree(stage)
         return destination
 
     def environment_path(self, environment_id: str) -> Path:
@@ -556,7 +557,7 @@ class EnvironmentStore:
                         ):
                             retained.append(path.name)
                             continue
-                        shutil.rmtree(path)
+                        remove_tree(path)
                         usage.unlink(missing_ok=True)
                         removed.append(path.name)
         return CleanupReport(tuple(candidates), tuple(removed), tuple(retained), dry_run)

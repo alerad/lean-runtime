@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ._git import git_command
+from ._paths import remove_tree
 from .backends import Backend
 from .errors import EnvironmentError
 from .events import EventEmitter
@@ -667,7 +668,7 @@ class EnvironmentBundles:
                     stage.replace(destination)
                 finally:
                     if stage.exists():
-                        shutil.rmtree(stage)
+                        remove_tree(stage)
         if name:
             self.store.set_alias(name, environment_id)
         self.events.emit(

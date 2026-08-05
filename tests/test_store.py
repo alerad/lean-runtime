@@ -217,11 +217,13 @@ def test_source_snapshot_preserves_git_error_when_cleanup_also_fails(
         Path(command[-1]).mkdir()
         return subprocess.CompletedProcess(command, 1, "", "Filename too long")
 
-    def failed_cleanup(_path: Path) -> None:
+    def failed_cleanup(_path: Path, *, onerror) -> None:
+        assert onerror is not None
         raise PermissionError("pack file is locked")
 
     monkeypatch.setattr("lean_runtime.store.subprocess.run", failed_clone)
-    monkeypatch.setattr("lean_runtime.store.shutil.rmtree", failed_cleanup)
+    monkeypatch.setattr("lean_runtime._paths.shutil.rmtree", failed_cleanup)
+    monkeypatch.setattr("lean_runtime._paths.time.sleep", lambda _seconds: None)
 
     with pytest.raises(EnvironmentError, match="Filename too long"):
         store.publish_source(checkout, source_id, metadata)

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.2
+
+- Remove staged environments safely when Git-for-Windows leaves source pack
+  files read-only or briefly locked.
+- Preserve the primary environment-build diagnostic when staging cleanup also
+  fails.
+
 ## 2.0.1
 
 - Enable Git's long-path support for every Runtime-managed source operation so

@@ -6,7 +6,6 @@ import asyncio
 import json
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -21,6 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Generic, TextIO, TypeVar, cast
 
 from ._git import git_command
+from ._paths import remove_tree
 from .backends import Backend, BackendResult, InteractiveProcess, InteractiveTextReader
 from .diagnostics import error_diagnostic, parse_diagnostics
 from .errors import EnvironmentError, MaterializationError, PolicyError
@@ -559,7 +559,7 @@ class Environment:
 
         def cleanup() -> None:
             if instance.exists():
-                shutil.rmtree(instance)
+                remove_tree(instance)
             with suppress(OSError):
                 job_parent.rmdir()
 
@@ -847,7 +847,7 @@ class Environment:
             return result
         finally:
             if instance.exists():
-                shutil.rmtree(instance)
+                remove_tree(instance)
             with suppress(OSError):
                 job_parent.rmdir()
 
@@ -1107,7 +1107,10 @@ class EnvironmentManager:
             )
         finally:
             if stage.exists():
-                shutil.rmtree(stage)
+                # Preserve a build/materialization diagnostic if cleanup of
+                # Git's read-only pack files also fails on Windows.
+                with suppress(OSError):
+                    remove_tree(stage)
 
     def _ensure_sources(self, lock: EnvironmentLock) -> None:
         """Acquire exact locked sources without invoking Lake resolution."""

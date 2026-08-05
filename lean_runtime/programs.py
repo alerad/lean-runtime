@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shutil
 import tempfile
 import uuid
 from collections.abc import Mapping, Sequence
@@ -20,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
+from ._paths import remove_tree
 from .backends import Backend, BackendResult, InteractiveProcess
 from .bundles import (
     INDEX_MEDIA_TYPE,
@@ -238,7 +238,7 @@ class ReadyProgram:
 
         def cleanup() -> None:
             if instance.exists():
-                shutil.rmtree(instance)
+                remove_tree(instance)
             with suppress(OSError):
                 job_parent.rmdir()
 
@@ -347,7 +347,7 @@ class ProgramManager:
                     stage.replace(destination)
                 finally:
                     if stage.exists():
-                        shutil.rmtree(stage)
+                        remove_tree(stage)
         self.events.emit(
             "program.created", "Created executable program", program_id=manifest.program_id
         )
@@ -534,7 +534,7 @@ class ProgramManager:
                     stage.replace(destination)
                 finally:
                     if stage.exists():
-                        shutil.rmtree(stage)
+                        remove_tree(stage)
         return self.open(manifest.program_id)
 
 
