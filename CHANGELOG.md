@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.1
+
+- Enable Git's long-path support for every Runtime-managed source operation so
+  Mathlib environments can be prepared and materialized on Windows.
+- Preserve the primary Git diagnostic when cleanup of a failed Windows source
+  checkout also encounters locked files.
+
 ## 2.0.0
 
 Version 2 gives the public interface the language used by Lean users rather

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ._git import git_command
 from .errors import ProjectError
 from .models import ExecutionResult, ProjectProvenance
 from .policies import ExecutionPolicy
@@ -31,7 +32,7 @@ def _file_digest(path: Path) -> str | None:
 
 def _git(root: Path, *arguments: str) -> str | None:
     result = subprocess.run(
-        ["git", "-C", str(root), *arguments],
+        git_command("-C", str(root), *arguments),
         text=True,
         capture_output=True,
         check=False,

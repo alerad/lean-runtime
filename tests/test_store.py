@@ -197,3 +197,31 @@ def test_source_snapshot_is_shallow_and_detects_content_changes(tmp_path: Path) 
             revision=revision,
             tree_hash=tree_hash,
         )
+
+
+def test_source_snapshot_preserves_git_error_when_cleanup_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    store = EnvironmentStore(tmp_path / "store")
+    source_id = "source_" + "2" * 64
+    metadata = {
+        "source_id": source_id,
+        "url": "https://example.test/package",
+        "revision": "a" * 40,
+        "tree_hash": "b" * 40,
+    }
+
+    def failed_clone(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        Path(command[-1]).mkdir()
+        return subprocess.CompletedProcess(command, 1, "", "Filename too long")
+
+    def failed_cleanup(_path: Path) -> None:
+        raise PermissionError("pack file is locked")
+
+    monkeypatch.setattr("lean_runtime.store.subprocess.run", failed_clone)
+    monkeypatch.setattr("lean_runtime.store.shutil.rmtree", failed_cleanup)
+
+    with pytest.raises(EnvironmentError, match="Filename too long"):
+        store.publish_source(checkout, source_id, metadata)

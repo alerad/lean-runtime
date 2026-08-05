@@ -17,6 +17,7 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover - exercised by the Python 3.10 CI job
     import tomli as tomllib
 
+from ._git import git_command
 from .errors import ResolutionError, SpecificationError
 from .specs import GitPackage
 from .toolchains import ToolchainManager, normalize_toolchain
@@ -126,7 +127,7 @@ class DiscoveredPackage:
 def _run_git(arguments: list[str], *, cwd: Path | None = None, timeout: float = 120) -> str:
     try:
         process = subprocess.run(
-            ["git", *arguments],
+            git_command(*arguments),
             cwd=cwd,
             text=True,
             capture_output=True,
@@ -137,7 +138,7 @@ def _run_git(arguments: list[str], *, cwd: Path | None = None, timeout: float = 
         raise ResolutionError(
             "package-reference Git operation timed out",
             phase="package-discovery",
-            command=("git", *arguments),
+            command=tuple(git_command(*arguments)),
             exit_code=124,
             output=str(exc.stdout or "") + str(exc.stderr or ""),
         ) from exc
@@ -145,7 +146,7 @@ def _run_git(arguments: list[str], *, cwd: Path | None = None, timeout: float = 
         raise ResolutionError(
             "could not acquire package-reference metadata",
             phase="package-discovery",
-            command=("git", *arguments),
+            command=tuple(git_command(*arguments)),
             exit_code=process.returncode,
             output=process.stdout + process.stderr,
         )
