@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Generic, TextIO, TypeVar, cast
 
+from ._git import git_command
 from .backends import Backend, BackendResult, InteractiveProcess, InteractiveTextReader
 from .diagnostics import error_diagnostic, parse_diagnostics
 from .errors import EnvironmentError, MaterializationError, PolicyError
@@ -1138,18 +1139,17 @@ class EnvironmentManager:
             ) as raw:
                 checkout = Path(raw)
                 commands = [
-                    ["git", "init", "-q"],
-                    ["git", "remote", "add", "origin", package.url],
-                    [
-                        "git",
+                    git_command("init", "-q"),
+                    git_command("remote", "add", "origin", package.url),
+                    git_command(
                         "fetch",
                         "--depth",
                         "1",
                         "--filter=blob:none",
                         "origin",
                         package.revision,
-                    ],
-                    ["git", "checkout", "--detach", "FETCH_HEAD"],
+                    ),
+                    git_command("checkout", "--detach", "FETCH_HEAD"),
                 ]
                 for command in commands:
                     completed = subprocess.run(
@@ -1168,7 +1168,7 @@ class EnvironmentManager:
                             output=completed.stdout + completed.stderr,
                         )
                 tree = subprocess.run(
-                    ["git", "rev-parse", "HEAD^{tree}"],
+                    git_command("rev-parse", "HEAD^{tree}"),
                     cwd=checkout,
                     text=True,
                     capture_output=True,

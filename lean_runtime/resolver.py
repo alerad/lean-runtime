@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from ._git import git_command
 from .backends import Backend
 from .errors import ResolutionError
 from .events import EventEmitter
@@ -27,7 +28,7 @@ _COMMIT = re.compile(r"[0-9a-fA-F]{40}")
 
 def _git(path: Path, *arguments: str) -> str:
     process = subprocess.run(
-        ["git", "-C", str(path), *arguments],
+        git_command("-C", str(path), *arguments),
         text=True,
         capture_output=True,
         check=False,
@@ -36,7 +37,7 @@ def _git(path: Path, *arguments: str) -> str:
         raise ResolutionError(
             f"could not inspect resolved Git package at {path}",
             phase="lock-validation",
-            command=("git", "-C", str(path), *arguments),
+            command=tuple(git_command("-C", str(path), *arguments)),
             exit_code=process.returncode,
             output=process.stdout + process.stderr,
         )
@@ -144,7 +145,7 @@ class EnvironmentResolver:
                 pinned.append(package)
                 continue
             reference = f"refs/tags/{package.rev}"
-            command = ["git", "ls-remote", package.url, reference, f"{reference}^{{}}"]
+            command = git_command("ls-remote", package.url, reference, f"{reference}^{{}}")
             process = self.backend.execute(
                 command,
                 cwd=self.store.home,

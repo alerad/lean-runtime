@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from ._git import git_command
 from .backends import Backend
 from .errors import EnvironmentError
 from .events import EventEmitter
@@ -281,7 +282,7 @@ def _verify_package(root: Path, package: LockedPackage) -> None:
     observed: list[str] = []
     for revision in ("HEAD", "HEAD^{tree}"):
         result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", revision],
+            git_command("-C", str(root), "rev-parse", revision),
             text=True,
             capture_output=True,
             check=False,
@@ -292,15 +293,14 @@ def _verify_package(root: Path, package: LockedPackage) -> None:
     if observed != [package.revision.lower(), package.tree_hash.lower()]:
         raise EnvironmentError(f"bundled package source mismatch: {package.name}")
     status = subprocess.run(
-        [
-            "git",
+        git_command(
             "-C",
             str(root),
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
             "--ignored=no",
-        ],
+        ),
         text=True,
         capture_output=True,
         check=False,

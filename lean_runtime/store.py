@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._git import git_command
 from .errors import EnvironmentError
 from .lockfiles import EnvironmentLock
 from .locking import FileLock
@@ -271,7 +272,7 @@ class EnvironmentStore:
         observed = []
         for arguments in commands:
             process = subprocess.run(
-                ["git", "-C", str(source), *arguments],
+                git_command("-C", str(source), *arguments),
                 text=True,
                 capture_output=True,
                 check=False,
@@ -298,8 +299,7 @@ class EnvironmentStore:
             parent.mkdir(parents=True, exist_ok=True)
             stage = parent / f".staging-{os.getpid()}-{uuid.uuid4().hex}"
             try:
-                command = [
-                    "git",
+                command = git_command(
                     "clone",
                     "--quiet",
                     "--no-local",
@@ -308,7 +308,7 @@ class EnvironmentStore:
                     "--no-tags",
                     checkout.resolve().as_uri(),
                     str(stage),
-                ]
+                )
                 process = subprocess.run(
                     command,
                     text=True,
@@ -322,15 +322,14 @@ class EnvironmentStore:
                         + process.stderr
                     )
                 remote = subprocess.run(
-                    [
-                        "git",
+                    git_command(
                         "-C",
                         str(stage),
                         "remote",
                         "set-url",
                         "origin",
                         str(metadata["url"]),
-                    ],
+                    ),
                     text=True,
                     capture_output=True,
                     check=False,
@@ -346,7 +345,10 @@ class EnvironmentStore:
                 stage.replace(destination)
             finally:
                 if stage.exists():
-                    shutil.rmtree(stage)
+                    # Failed Git checkouts can leave locked pack files on
+                    # Windows. Cleanup must not mask the actionable Git error.
+                    with suppress(OSError):
+                        shutil.rmtree(stage)
         return destination
 
     def environment_path(self, environment_id: str) -> Path:
