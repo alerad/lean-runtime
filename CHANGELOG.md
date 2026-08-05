@@ -6,6 +6,8 @@
   files read-only or briefly locked.
 - Preserve the primary environment-build diagnostic when staging cleanup also
   fails.
+- Show the failed phase, command, exit code, and captured tool output when a
+  verbose CLI materialization fails.
 
 ## 2.0.1
 

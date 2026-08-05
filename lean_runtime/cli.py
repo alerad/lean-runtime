@@ -50,6 +50,19 @@ def _progress(event: RuntimeEvent) -> None:
     print(f"lean-runtime: {event.kind}{package}: {event.message}", file=sys.stderr)
 
 
+def _print_operation_failure(exc: ResolutionError | MaterializationError, *, verbose: bool) -> None:
+    print(f"lean-runtime: {exc}", file=sys.stderr)
+    if not verbose:
+        return
+    print(f"phase: {exc.phase}", file=sys.stderr)
+    if exc.command:
+        print("command: " + " ".join(exc.command), file=sys.stderr)
+    if exc.exit_code is not None:
+        print(f"exit code: {exc.exit_code}", file=sys.stderr)
+    if exc.output:
+        print(exc.output.rstrip(), file=sys.stderr)
+
+
 def _cli_source_name(path: Path) -> str:
     if path.is_absolute():
         return path.name
@@ -643,7 +656,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         else:
-            print(f"lean-runtime: {exc}", file=sys.stderr)
+            _print_operation_failure(exc, verbose=args.verbose)
         return 2
     except (LeanRuntimeError, OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         if getattr(args, "json", False):

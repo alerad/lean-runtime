@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 
 from lean_runtime.bundles import PortableCopyInfo
-from lean_runtime.cli import main, parser
+from lean_runtime.cli import _print_operation_failure, main, parser
+from lean_runtime.errors import MaterializationError
 from lean_runtime.models import ExecutionResult
 from lean_runtime.verification import VerificationCheck, VerificationReport
 
@@ -32,6 +33,26 @@ def test_removed_v1_commands_are_absent() -> None:
         "program-publish-index",
     }
     assert commands.isdisjoint(removed)
+
+
+def test_verbose_materialization_failure_includes_tool_output(capsys) -> None:
+    failure = MaterializationError(
+        "environment build failed",
+        phase="build",
+        command=("lake", "build"),
+        exit_code=1,
+        output="specific compiler failure\n",
+    )
+
+    _print_operation_failure(failure, verbose=True)
+
+    assert capsys.readouterr().err == (
+        "lean-runtime: environment build failed\n"
+        "phase: build\n"
+        "command: lake build\n"
+        "exit code: 1\n"
+        "specific compiler failure\n"
+    )
 
 
 def test_check_file_cli_json_result(monkeypatch, tmp_path: Path, capsys) -> None:
