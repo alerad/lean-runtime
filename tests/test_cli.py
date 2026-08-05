@@ -151,6 +151,42 @@ def test_save_copy_cli_reports_copy_identity(monkeypatch, tmp_path: Path, capsys
     assert json.loads(capsys.readouterr().out)["copy_id"] == info.copy_id
 
 
+def test_finalize_publication_reads_computer_records(monkeypatch, tmp_path: Path, capsys) -> None:
+    result = tmp_path / "computer.json"
+    record = {"digest": "sha256:" + "a" * 64, "size": 42}
+    result.write_text(json.dumps({"computer_record": record}))
+    observed = {}
+
+    def finalize(_runtime, library, lock_id, computer_records, *, tags):
+        observed.update(
+            library=library,
+            lock_id=lock_id,
+            computer_records=computer_records,
+            tags=tags,
+        )
+        return "sha256:" + "b" * 64
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.finalize_publication", finalize)
+    assert (
+        main(
+            [
+                "--quiet",
+                "finalize-publication",
+                "lock_" + "c" * 64,
+                str(result),
+                "--library",
+                "ghcr.io/example/environments",
+                "--tag",
+                "v2",
+            ]
+        )
+        == 0
+    )
+    assert observed["computer_records"] == [record]
+    assert observed["tags"] == ["v2"]
+    assert json.loads(capsys.readouterr().out)["publication_id"].startswith("sha256:")
+
+
 def test_verify_cli_is_concise_and_json_is_versioned(monkeypatch, capsys) -> None:
     report = VerificationReport(
         "demo",

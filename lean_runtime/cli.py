@@ -366,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
             descriptors = []
             for path in args.platform_results:
                 value = json.loads(path.read_text(encoding="utf-8"))
-                descriptor = value.get("platform_descriptor") if isinstance(value, dict) else None
+                descriptor = value.get("computer_record") if isinstance(value, dict) else None
                 if not isinstance(descriptor, dict):
                     raise ValueError(f"invalid platform result: {path}")
                 descriptors.append(descriptor)
