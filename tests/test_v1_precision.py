@@ -120,7 +120,7 @@ def test_matrix_parser_is_closed_and_execution_preserves_context_order(tmp_path:
     environment = SimpleNamespace(check=lambda *_args, **_kwargs: result())
     runtime = SimpleNamespace(
         check=lambda *_args, **_kwargs: result(),
-        open=lambda _name: environment,
+        environment=lambda _name: environment,
     )
     report = run_matrix(
         runtime,
