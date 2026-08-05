@@ -200,6 +200,7 @@ def parser() -> argparse.ArgumentParser:
     capsule_index.add_argument("platform_results", nargs="+", type=Path)
     capsule_index.add_argument("--repository", required=True)
     capsule_index.add_argument("--tag", action="append", default=[])
+    capsule_index.add_argument("--sign", action="store_true")
 
     check = commands.add_parser(
         "check", help="check with --with packages or in a published environment"
@@ -437,6 +438,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.source_revision,
                 descriptors,
                 tags=args.tag,
+                sign=args.sign,
             )
             _json({"source_revision": args.source_revision, "index_digest": digest})
             return 0

@@ -285,12 +285,16 @@ class Runtime:
         platform_descriptors: Sequence[dict[str, Any]],
         *,
         tags: Sequence[str] = (),
+        sign: bool = False,
     ) -> str:
         """Finalize a multi-platform capsule index after platform publication."""
         registry = OCICapsuleRegistry(
             OCIRepository.parse(repository), self.store, self.capsules, self.events
         )
-        return registry.publish_index(source_revision, platform_descriptors, tags=tags)
+        digest = registry.publish_index(source_revision, platform_descriptors, tags=tags)
+        if sign:
+            CosignVerifier(executable=self.cosign_executable).sign(registry.repository, digest)
+        return digest
 
     def export_environment(self, identifier: str, output: str | os.PathLike[str]) -> BundleInfo:
         """Export a published environment as a deterministic OCI layout archive."""
