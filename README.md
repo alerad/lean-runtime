@@ -131,6 +131,11 @@ lean-runtime build-and-publish environment.lock.json \
   --publish-to ghcr.io/owner/lean-environments
 ```
 
+For an already-built executable, Lean Runtime can also create a verified
+**ready-to-run program**. It opens without rebuilding the project, can be saved
+as a portable copy, and can be shared through a public or private program
+library. See [Ready-to-run programs](https://github.com/alerad/lean-runtime/blob/main/docs/ready-programs.md).
+
 ## Technical details
 
 The simple API is backed by exact Git commits and trees, Lake-resolved locks,
@@ -148,6 +153,7 @@ architecture documentation.
 - [Managed environments](https://github.com/alerad/lean-runtime/blob/main/docs/environments.md)
 - [Local Lake projects](https://github.com/alerad/lean-runtime/blob/main/docs/local-projects.md)
 - [Portable copies and environment libraries](https://github.com/alerad/lean-runtime/blob/main/docs/portable-copies.md)
+- [Ready-to-run programs](https://github.com/alerad/lean-runtime/blob/main/docs/ready-programs.md)
 - [Architecture](https://github.com/alerad/lean-runtime/blob/main/docs/architecture.md)
 - [Trust and limitations](https://github.com/alerad/lean-runtime/blob/main/docs/trust-and-limitations.md)
 - [V1 release case study](https://github.com/alerad/lean-runtime/blob/main/docs/case-study-v1.md)

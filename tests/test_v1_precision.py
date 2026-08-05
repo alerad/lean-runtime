@@ -33,6 +33,11 @@ def test_removed_v1_runtime_names_are_absent() -> None:
         "publish_environment_index",
         "gc",
         "gc_oci_blobs",
+        "open_program",
+        "export_program",
+        "import_program",
+        "pull_program",
+        "publish_program_index",
     }
     assert not {name for name in removed if hasattr(Runtime, name)}
 

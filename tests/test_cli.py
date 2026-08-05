@@ -25,6 +25,11 @@ def test_removed_v1_commands_are_absent() -> None:
         "gc",
         "raw-check",
         "project-build",
+        "program-export",
+        "program-import",
+        "program-pull",
+        "program-push",
+        "program-publish-index",
     }
     assert commands.isdisjoint(removed)
 

@@ -39,6 +39,7 @@ from .oci import (
 )
 from .policies import ExecutionPolicy
 from .profiling import ProfileReport, run_profile
+from .programs import ProgramInfo, ProgramLibrary, ProgramManager, ReadyProgram
 from .projects import ProjectContext, ProjectEnvironment, discover_project
 from .publisher_verification import CosignVerifier
 from .references import PackageReference, discover_package, normalize_references
@@ -127,6 +128,7 @@ class Runtime:
             self.store, self.toolchains, self.backend, self.events
         )
         self.bundles = EnvironmentBundles(self.store, self.toolchains, self.backend, self.events)
+        self.programs = ProgramManager(self.store, self.backend, self.events)
         configured_libraries = libraries
         if configured_libraries is None:
             configured = os.environ.get("LEAN_RUNTIME_LIBRARIES")
@@ -206,6 +208,96 @@ class Runtime:
     def environment(self, identifier: str) -> Environment:
         """Open a published environment without resolution or network access."""
         return self.environments.open(identifier)
+
+    def create_program(
+        self,
+        payload: str | os.PathLike[str],
+        *,
+        command: Sequence[str],
+        source_revision: str,
+        source_environment_id: str | None = None,
+        exact_environment_id: str | None = None,
+        toolchain: str = "unknown",
+        capability_id: str | None = None,
+    ) -> ReadyProgram:
+        """Create a verified ready-to-run program from a payload directory."""
+        return self.programs.create(
+            Path(payload),
+            command=command,
+            source_revision=source_revision,
+            source_environment_id=source_environment_id,
+            exact_environment_id=exact_environment_id,
+            toolchain=toolchain,
+            capability_id=capability_id,
+        )
+
+    def program(self, program_id: str) -> ReadyProgram:
+        """Open a ready-to-run program already stored on this computer."""
+        return self.programs.open(program_id)
+
+    def save_program_copy(self, program_id: str, output: str | os.PathLike[str]) -> ProgramInfo:
+        """Save a portable copy of a ready-to-run program."""
+        return self.programs.export(program_id, Path(output))
+
+    def open_program_copy(self, copy: str | os.PathLike[str]) -> ReadyProgram:
+        """Verify and open a portable program copy."""
+        return self.programs.import_bundle(Path(copy))
+
+    def _program_library(self, library: str) -> ProgramLibrary:
+        return ProgramLibrary(
+            OCIRepository.parse(library),
+            self.store,
+            self.programs,
+            self.events,
+            self.signature_verifier,
+        )
+
+    def download_program(
+        self,
+        library: str,
+        reference: str,
+        *,
+        expected_source_revision: str | None = None,
+    ) -> ReadyProgram:
+        """Download the compatible ready-to-run program from a library."""
+        return self._program_library(library).pull(
+            reference, expected_source_revision=expected_source_revision
+        )
+
+    def publish_program(
+        self,
+        program_id: str,
+        library: str,
+        *,
+        tags: Sequence[str] = (),
+        sign: bool = False,
+    ) -> ProgramInfo:
+        """Publish this computer's ready-to-run program to a library."""
+        selected = self._program_library(library)
+        result = selected.publish(program_id, tags=tags)
+        if sign and result.copy_id is not None:
+            CosignVerifier(None, None, executable=self.verification_executable).sign(
+                selected.repository, result.copy_id
+            )
+        return result
+
+    def finalize_program_publication(
+        self,
+        library: str,
+        source_revision: str,
+        computer_records: Sequence[dict[str, Any]],
+        *,
+        tags: Sequence[str] = (),
+        sign: bool = False,
+    ) -> str:
+        """Combine computer-specific program records into one publication."""
+        selected = self._program_library(library)
+        publication_id = selected.publish_index(source_revision, computer_records, tags=tags)
+        if sign:
+            CosignVerifier(None, None, executable=self.verification_executable).sign(
+                selected.repository, publication_id
+            )
+        return publication_id
 
     def save_portable_copy(
         self, identifier: str, output: str | os.PathLike[str]

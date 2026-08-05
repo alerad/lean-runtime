@@ -158,6 +158,52 @@ def parser() -> argparse.ArgumentParser:
     import_bundle.add_argument("--name")
     import_bundle.add_argument("--no-probe", action="store_true", help="skip the Lean import probe")
 
+    program_create = commands.add_parser(
+        "program-create", help="create a verified ready-to-run program"
+    )
+    program_create.add_argument("payload", type=Path)
+    program_create.add_argument("--command", dest="program_command", nargs="+", required=True)
+    program_create.add_argument("--source-revision", required=True)
+    program_create.add_argument("--source-environment-id")
+    program_create.add_argument("--exact-environment-id")
+    program_create.add_argument("--toolchain", default="unknown")
+    program_create.add_argument("--capability-id")
+
+    program_export = commands.add_parser(
+        "program-save-copy", help="save a portable copy of a ready-to-run program"
+    )
+    program_export.add_argument("program_id")
+    program_export.add_argument("--output", required=True, type=Path)
+
+    program_import = commands.add_parser(
+        "program-open-copy", help="verify and open a portable program copy"
+    )
+    program_import.add_argument("copy", type=Path)
+
+    program_pull = commands.add_parser(
+        "program-download", help="download a compatible ready-to-run program"
+    )
+    program_pull.add_argument("library")
+    program_pull.add_argument("reference")
+    program_pull.add_argument("--source-revision")
+
+    program_push = commands.add_parser(
+        "program-publish", help="publish this computer's ready-to-run program"
+    )
+    program_push.add_argument("program_id")
+    program_push.add_argument("--library", required=True)
+    program_push.add_argument("--tag", action="append", default=[])
+    program_push.add_argument("--sign", action="store_true")
+
+    program_index = commands.add_parser(
+        "program-finalize-publication", help="combine computer-specific program publications"
+    )
+    program_index.add_argument("source_revision")
+    program_index.add_argument("computer_results", nargs="+", type=Path)
+    program_index.add_argument("--library", required=True)
+    program_index.add_argument("--tag", action="append", default=[])
+    program_index.add_argument("--sign", action="store_true")
+
     check = commands.add_parser(
         "check", help="check with --with packages or in a published environment"
     )
@@ -337,6 +383,66 @@ def main(argv: list[str] | None = None) -> int:
                 args.copy, name=args.name, probe=not args.no_probe
             )
             _json(environment.inspect().to_dict())
+            return 0
+        if args.command == "program-create":
+            program = runtime.create_program(
+                args.payload,
+                command=args.program_command,
+                source_revision=args.source_revision,
+                source_environment_id=args.source_environment_id,
+                exact_environment_id=args.exact_environment_id,
+                toolchain=args.toolchain,
+                capability_id=args.capability_id,
+            )
+            _json(
+                {
+                    "program_id": program.id,
+                    "description": program.description.to_dict(),
+                    "location": str(program.root),
+                }
+            )
+            return 0
+        if args.command == "program-save-copy":
+            _json(runtime.save_program_copy(args.program_id, args.output).to_dict())
+            return 0
+        if args.command == "program-open-copy":
+            program = runtime.open_program_copy(args.copy)
+            _json({"program_id": program.id, "description": program.description.to_dict()})
+            return 0
+        if args.command == "program-download":
+            program = runtime.download_program(
+                args.library,
+                args.reference,
+                expected_source_revision=args.source_revision,
+            )
+            _json({"program_id": program.id, "description": program.description.to_dict()})
+            return 0
+        if args.command == "program-publish":
+            _json(
+                runtime.publish_program(
+                    args.program_id,
+                    args.library,
+                    tags=args.tag,
+                    sign=args.sign,
+                ).to_dict()
+            )
+            return 0
+        if args.command == "program-finalize-publication":
+            descriptors = []
+            for path in args.computer_results:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                descriptor = value.get("computer_record") if isinstance(value, dict) else None
+                if not isinstance(descriptor, dict):
+                    raise ValueError(f"invalid program computer result: {path}")
+                descriptors.append(descriptor)
+            digest = runtime.finalize_program_publication(
+                args.library,
+                args.source_revision,
+                descriptors,
+                tags=args.tag,
+                sign=args.sign,
+            )
+            _json({"source_revision": args.source_revision, "publication_id": digest})
             return 0
         if args.command == "inspect":
             subject_path = Path(args.environment).expanduser()

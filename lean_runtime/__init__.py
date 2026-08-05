@@ -51,6 +51,7 @@ from .models import (
 from .oci import DEFAULT_ENVIRONMENT_LIBRARIES, PublicationInfo
 from .policies import ExecutionPolicy
 from .profiling import ProfileReport
+from .programs import ProgramDescription, ProgramInfo, ReadyProgram
 from .projects import ProjectContext, ProjectEnvironment, discover_project
 from .references import PACKAGE_ALIASES, DiscoveredPackage, PackageReference
 from .runtime import Runtime, project_toolchain
@@ -105,6 +106,9 @@ __all__ = [
     "ProjectEnvironment",
     "ProjectProvenance",
     "ProfileReport",
+    "ProgramDescription",
+    "ProgramInfo",
+    "ReadyProgram",
     "PreparedEnvironment",
     "PolicyError",
     "PublicationInfo",

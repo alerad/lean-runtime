@@ -14,6 +14,7 @@ metadata intentionally change without aliases.
 - Portable copies replace OCI bundles.
 - Publisher verification replaces signature-policy terminology.
 - Cleanup and storage replace garbage-collection and blob terminology.
+- Ready-to-run programs replace execution-capsule and container terminology.
 
 ### Main migrations
 
@@ -27,6 +28,9 @@ metadata intentionally change without aliases.
   `save-copy`, `open-copy`, `compare`, `storage`, and `clean`.
 - Environment libraries accept friendly `ghcr.io/owner/name` locations; the
   OCI transport remains an advanced implementation detail.
+- Ready-to-run programs can be created, verified, copied, downloaded from a
+  program library, published for multiple kinds of computers, and interrupted
+  during interactive execution.
 
 ## 1.0.0
 

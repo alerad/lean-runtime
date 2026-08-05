@@ -84,7 +84,7 @@
     },
     "provenance": {
       "type": "object",
-      "required": ["environment_id", "execution_id", "request_digest", "lock_id", "toolchain", "packages", "platform", "backend", "requested_policy", "enforced_policy_fields", "source_digest", "started_at", "project"],
+      "required": ["environment_id", "execution_id", "request_digest", "lock_id", "toolchain", "packages", "platform", "backend", "requested_policy", "enforced_policy_fields", "source_digest", "started_at", "project", "program_id", "program_copy_id"],
       "additionalProperties": false,
       "properties": {
         "environment_id": {"type": ["string", "null"]},
@@ -104,7 +104,9 @@
         "enforced_policy_fields": {"type": "array", "items": {"type": "string"}},
         "source_digest": {"type": "string"},
         "started_at": {"type": "string"},
-        "project": {"anyOf": [{"$ref": "#/$defs/project"}, {"type": "null"}]}
+        "project": {"anyOf": [{"$ref": "#/$defs/project"}, {"type": "null"}]},
+        "program_id": {"type": ["string", "null"]},
+        "program_copy_id": {"type": ["string", "null"]}
       }
     },
     "execution": {

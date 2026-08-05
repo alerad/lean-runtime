@@ -1,5 +1,16 @@
 # Architecture
 
+## Ready-to-run programs
+
+A ready-to-run program is the small result you can open immediately, without
+rebuilding its Lean project first. Lean Runtime verifies its files every time it
+is opened and records the exact source revision and, when known, the environment
+that produced it. Use one for fast service execution. Open the full environment
+when you need kernel replay, custom compilation, or an independent rebuild.
+
+Program libraries and portable program copies use OCI-compatible storage under
+the hood. That transport detail does not appear in the ordinary Python API or CLI.
+
 ## Dominant abstraction
 
 Lean Runtime is an environment compiler:

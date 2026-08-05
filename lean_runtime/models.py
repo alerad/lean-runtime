@@ -106,6 +106,8 @@ class ExecutionProvenance:
     source_digest: str
     started_at: str
     project: ProjectProvenance | None = None
+    program_id: str | None = None
+    program_copy_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

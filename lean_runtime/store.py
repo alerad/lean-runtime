@@ -198,6 +198,7 @@ class EnvironmentStore:
         self.sources = home / "sources" / "git"
         self.locks = home / "locks"
         self.environments = home / "environments"
+        self.programs = home / "programs"
         self.names = home / "names"
         self.jobs = home / "jobs"
         self.executions = home / "executions"
@@ -209,6 +210,7 @@ class EnvironmentStore:
             self.sources,
             self.locks,
             self.environments,
+            self.programs,
             self.names,
             self.jobs,
             self.executions,
