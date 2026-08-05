@@ -523,7 +523,7 @@ class Runtime:
         self,
         library: str,
         lock_id: str,
-        platform_descriptors: Sequence[dict[str, Any]],
+        computer_records: Sequence[dict[str, Any]],
         *,
         tags: Sequence[str] = (),
     ) -> str:
@@ -531,7 +531,7 @@ class Runtime:
         publisher = OCIEnvironmentPublisher(
             OCIRepository.parse(library), self.store, self.bundles, self.events
         )
-        return publisher.publish_index(lock_id, list(platform_descriptors), tags=tuple(tags))
+        return publisher.publish_index(lock_id, list(computer_records), tags=tuple(tags))
 
     def create_environment(
         self,
