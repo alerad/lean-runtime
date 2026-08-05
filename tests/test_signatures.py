@@ -7,13 +7,13 @@ import pytest
 
 from lean_runtime import EnvironmentError
 from lean_runtime.oci import OCIRepository
-from lean_runtime.signatures import CosignVerifier
+from lean_runtime.publisher_verification import CosignVerifier
 
 
 def test_cosign_verification_binds_digest_identity_and_issuer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    executable = tmp_path / "cosign"
+    executable = tmp_path / "verification_tool"
     executable.write_text("")
     commands: list[list[str]] = []
 
@@ -23,7 +23,7 @@ def test_cosign_verification_binds_digest_identity_and_issuer(
             return SimpleNamespace(returncode=0, stdout='{"gitVersion":"v3.0.4"}', stderr="")
         return SimpleNamespace(returncode=0, stdout="[]", stderr="")
 
-    monkeypatch.setattr("lean_runtime.signatures.subprocess.run", run)
+    monkeypatch.setattr("lean_runtime.publisher_verification.subprocess.run", run)
     verifier = CosignVerifier(
         "https://github.com/owner/project/.github/workflows/cache.yml@refs/heads/main",
         "https://token.actions.githubusercontent.com",
@@ -39,10 +39,10 @@ def test_cosign_verification_binds_digest_identity_and_issuer(
 def test_vulnerable_cosign_release_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    executable = tmp_path / "cosign"
+    executable = tmp_path / "verification_tool"
     executable.write_text("")
     monkeypatch.setattr(
-        "lean_runtime.signatures.subprocess.run",
+        "lean_runtime.publisher_verification.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0, stdout='{"gitVersion":"v3.0.3"}', stderr=""
         ),
@@ -54,7 +54,7 @@ def test_vulnerable_cosign_release_is_rejected(
 def test_cosign_attestation_binds_predicate_to_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    executable = tmp_path / "cosign"
+    executable = tmp_path / "verification_tool"
     executable.write_text("")
     commands: list[list[str]] = []
 
@@ -66,7 +66,7 @@ def test_cosign_attestation_binds_predicate_to_digest(
             stderr="",
         )
 
-    monkeypatch.setattr("lean_runtime.signatures.subprocess.run", run)
+    monkeypatch.setattr("lean_runtime.publisher_verification.subprocess.run", run)
     verifier = CosignVerifier(executable=executable)
     verifier.attest(
         OCIRepository.parse("oci://ghcr.io/owner/cache"),

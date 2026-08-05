@@ -2,10 +2,9 @@
 
 from importlib.metadata import version as _distribution_version
 
-from .bundles import BundleInfo
-from .capsules import CapsuleInfo, CapsuleManifest, ExecutionCapsule, OCICapsuleRegistry
+from .bundles import PortableCopyInfo
+from .comparison import ComparisonEntry, EnvironmentComparison
 from .decisions import Decision
-from .diffing import ContextDiff, DiffEntry
 from .environments import (
     Environment,
     EnvironmentInfo,
@@ -14,12 +13,12 @@ from .environments import (
     InteractiveSession,
 )
 from .errors import (
+    DownloadUnavailable,
     EnvironmentError,
     LeanCheckError,
     LeanRuntimeError,
     MaterializationError,
     PolicyError,
-    PrebuiltUnavailable,
     ProjectError,
     ResolutionError,
     SpecificationError,
@@ -49,15 +48,16 @@ from .models import (
     PhaseTiming,
     ProjectProvenance,
 )
-from .oci import DEFAULT_CACHE_REPOSITORIES, OCIRepository, PublishInfo
+from .oci import DEFAULT_ENVIRONMENT_LIBRARIES, PublicationInfo
 from .policies import ExecutionPolicy
 from .profiling import ProfileReport
+from .programs import ProgramDescription, ProgramInfo, ReadyProgram
 from .projects import ProjectContext, ProjectEnvironment, discover_project
 from .references import PACKAGE_ALIASES, DiscoveredPackage, PackageReference
 from .runtime import Runtime, project_toolchain
 from .schema_resources import SCHEMA_NAMES, schema_path
 from .specs import EnvironmentSpec, GitPackage, Package
-from .store import BlobGarbageCollectionReport, GarbageCollectionReport, StoreStatus
+from .store import CleanupReport, DownloadCleanupReport, StoreStatus
 from .toolchains import ToolchainManager, normalize_toolchain
 from .verification import VerificationCheck, VerificationReport
 
@@ -66,13 +66,11 @@ __version__ = _distribution_version("lean-runtime")
 __all__ = [
     "Diagnostic",
     "Decision",
-    "ContextDiff",
-    "CapsuleInfo",
-    "CapsuleManifest",
-    "DiffEntry",
-    "BundleInfo",
-    "BlobGarbageCollectionReport",
-    "DEFAULT_CACHE_REPOSITORIES",
+    "EnvironmentComparison",
+    "ComparisonEntry",
+    "PortableCopyInfo",
+    "DownloadCleanupReport",
+    "DEFAULT_ENVIRONMENT_LIBRARIES",
     "DependencyInput",
     "DiscoveredPackage",
     "DoctorCheck",
@@ -83,14 +81,13 @@ __all__ = [
     "EnvironmentLock",
     "EnvironmentSpec",
     "ExecutionCapture",
-    "ExecutionCapsule",
     "ExecutionJob",
     "InteractiveSession",
     "ExecutionPolicy",
     "ExecutionProvenance",
     "ExecutionResult",
     "EventCallback",
-    "GarbageCollectionReport",
+    "CleanupReport",
     "GitPackage",
     "LeanCheckError",
     "LeanFrontmatter",
@@ -109,17 +106,18 @@ __all__ = [
     "ProjectEnvironment",
     "ProjectProvenance",
     "ProfileReport",
+    "ProgramDescription",
+    "ProgramInfo",
+    "ReadyProgram",
     "PreparedEnvironment",
     "PolicyError",
-    "PublishInfo",
-    "PrebuiltUnavailable",
+    "PublicationInfo",
+    "DownloadUnavailable",
     "ProjectError",
     "ResolutionError",
     "Runtime",
     "SCHEMA_NAMES",
     "RuntimeEvent",
-    "OCIRepository",
-    "OCICapsuleRegistry",
     "SpecificationError",
     "StoreStatus",
     "ToolchainError",

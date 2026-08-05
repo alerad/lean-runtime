@@ -47,31 +47,31 @@ lean-runtime check Main.lean \
 ## Environment workflow
 
 ```bash
-lean-runtime resolve environment.toml --output environment.lock.json
-lean-runtime ensure environment.lock.json --name research-stack
-lean-runtime --cache oci://ghcr.io/owner/cache pull environment.lock.json
-lean-runtime export research-stack --output research-stack.oci.tar.gz
-lean-runtime --home /tmp/fresh import research-stack.oci.tar.gz --name research-stack
-lean-runtime build-and-push environment.lock.json --push-to oci://ghcr.io/owner/cache
+lean-runtime prepare environment.toml --output environment.lock.json
+lean-runtime open environment.lock.json --name research-stack
+lean-runtime --library ghcr.io/owner/lean-environments download environment.lock.json
+lean-runtime save-copy research-stack --output research-stack.lean-environment
+lean-runtime --home /tmp/fresh open-copy research-stack.lean-environment --name research-stack
+lean-runtime build-and-publish environment.lock.json --publish-to ghcr.io/owner/lean-environments
 lean-runtime check research-stack Main.lean --json
 lean-runtime inspect research-stack --packages
-lean-runtime env-list
-lean-runtime cache-status
+lean-runtime environments
+lean-runtime storage
 lean-runtime doctor
 lean-runtime verify research-stack --offline
-lean-runtime diff old.lock.json new.lock.json
+lean-runtime compare old.lock.json new.lock.json
 lean-runtime profile research-stack Main.lean --repeat 5
 lean-runtime matrix matrix.toml Main.lean
-lean-runtime gc
-lean-runtime gc --execute
+lean-runtime clean
+lean-runtime clean --execute
 ```
 
-`gc` is a dry run unless `--execute` is supplied.
+`clean` is a dry run unless `--execute` is supplied.
 
-`export` produces a deterministic OCI image-layout archive. `import` verifies
-the digest and identity chain, package Git trees, platform compatibility, and a
-Lean probe before atomically publishing the environment. See
-[Environment bundles](bundles.md) for the format and trust boundary.
+`save-copy` creates a portable environment file. `open-copy` verifies its exact
+identity, package Git trees, computer compatibility, and Lean probe before
+making the environment available. See [Portable copies and environment
+libraries](portable-copies.md) for its trust boundary.
 
 ## Replay
 
@@ -86,14 +86,14 @@ environment can replay offline.
 ## Existing projects and core Lean
 
 ```bash
-lean-runtime raw-check Main.lean --toolchain 4.32.2
-lean-runtime raw-check ./existing-project/MyProject/Main.lean
-lean-runtime project-build ./existing-project MyLibrary
+lean-runtime check-file Main.lean --toolchain 4.32.2
+lean-runtime check-file ./existing-project/MyProject/Main.lean
+lean-runtime build ./existing-project MyLibrary
 lean-runtime install 4.32.2
 ```
 
 Without `--with`, the environment-aware `check` command requires an environment
-identifier. `raw-check` remains the explicitly unmanaged route. When no
+identifier. `check-file` is the direct local-project route. When no
 `--project` or `--toolchain` is supplied, it discovers the nearest directory
 containing a Lake configuration and `lean-toolchain`, then passes the actual
 project-relative file to `lake env lean`.
@@ -112,10 +112,11 @@ execution output uses the versioned `lean-runtime.execution/v1` envelope; the ot
 schemas and advanced command examples are documented in
 [Verify, understand, compare, and measure](v1-precision.md).
 
-Global `--cache` is repeatable and `--prebuilt auto|require|never` controls
-transparent cache acquisition. `LEAN_RUNTIME_CACHES` accepts a comma-separated
-equivalent and `LEAN_RUNTIME_PREBUILT` sets the default policy.
+Global `--library` is repeatable and `--availability auto|required|local`
+controls whether ready-to-use environments are downloaded or built locally.
+`LEAN_RUNTIME_LIBRARIES` accepts a comma-separated equivalent and
+`LEAN_RUNTIME_AVAILABILITY` sets the default policy.
 
-Use global `--signatures require --trusted-identity ID --trusted-issuer ISSUER`
-to require a Cosign-verified publisher. `build-and-push --sign` signs the
-published lock-index digest using Cosign's configured keyless or keyed context.
+Use global `--publisher_verification required --trusted-publisher ID --trusted-issuer ISSUER`
+to require a verified publisher. `build-and-publish --sign` records the trusted
+publisher using the configured Cosign identity.

@@ -3,8 +3,9 @@
 Run Lean proofs from Python or a single `.lean` file—without creating a throwaway
 Lake project or rebuilding the same dependencies on every machine.
 
-Lean Runtime discovers or resolves the environment, checks a global OCI cache,
-and returns structured Lean results with exact provenance.
+Lean Runtime discovers the exact Lean environment a project needs and reuses a
+downloadable copy when one is available. It returns structured Lean results
+with a record of the toolchain and dependencies that were actually used.
 
 > **Status:** V1 beta. The local backend runs trusted Lean, Lake, and package code;
 > it is an orchestration boundary, not a security sandbox.
@@ -101,7 +102,7 @@ compare, and measure the same exact contexts:
 
 ```bash
 lean-runtime verify research-stack --offline
-lean-runtime diff previous.lock.json environment.lock.json
+lean-runtime compare previous.lock.json environment.lock.json
 lean-runtime profile research-stack Main.lean --repeat 5
 lean-runtime matrix compatibility.toml Main.lean
 ```
@@ -115,13 +116,34 @@ Friendly references remain exact: use `mathlib@VERSION`,
 `github:owner/repository@REVISION` form. Bare floating package names are never
 accepted.
 
-## Under the hood
+## Share environments
+
+A **project** is your ordinary Lake repository. Its **environment** is the exact
+Lean version, dependencies, and build configuration needed to use it. A
+**downloadable environment** is a ready-to-use copy that collaborators and CI
+can fetch instead of rebuilding Mathlib.
+
+Environment libraries may be public or private. For example:
+
+```bash
+lean-runtime --library ghcr.io/owner/lean-environments download environment.lock.json
+lean-runtime build-and-publish environment.lock.json \
+  --publish-to ghcr.io/owner/lean-environments
+```
+
+For an already-built executable, Lean Runtime can also create a verified
+**ready-to-run program**. It opens without rebuilding the project, can be saved
+as a portable copy, and can be shared through a public or private program
+library. See [Ready-to-run programs](https://github.com/alerad/lean-runtime/blob/main/docs/ready-programs.md).
+
+## Technical details
 
 The simple API is backed by exact Git commits and trees, Lake-resolved locks,
 platform-aware content-addressed environments, atomic cross-process builds,
-transparent OCI cache reuse, replayable provenance, verification, and signed
-attestations. Advanced users can access all of it through `lean_runtime.Runtime`
-and the `lean-runtime` operations CLI.
+downloadable environment reuse, replayable provenance, verification, and trusted
+publishers. The libraries use OCI-compatible storage internally, but users do
+not need Docker or container concepts. Advanced protocol details remain in the
+architecture documentation.
 
 ## Documentation
 
@@ -130,7 +152,8 @@ and the `lean-runtime` operations CLI.
 - [`lean-run` and operations CLI](https://github.com/alerad/lean-runtime/blob/main/docs/cli.md)
 - [Managed environments](https://github.com/alerad/lean-runtime/blob/main/docs/environments.md)
 - [Local Lake projects](https://github.com/alerad/lean-runtime/blob/main/docs/local-projects.md)
-- [Environment bundles and OCI caches](https://github.com/alerad/lean-runtime/blob/main/docs/bundles.md)
+- [Portable copies and environment libraries](https://github.com/alerad/lean-runtime/blob/main/docs/portable-copies.md)
+- [Ready-to-run programs](https://github.com/alerad/lean-runtime/blob/main/docs/ready-programs.md)
 - [Architecture](https://github.com/alerad/lean-runtime/blob/main/docs/architecture.md)
 - [Trust and limitations](https://github.com/alerad/lean-runtime/blob/main/docs/trust-and-limitations.md)
 - [V1 release case study](https://github.com/alerad/lean-runtime/blob/main/docs/case-study-v1.md)

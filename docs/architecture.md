@@ -1,14 +1,15 @@
 # Architecture
 
-## Execution capsules
+## Ready-to-run programs
 
-An execution capsule is a minimal platform-specific executable closure. It is
-content-addressed, its file inventory is verified before every open, and its OCI
-manifest retains the exact source revision and optional originating environment.
-Capsules are intentionally not called environments: they do not contain the
-source and compiler state needed for independent rebuilding. Use a capsule for
-fast checked-service execution and hydrate the full environment for kernel
-replay, custom compilation, or rebuild audits.
+A ready-to-run program is the small result you can open immediately, without
+rebuilding its Lean project first. Lean Runtime verifies its files every time it
+is opened and records the exact source revision and, when known, the environment
+that produced it. Use one for fast service execution. Open the full environment
+when you need kernel replay, custom compilation, or an independent rebuild.
+
+Program libraries and portable program copies use OCI-compatible storage under
+the hood. That transport detail does not appear in the ordinary Python API or CLI.
 
 ## Dominant abstraction
 

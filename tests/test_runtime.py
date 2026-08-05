@@ -86,12 +86,12 @@ def test_resolution_cancellation_stops_lake_before_lock_publication(tmp_path: Pa
     runtime = Runtime(
         home=tmp_path / "runtime",
         toolchains=FakeToolchains(tmp_path / "runtime"),  # type: ignore[arg-type]
-        caches=[],
+        libraries=[],
     )
     cancel = threading.Event()
     cancel.set()
     with pytest.raises(ResolutionError, match="cancelled") as captured:
-        runtime.resolve(
+        runtime.prepare(
             EnvironmentSpec("leanprover/lean4:v4.32.0", ()),
             cancel=cancel,
         )

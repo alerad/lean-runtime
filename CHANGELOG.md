@@ -1,13 +1,36 @@
 # Changelog
 
-## 1.1.0
+## 2.0.0
 
-- Add platform-specific, content-addressed execution capsules for small
-  precompiled services.
-- Add deterministic capsule OCI import/export, registry pull/push, exact source
-  revision fencing, and multi-platform index publication.
-- Record capsule identity separately from rebuildable environment identity in
-  execution provenance.
+Version 2 gives the public interface the language used by Lean users rather
+than the language of its storage implementation. The environment format stays
+compatible; command names, Python names, configuration, events, and public
+metadata intentionally change without aliases.
+
+### Public terminology
+
+- Environment libraries replace OCI caches in ordinary configuration and docs.
+- Downloadable environments replace prebuilt artifacts.
+- Portable copies replace OCI bundles.
+- Publisher verification replaces signature-policy terminology.
+- Cleanup and storage replace garbage-collection and blob terminology.
+- Ready-to-run programs replace execution-capsule and container terminology.
+
+### Main migrations
+
+- `Runtime(caches=..., prebuilt=...)` becomes
+  `Runtime(libraries=..., availability=...)`.
+- `resolve`, `ensure`, and named `open` become `prepare`, `open_exact`, and
+  `environment` in the explicit Python API.
+- `export_environment` and `import_environment` become `save_portable_copy`
+  and `open_portable_copy`.
+- CLI workflows use `prepare`, `open`, `download`, `build-and-publish`,
+  `save-copy`, `open-copy`, `compare`, `storage`, and `clean`.
+- Environment libraries accept friendly `ghcr.io/owner/name` locations; the
+  OCI transport remains an advanced implementation detail.
+- Ready-to-run programs can be created, verified, copied, downloaded from a
+  program library, published for multiple kinds of computers, and interrupted
+  during interactive execution.
 
 ## 1.0.0
 

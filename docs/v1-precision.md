@@ -37,8 +37,8 @@ reports stable decision codes, resolved identity, origin, and platform compatibi
 ## Diff
 
 ```bash
-lean-runtime diff old.lock.json new.lock.json
-lean-runtime diff old-environment new-environment --json
+lean-runtime compare old.lock.json new.lock.json
+lean-runtime compare old-environment new-environment --json
 ```
 
 Diff compares identity inputs rather than directories. Package order is ignored; changed

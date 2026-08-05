@@ -1,6 +1,6 @@
-"""Small, platform-specific executable closures distributed through OCI.
+"""Ready-to-run programs for fast, verified execution.
 
-Capsules are deliberately distinct from published environments.  They retain
+Programs are deliberately distinct from published environments.  They retain
 an attested executable and its runtime files, but they do not claim to contain
 the sources and compiler state required for an independent rebuild.
 """
@@ -34,7 +34,7 @@ from .bundles import (
 )
 from .diagnostics import error_diagnostic, parse_diagnostics
 from .environments import InteractiveSession
-from .errors import EnvironmentError, PolicyError, PrebuiltUnavailable
+from .errors import DownloadUnavailable, EnvironmentError, PolicyError
 from .events import EventEmitter
 from .locking import FileLock
 from .models import ExecutionProvenance, ExecutionResult, PhaseTiming
@@ -47,10 +47,10 @@ from .policies import ExecutionPolicy
 from .serialization import canonical_json_bytes, sha256_id, write_json_atomic
 from .store import EnvironmentStore, clone_tree, platform_compatibility, platform_record
 
-CAPSULE_SCHEMA = "lean-runtime-execution-capsule/1"
-CAPSULE_CONFIG_MEDIA_TYPE = "application/vnd.lean-runtime.capsule.config.v1+json"
-CAPSULE_LAYER_MEDIA_TYPE = "application/vnd.lean-runtime.capsule.layer.v1.tar+gzip"
-_CAPSULE_ID = re.compile(r"capsule_[0-9a-f]{64}")
+PROGRAM_SCHEMA = "lean-runtime-execution-program/1"
+PROGRAM_CONFIG_MEDIA_TYPE = "application/vnd.lean-runtime.program.config.v1+json"
+PROGRAM_LAYER_MEDIA_TYPE = "application/vnd.lean-runtime.program.layer.v1.tar+gzip"
+_PROGRAM_ID = re.compile(r"program_[0-9a-f]{64}")
 
 
 def _now() -> str:
@@ -68,7 +68,7 @@ def _digest_file(path: Path) -> str:
 def _relative_executable(value: str) -> str:
     path = _safe_name(value.replace("\\", "/"))
     if path == PurePosixPath("."):
-        raise EnvironmentError("capsule executable must name a file")
+        raise EnvironmentError("program executable must name a file")
     return path.as_posix()
 
 
@@ -80,7 +80,7 @@ def _file_inventory(root: Path) -> dict[str, dict[str, Any]]:
             target = os.readlink(path)
             resolved = PurePosixPath(relative).parent / target
             if PurePosixPath(target).is_absolute() or ".." in resolved.parts:
-                raise EnvironmentError(f"capsule contains unsafe symlink: {relative}")
+                raise EnvironmentError(f"program contains unsafe symlink: {relative}")
             inventory[relative] = {"kind": "symlink", "target": target}
         elif path.is_file():
             inventory[relative] = {
@@ -90,123 +90,123 @@ def _file_inventory(root: Path) -> dict[str, dict[str, Any]]:
                 "executable": bool(path.stat().st_mode & 0o111),
             }
         elif not path.is_dir():
-            raise EnvironmentError(f"capsule contains unsupported entry: {relative}")
+            raise EnvironmentError(f"program contains unsupported entry: {relative}")
     if not inventory:
-        raise EnvironmentError("capsule payload must not be empty")
+        raise EnvironmentError("program payload must not be empty")
     return inventory
 
 
 @dataclass(frozen=True, slots=True)
-class CapsuleManifest:
+class ProgramDescription:
     command: tuple[str, ...]
     files: dict[str, dict[str, Any]]
-    platform_compatibility: dict[str, str]
+    computer_compatibility: dict[str, str]
     source_revision: str
     source_environment_id: str | None = None
-    source_lock_id: str | None = None
+    exact_environment_id: str | None = None
     toolchain: str = "unknown"
-    capability_digest: str | None = None
-    schema: str = CAPSULE_SCHEMA
+    capability_id: str | None = None
+    schema: str = PROGRAM_SCHEMA
 
     def __post_init__(self) -> None:
-        if self.schema != CAPSULE_SCHEMA:
-            raise EnvironmentError(f"unsupported capsule schema: {self.schema!r}")
+        if self.schema != PROGRAM_SCHEMA:
+            raise EnvironmentError(f"unsupported program schema: {self.schema!r}")
         if not self.command or any(not isinstance(part, str) or not part for part in self.command):
-            raise EnvironmentError("capsule command must contain non-empty strings")
+            raise EnvironmentError("program command must contain non-empty strings")
         _relative_executable(self.command[0])
         if self.command[0].replace("\\", "/") not in self.files:
-            raise EnvironmentError("capsule command executable is absent from its file inventory")
+            raise EnvironmentError("program command executable is absent from its file inventory")
         if not re.fullmatch(r"[0-9a-f]{40,64}", self.source_revision):
-            raise EnvironmentError("capsule source revision must be an exact Git commit")
+            raise EnvironmentError("program source revision must be an exact Git commit")
 
     @property
-    def capsule_id(self) -> str:
-        return sha256_id("capsule", self.to_dict(include_id=False))
+    def program_id(self) -> str:
+        return sha256_id("program", self.to_dict(include_id=False))
 
     def to_dict(self, *, include_id: bool = True) -> dict[str, Any]:
         value = {
             "schema": self.schema,
             "command": list(self.command),
             "files": dict(sorted(self.files.items())),
-            "platform_compatibility": self.platform_compatibility,
+            "computer_compatibility": self.computer_compatibility,
             "source_revision": self.source_revision,
             "source_environment_id": self.source_environment_id,
-            "source_lock_id": self.source_lock_id,
+            "exact_environment_id": self.exact_environment_id,
             "toolchain": self.toolchain,
-            "capability_digest": self.capability_digest,
+            "capability_id": self.capability_id,
         }
-        return {"capsule_id": self.capsule_id, **value} if include_id else value
+        return {"program_id": self.program_id, **value} if include_id else value
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> CapsuleManifest:
+    def from_dict(cls, value: Mapping[str, Any]) -> ProgramDescription:
         command = value.get("command")
         files = value.get("files")
-        compatibility = value.get("platform_compatibility")
+        compatibility = value.get("computer_compatibility")
         if not isinstance(command, list) or not all(isinstance(item, str) for item in command):
-            raise EnvironmentError("capsule manifest command is invalid")
+            raise EnvironmentError("program manifest command is invalid")
         if not isinstance(files, dict) or not all(
             isinstance(name, str) and isinstance(record, dict) for name, record in files.items()
         ):
-            raise EnvironmentError("capsule manifest file inventory is invalid")
+            raise EnvironmentError("program manifest file inventory is invalid")
         if not isinstance(compatibility, dict):
-            raise EnvironmentError("capsule platform compatibility is invalid")
+            raise EnvironmentError("program platform compatibility is invalid")
         manifest = cls(
             command=tuple(command),
             files={str(name): dict(record) for name, record in files.items()},
-            platform_compatibility={str(k): str(v) for k, v in compatibility.items()},
+            computer_compatibility={str(k): str(v) for k, v in compatibility.items()},
             source_revision=str(value.get("source_revision", "")),
             source_environment_id=(
                 str(value["source_environment_id"])
                 if value.get("source_environment_id") is not None
                 else None
             ),
-            source_lock_id=(
-                str(value["source_lock_id"]) if value.get("source_lock_id") is not None else None
+            exact_environment_id=(
+                str(value["exact_environment_id"])
+                if value.get("exact_environment_id") is not None
+                else None
             ),
             toolchain=str(value.get("toolchain", "unknown")),
-            capability_digest=(
-                str(value["capability_digest"])
-                if value.get("capability_digest") is not None
-                else None
+            capability_id=(
+                str(value["capability_id"]) if value.get("capability_id") is not None else None
             ),
             schema=str(value.get("schema", "")),
         )
-        recorded = value.get("capsule_id")
-        if recorded is not None and recorded != manifest.capsule_id:
-            raise EnvironmentError("capsule identity mismatch")
+        recorded = value.get("program_id")
+        if recorded is not None and recorded != manifest.program_id:
+            raise EnvironmentError("program identity mismatch")
         return manifest
 
 
 @dataclass(frozen=True, slots=True)
-class CapsuleInfo:
-    capsule_id: str
+class ProgramInfo:
+    program_id: str
     source_revision: str
-    manifest_digest: str | None
-    path: str
-    platform_descriptor: dict[str, Any] | None = None
+    copy_id: str | None
+    location: str
+    computer_record: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-class ExecutionCapsule:
+class ReadyProgram:
     def __init__(
         self,
         store: EnvironmentStore,
         backend: Backend,
-        manifest: CapsuleManifest,
+        description: ProgramDescription,
         root: Path,
-        manifest_digest: str | None = None,
+        copy_id: str | None = None,
     ) -> None:
         self.store = store
         self.backend = backend
-        self.manifest = manifest
+        self.description = description
         self.root = root
-        self.manifest_digest = manifest_digest
+        self.copy_id = copy_id
 
     @property
     def id(self) -> str:
-        return self.manifest.capsule_id
+        return self.description.program_id
 
     def spawn_interactive(
         self,
@@ -214,15 +214,15 @@ class ExecutionCapsule:
         *,
         policy: ExecutionPolicy | None = None,
     ) -> InteractiveSession:
-        requested = tuple(command or self.manifest.command)
-        if not requested or requested[0].replace("\\", "/") != self.manifest.command[0]:
-            raise EnvironmentError("capsule execution must use its declared executable")
+        requested = tuple(command or self.description.command)
+        if not requested or requested[0].replace("\\", "/") != self.description.command[0]:
+            raise EnvironmentError("program execution must use its declared executable")
         selected_policy = policy or ExecutionPolicy()
         started_at = _now()
         request_digest = sha256_id(
             "request",
             {
-                "capsule_id": self.id,
+                "program_id": self.id,
                 "command": list(requested),
                 "policy": selected_policy.to_dict(),
                 "backend": self.backend.name,
@@ -234,7 +234,7 @@ class ExecutionCapsule:
         )
         job_parent = self.store.jobs / execution_id
         job_parent.mkdir(parents=True, exist_ok=True)
-        instance = job_parent / f"capsule-{uuid.uuid4().hex}"
+        instance = job_parent / f"program-{uuid.uuid4().hex}"
 
         def cleanup() -> None:
             if instance.exists():
@@ -244,7 +244,7 @@ class ExecutionCapsule:
 
         try:
             clone_tree(self.root / "payload", instance)
-            executable = instance.joinpath(*PurePosixPath(self.manifest.command[0]).parts)
+            executable = instance.joinpath(*PurePosixPath(self.description.command[0]).parts)
             resolved = (str(executable), *requested[1:])
             spawn = getattr(self.backend, "spawn_interactive", None)
             if not callable(spawn):
@@ -263,27 +263,27 @@ class ExecutionCapsule:
             combined = "\n".join(part for part in (raw.stdout, raw.stderr) if part)
             diagnostics = parse_diagnostics(combined)
             if raw.timed_out:
-                diagnostics += (error_diagnostic("Capsule execution exceeded its time limit"),)
+                diagnostics += (error_diagnostic("Program execution exceeded its time limit"),)
             provenance = ExecutionProvenance(
-                environment_id=self.manifest.source_environment_id,
+                environment_id=self.description.source_environment_id,
                 execution_id=execution_id,
                 request_digest=request_digest,
-                lock_id=self.manifest.source_lock_id,
-                toolchain=self.manifest.toolchain,
+                lock_id=self.description.exact_environment_id,
+                toolchain=self.description.toolchain,
                 packages=(),
                 platform=platform_record(),
                 backend=self.backend.name,
                 requested_policy=selected_policy.to_dict(),
                 enforced_policy_fields=raw.enforced_policy_fields,
-                source_digest=self.manifest.capability_digest or self.id,
+                source_digest=self.description.capability_id or self.id,
                 started_at=started_at,
-                capsule_id=self.id,
-                capsule_manifest_digest=self.manifest_digest,
+                program_id=self.id,
+                program_copy_id=self.copy_id,
             )
             result = ExecutionResult(
                 ok=raw.exit_code == 0,
                 exit_code=raw.exit_code,
-                toolchain=self.manifest.toolchain,
+                toolchain=self.description.toolchain,
                 command=tuple(resolved),
                 cwd=str(instance),
                 stdout=raw.stdout,
@@ -298,7 +298,7 @@ class ExecutionCapsule:
             )
             write_json_atomic(
                 self.store.executions / f"{execution_id}.json",
-                {"schema": "lean-runtime-capsule-execution/1", "result": result.to_dict()},
+                {"schema": "lean-runtime-program-execution/1", "result": result.to_dict()},
             )
             return result
 
@@ -307,7 +307,7 @@ class ExecutionCapsule:
         )
 
 
-class CapsuleManager:
+class ProgramManager:
     def __init__(self, store: EnvironmentStore, backend: Backend, events: EventEmitter) -> None:
         self.store = store
         self.backend = backend
@@ -320,79 +320,79 @@ class CapsuleManager:
         command: Sequence[str],
         source_revision: str,
         source_environment_id: str | None = None,
-        source_lock_id: str | None = None,
+        exact_environment_id: str | None = None,
         toolchain: str = "unknown",
-        capability_digest: str | None = None,
-    ) -> ExecutionCapsule:
+        capability_id: str | None = None,
+    ) -> ReadyProgram:
         payload = payload.expanduser().resolve()
         if not payload.is_dir():
-            raise EnvironmentError(f"capsule payload directory does not exist: {payload}")
-        manifest = CapsuleManifest(
+            raise EnvironmentError(f"program payload directory does not exist: {payload}")
+        manifest = ProgramDescription(
             command=tuple(command),
             files=_file_inventory(payload),
-            platform_compatibility=platform_compatibility(),
+            computer_compatibility=platform_compatibility(),
             source_revision=source_revision,
             source_environment_id=source_environment_id,
-            source_lock_id=source_lock_id,
+            exact_environment_id=exact_environment_id,
             toolchain=toolchain,
-            capability_digest=capability_digest,
+            capability_id=capability_id,
         )
-        destination = self.store.capsules / manifest.capsule_id
-        with FileLock(self.store.lock_dir / f"{manifest.capsule_id}.lock", timeout=1800):
+        destination = self.store.programs / manifest.program_id
+        with FileLock(self.store.lock_dir / f"{manifest.program_id}.lock", timeout=1800):
             if not destination.exists():
-                stage = self.store.capsules / f".staging-{uuid.uuid4().hex}"
+                stage = self.store.programs / f".staging-{uuid.uuid4().hex}"
                 try:
                     clone_tree(payload, stage / "payload")
-                    write_json_atomic(stage / "capsule.json", manifest.to_dict())
+                    write_json_atomic(stage / "program.json", manifest.to_dict())
                     stage.replace(destination)
                 finally:
                     if stage.exists():
                         shutil.rmtree(stage)
         self.events.emit(
-            "capsule.created", "Created executable capsule", capsule_id=manifest.capsule_id
+            "program.created", "Created executable program", program_id=manifest.program_id
         )
-        return self.open(manifest.capsule_id)
+        return self.open(manifest.program_id)
 
-    def open(self, capsule_id: str) -> ExecutionCapsule:
-        if not _CAPSULE_ID.fullmatch(capsule_id):
-            raise EnvironmentError(f"invalid capsule identity: {capsule_id!r}")
-        root = self.store.capsules / capsule_id
-        path = root / "capsule.json"
+    def open(self, program_id: str) -> ReadyProgram:
+        if not _PROGRAM_ID.fullmatch(program_id):
+            raise EnvironmentError(f"invalid program identity: {program_id!r}")
+        root = self.store.programs / program_id
+        path = root / "program.json"
         if not path.is_file():
-            raise EnvironmentError(f"execution capsule is not present: {capsule_id}")
-        manifest = CapsuleManifest.from_dict(_json_object(path.read_bytes(), "capsule manifest"))
+            raise EnvironmentError(f"ready-to-run program is not present: {program_id}")
+        manifest = ProgramDescription.from_dict(_json_object(path.read_bytes(), "program manifest"))
         if (
-            manifest.capsule_id != capsule_id
-            or manifest.platform_compatibility != platform_compatibility()
+            manifest.program_id != program_id
+            or manifest.computer_compatibility != platform_compatibility()
         ):
-            raise EnvironmentError("execution capsule identity or platform mismatch")
+            raise EnvironmentError("ready-to-run program identity or computer mismatch")
         observed = _file_inventory(root / "payload")
         if observed != manifest.files:
-            raise EnvironmentError("execution capsule payload digest mismatch")
+            raise EnvironmentError("ready-to-run program payload digest mismatch")
         metadata = root / "origin.json"
         digest = None
         if metadata.is_file():
-            origin = _json_object(metadata.read_bytes(), "capsule origin")
-            digest = origin.get("manifest_digest")
-        return ExecutionCapsule(self.store, self.backend, manifest, root, digest)
+            origin = _json_object(metadata.read_bytes(), "program origin")
+            digest = origin.get("copy_id")
+        return ReadyProgram(self.store, self.backend, manifest, root, digest)
 
-    def export(self, capsule_id: str, output: Path) -> CapsuleInfo:
-        capsule = self.open(capsule_id)
+    def export(self, program_id: str, output: Path) -> ProgramInfo:
+        program = self.open(program_id)
         output.parent.mkdir(parents=True, exist_ok=True)
         temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
         try:
-            with tempfile.TemporaryDirectory(prefix="lean-runtime-capsule-export-") as directory:
+            with tempfile.TemporaryDirectory(prefix="lean-runtime-program-save-copy-") as directory:
                 staging = Path(directory)
                 layer_path = staging / "payload.tar.gz"
-                _write_tar_gzip(capsule.root / "payload", layer_path)
+                _write_tar_gzip(program.root / "payload", layer_path)
                 layer = _blob_descriptor_path(
                     layer_path,
-                    CAPSULE_LAYER_MEDIA_TYPE,
-                    annotations={"org.lean-runtime.layer.kind": "capsule-payload"},
+                    PROGRAM_LAYER_MEDIA_TYPE,
+                    annotations={"org.lean-runtime.layer.kind": "program-payload"},
                 )
                 config_path = staging / "config.json"
-                config_path.write_bytes(canonical_json_bytes(capsule.manifest.to_dict()))
-                config = _blob_descriptor_path(config_path, CAPSULE_CONFIG_MEDIA_TYPE)
+                config_path.write_bytes(canonical_json_bytes(program.description.to_dict()))
+                config = _blob_descriptor_path(config_path, PROGRAM_CONFIG_MEDIA_TYPE)
                 manifest_path = staging / "manifest.json"
                 manifest_path.write_bytes(
                     canonical_json_bytes(
@@ -402,10 +402,10 @@ class CapsuleManager:
                             "config": config,
                             "layers": [layer],
                             "annotations": {
-                                "org.lean-runtime.artifact.kind": "execution-capsule",
-                                "org.lean-runtime.capsule-id": capsule.id,
+                                "org.lean-runtime.artifact.kind": "execution-program",
+                                "org.lean-runtime.program-id": program.id,
                                 "org.opencontainers.image.revision": (
-                                    capsule.manifest.source_revision
+                                    program.description.source_revision
                                 ),
                             },
                         }
@@ -416,7 +416,7 @@ class CapsuleManager:
                     manifest_path,
                     MANIFEST_MEDIA_TYPE,
                     annotations={
-                        "org.lean-runtime.artifact.kind": "execution-capsule",
+                        "org.lean-runtime.artifact.kind": "execution-program",
                         "org.lean-runtime.platform.schema": compatibility["schema"],
                         "org.lean-runtime.platform.abi": compatibility["abi"],
                     },
@@ -453,24 +453,24 @@ class CapsuleManager:
             temporary.replace(output)
         finally:
             temporary.unlink(missing_ok=True)
-        return CapsuleInfo(
-            capsule.id,
-            capsule.manifest.source_revision,
+        return ProgramInfo(
+            program.id,
+            program.description.source_revision,
             str(descriptor["digest"]),
             str(output),
             descriptor,
         )
 
-    def import_bundle(self, bundle: Path) -> ExecutionCapsule:
+    def import_bundle(self, bundle: Path) -> ReadyProgram:
         from .bundles import EnvironmentBundles
 
-        with tempfile.TemporaryDirectory(prefix="lean-runtime-capsule-import-") as directory:
+        with tempfile.TemporaryDirectory(prefix="lean-runtime-program-open-copy-") as directory:
             entries = EnvironmentBundles._extract_oci_archive(bundle, Path(directory))
             index = entries.get("index.json")
             if index is None:
-                raise EnvironmentError("capsule OCI bundle has no index")
+                raise EnvironmentError("program OCI bundle has no index")
             return self.import_layout(
-                _json_object(index.read_bytes(), "capsule index"),
+                _json_object(index.read_bytes(), "program index"),
                 entries,
                 origin={"kind": "bundle", "bundle": str(bundle)},
             )
@@ -481,24 +481,24 @@ class CapsuleManager:
         entries: dict[str, Path],
         *,
         origin: dict[str, Any],
-    ) -> ExecutionCapsule:
+    ) -> ReadyProgram:
         manifests = index.get("manifests")
         if (
             not isinstance(manifests, list)
             or len(manifests) != 1
             or not isinstance(manifests[0], dict)
         ):
-            raise EnvironmentError("capsule index must contain exactly one platform manifest")
+            raise EnvironmentError("program index must contain exactly one platform manifest")
         descriptor = manifests[0]
-        _require_media_type(descriptor, MANIFEST_MEDIA_TYPE, "capsule manifest")
-        manifest_path = _descriptor_blob_path(entries, descriptor, "capsule manifest")
-        oci_manifest = _json_object(manifest_path.read_bytes(), "capsule OCI manifest")
+        _require_media_type(descriptor, MANIFEST_MEDIA_TYPE, "program manifest")
+        manifest_path = _descriptor_blob_path(entries, descriptor, "program manifest")
+        oci_manifest = _json_object(manifest_path.read_bytes(), "program OCI manifest")
         annotations = oci_manifest.get("annotations")
         if (
             not isinstance(annotations, dict)
-            or annotations.get("org.lean-runtime.artifact.kind") != "execution-capsule"
+            or annotations.get("org.lean-runtime.artifact.kind") != "execution-program"
         ):
-            raise EnvironmentError("OCI artifact is not a Lean Runtime execution capsule")
+            raise EnvironmentError("downloaded item is not a Lean Runtime ready-to-run program")
         config_descriptor = oci_manifest.get("config")
         layers = oci_manifest.get("layers")
         if (
@@ -506,36 +506,36 @@ class CapsuleManager:
             or not isinstance(layers, list)
             or len(layers) != 1
         ):
-            raise EnvironmentError("capsule OCI manifest is incomplete")
-        _require_media_type(config_descriptor, CAPSULE_CONFIG_MEDIA_TYPE, "capsule config")
-        _require_media_type(layers[0], CAPSULE_LAYER_MEDIA_TYPE, "capsule layer")
-        config_path = _descriptor_blob_path(entries, config_descriptor, "capsule config")
-        manifest = CapsuleManifest.from_dict(
-            _json_object(config_path.read_bytes(), "capsule config")
+            raise EnvironmentError("program OCI manifest is incomplete")
+        _require_media_type(config_descriptor, PROGRAM_CONFIG_MEDIA_TYPE, "program config")
+        _require_media_type(layers[0], PROGRAM_LAYER_MEDIA_TYPE, "program layer")
+        config_path = _descriptor_blob_path(entries, config_descriptor, "program config")
+        manifest = ProgramDescription.from_dict(
+            _json_object(config_path.read_bytes(), "program config")
         )
-        if manifest.platform_compatibility != platform_compatibility():
-            raise EnvironmentError("execution capsule is not compatible with this platform")
-        destination = self.store.capsules / manifest.capsule_id
-        with FileLock(self.store.lock_dir / f"{manifest.capsule_id}.lock", timeout=1800):
+        if manifest.computer_compatibility != platform_compatibility():
+            raise EnvironmentError("ready-to-run program is not compatible with this computer")
+        destination = self.store.programs / manifest.program_id
+        with FileLock(self.store.lock_dir / f"{manifest.program_id}.lock", timeout=1800):
             if not destination.exists():
-                stage = self.store.capsules / f".staging-{uuid.uuid4().hex}"
+                stage = self.store.programs / f".staging-{uuid.uuid4().hex}"
                 try:
                     _extract_layer(
-                        _descriptor_blob_path(entries, layers[0], "capsule payload"),
+                        _descriptor_blob_path(entries, layers[0], "program payload"),
                         stage / "payload",
                     )
                     if _file_inventory(stage / "payload") != manifest.files:
-                        raise EnvironmentError("capsule payload digest mismatch")
-                    write_json_atomic(stage / "capsule.json", manifest.to_dict())
+                        raise EnvironmentError("program payload digest mismatch")
+                    write_json_atomic(stage / "program.json", manifest.to_dict())
                     write_json_atomic(
                         stage / "origin.json",
-                        {**origin, "manifest_digest": descriptor["digest"]},
+                        {**origin, "copy_id": descriptor["digest"]},
                     )
                     stage.replace(destination)
                 finally:
                     if stage.exists():
                         shutil.rmtree(stage)
-        return self.open(manifest.capsule_id)
+        return self.open(manifest.program_id)
 
 
 def _platform_matches(descriptor: Mapping[str, Any]) -> bool:
@@ -551,22 +551,22 @@ def _platform_matches(descriptor: Mapping[str, Any]) -> bool:
         and platform.get("os") == compatibility["system"]
         and platform.get("architecture") == architecture
         and annotations.get("org.lean-runtime.platform.abi") == compatibility["abi"]
-        and annotations.get("org.lean-runtime.artifact.kind") == "execution-capsule"
+        and annotations.get("org.lean-runtime.artifact.kind") == "execution-program"
     )
 
 
-class OCICapsuleRegistry:
+class ProgramLibrary:
     def __init__(
         self,
         repository: OCIRepository,
         store: EnvironmentStore,
-        capsules: CapsuleManager,
+        programs: ProgramManager,
         events: EventEmitter,
         verifier: SignatureVerifier | None = None,
     ) -> None:
         self.repository = repository
         self.store = store
-        self.capsules = capsules
+        self.programs = programs
         self.events = events
         self.verifier = verifier
         self.client = OCIRegistryClient(repository)
@@ -576,11 +576,11 @@ class OCICapsuleRegistry:
         reference: str,
         *,
         expected_source_revision: str | None = None,
-    ) -> ExecutionCapsule:
+    ) -> ReadyProgram:
         response = self.client.manifest(reference)
         if self.verifier is not None:
             self.verifier.verify(self.repository, response.digest)
-        document = _json_object(response.data, "capsule registry manifest")
+        document = _json_object(response.data, "program registry manifest")
         if response.media_type == INDEX_MEDIA_TYPE or document.get("mediaType") == INDEX_MEDIA_TYPE:
             candidates = [
                 item
@@ -588,13 +588,13 @@ class OCICapsuleRegistry:
                 if isinstance(item, dict) and _platform_matches(item)
             ]
             if not candidates:
-                raise PrebuiltUnavailable("capsule index has no compatible platform manifest")
+                raise DownloadUnavailable("program index has no compatible platform manifest")
             descriptor = candidates[0]
             selected = self.client.manifest(str(descriptor["digest"]))
             if selected.digest != descriptor["digest"] or len(selected.data) != descriptor["size"]:
-                raise EnvironmentError("capsule platform manifest descriptor mismatch")
+                raise EnvironmentError("program platform manifest descriptor mismatch")
             manifest_data = selected.data
-            oci_manifest = _json_object(selected.data, "capsule platform manifest")
+            oci_manifest = _json_object(selected.data, "program platform manifest")
         elif response.media_type == MANIFEST_MEDIA_TYPE:
             compatibility = platform_compatibility()
             descriptor = {
@@ -602,7 +602,7 @@ class OCICapsuleRegistry:
                 "digest": response.digest,
                 "size": len(response.data),
                 "annotations": {
-                    "org.lean-runtime.artifact.kind": "execution-capsule",
+                    "org.lean-runtime.artifact.kind": "execution-program",
                     "org.lean-runtime.platform.abi": compatibility["abi"],
                 },
                 "platform": {
@@ -615,10 +615,10 @@ class OCICapsuleRegistry:
             manifest_data = response.data
             oci_manifest = document
         else:
-            raise EnvironmentError("registry returned an unsupported capsule media type")
+            raise EnvironmentError("registry returned an unsupported program media type")
         descriptors = [oci_manifest.get("config"), *oci_manifest.get("layers", [])]
         if not all(isinstance(item, dict) for item in descriptors):
-            raise EnvironmentError("capsule platform manifest is incomplete")
+            raise EnvironmentError("program platform manifest is incomplete")
         entries: dict[str, Path] = {}
         manifest_path = self.store.oci_blobs / str(descriptor["digest"]).removeprefix("sha256:")
         if not manifest_path.exists():
@@ -628,38 +628,38 @@ class OCICapsuleRegistry:
             assert isinstance(item, dict)
             path = self.client.download_blob(item, self.store, self.events)
             entries["blobs/sha256/" + str(item["digest"]).removeprefix("sha256:")] = path
-        capsule = self.capsules.import_layout(
+        program = self.programs.import_layout(
             {"schemaVersion": 2, "mediaType": INDEX_MEDIA_TYPE, "manifests": [descriptor]},
             entries,
             origin={"kind": "oci", "registry": self.repository.display, "reference": reference},
         )
         if (
             expected_source_revision is not None
-            and capsule.manifest.source_revision != expected_source_revision
+            and program.description.source_revision != expected_source_revision
         ):
-            raise EnvironmentError("capsule source revision does not match the requested revision")
-        return capsule
+            raise EnvironmentError("program source revision does not match the requested revision")
+        return program
 
     def publish(
         self,
-        capsule_id: str,
+        program_id: str,
         *,
         tags: Sequence[str] = (),
-    ) -> CapsuleInfo:
-        with tempfile.TemporaryDirectory(prefix="lean-runtime-capsule-publish-") as directory:
+    ) -> ProgramInfo:
+        with tempfile.TemporaryDirectory(prefix="lean-runtime-program-publish-") as directory:
             root = Path(directory)
-            archive = root / "capsule.oci.tar.gz"
-            info = self.capsules.export(capsule_id, archive)
+            archive = root / "program.oci.tar.gz"
+            info = self.programs.export(program_id, archive)
             from .bundles import EnvironmentBundles
 
             entries = EnvironmentBundles._extract_oci_archive(archive, root / "layout")
-            index = _json_object(entries["index.json"].read_bytes(), "capsule index")
+            index = _json_object(entries["index.json"].read_bytes(), "program index")
             descriptor = index["manifests"][0]
             manifest_path = entries[
                 "blobs/sha256/" + str(descriptor["digest"]).removeprefix("sha256:")
             ]
             manifest_data = manifest_path.read_bytes()
-            manifest = _json_object(manifest_data, "capsule manifest")
+            manifest = _json_object(manifest_data, "program manifest")
             for item in [manifest["config"], *manifest["layers"]]:
                 blob = entries["blobs/sha256/" + str(item["digest"]).removeprefix("sha256:")]
                 self.client.upload_blob(blob, str(item["digest"]))
@@ -667,15 +667,15 @@ class OCICapsuleRegistry:
                 str(descriptor["digest"]), manifest_data, MANIFEST_MEDIA_TYPE
             )
             if digest != descriptor["digest"]:
-                raise EnvironmentError("published capsule manifest digest changed")
+                raise EnvironmentError("published program manifest digest changed")
             if tags:
                 index_data = canonical_json_bytes(index)
                 for tag in tags:
                     if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", tag):
                         raise ValueError(f"invalid OCI tag: {tag!r}")
                     self.client.publish_manifest(tag, index_data, INDEX_MEDIA_TYPE)
-            return CapsuleInfo(
-                info.capsule_id,
+            return ProgramInfo(
+                info.program_id,
                 info.source_revision,
                 digest,
                 self.repository.display,
@@ -690,28 +690,28 @@ class OCICapsuleRegistry:
         tags: Sequence[str] = (),
     ) -> str:
         if not re.fullmatch(r"[0-9a-f]{40,64}", source_revision):
-            raise ValueError("capsule index requires an exact source revision")
+            raise ValueError("program index requires an exact source revision")
         if not descriptors:
-            raise ValueError("capsule index requires at least one platform descriptor")
+            raise ValueError("program index requires at least one platform descriptor")
         platforms: set[tuple[str, str, str]] = set()
         for descriptor in descriptors:
             if descriptor.get("mediaType") != MANIFEST_MEDIA_TYPE:
-                raise ValueError("capsule platform descriptor has an unsupported media type")
+                raise ValueError("program platform descriptor has an unsupported media type")
             if not self.client.manifest_exists(str(descriptor.get("digest", ""))):
-                raise EnvironmentError("capsule platform manifest has not been published")
+                raise EnvironmentError("program platform manifest has not been published")
             platform = descriptor.get("platform")
             annotations = descriptor.get("annotations")
             if not isinstance(platform, dict) or not isinstance(annotations, dict):
-                raise ValueError("capsule platform descriptor is incomplete")
-            if annotations.get("org.lean-runtime.artifact.kind") != "execution-capsule":
-                raise ValueError("descriptor does not identify an execution capsule")
+                raise ValueError("program platform descriptor is incomplete")
+            if annotations.get("org.lean-runtime.artifact.kind") != "execution-program":
+                raise ValueError("computer record does not identify a ready-to-run program")
             key = (
                 str(platform.get("os")),
                 str(platform.get("architecture")),
                 str(annotations.get("org.lean-runtime.platform.abi")),
             )
             if key in platforms:
-                raise ValueError(f"duplicate capsule platform: {'/'.join(key)}")
+                raise ValueError(f"duplicate program platform: {'/'.join(key)}")
             platforms.add(key)
         ordered = sorted(
             descriptors,
@@ -727,7 +727,7 @@ class OCICapsuleRegistry:
                 "mediaType": INDEX_MEDIA_TYPE,
                 "manifests": ordered,
                 "annotations": {
-                    "org.lean-runtime.artifact.kind": "execution-capsule-index",
+                    "org.lean-runtime.artifact.kind": "execution-program-index",
                     "org.opencontainers.image.revision": source_revision,
                 },
             }

@@ -63,7 +63,7 @@ def setup(
         normalized_deps = (deps,) if isinstance(deps, (str, PackageReference)) else tuple(deps)
         if not normalized_deps:
             raise SpecificationError("setup deps must contain at least one dependency")
-        return selected.ensure_references(
+        return selected.open_references(
             normalized_deps, toolchain=toolchain, name=name, cancel=cancel
         )
     if project is not None:
@@ -76,10 +76,14 @@ def setup(
         resolved = (
             EnvironmentLock.load(Path(lock)) if isinstance(lock, (str, os.PathLike)) else lock
         )
-        return selected.ensure(resolved, name=name, cancel=cancel)
+        return selected.open_exact(resolved, name=name, cancel=cancel)
     if toolchain is not None or name is not None:
         raise SpecificationError("opened environments do not accept name or toolchain overrides")
-    return environment if isinstance(environment, Environment) else selected.open(str(environment))
+    return (
+        environment
+        if isinstance(environment, Environment)
+        else selected.environment(str(environment))
+    )
 
 
 def check(

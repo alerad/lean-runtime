@@ -22,71 +22,71 @@ def _payload(root: Path) -> Path:
     return payload
 
 
-def test_capsule_identity_payload_validation_and_interactive_execution(tmp_path: Path) -> None:
+def test_program_identity_payload_validation_and_interactive_execution(tmp_path: Path) -> None:
     runtime = Runtime(home=tmp_path / "runtime")
-    capsule = runtime.create_capsule(
+    program = runtime.create_program(
         _payload(tmp_path),
         command=("echo-bridge",),
         source_revision=_revision(),
         toolchain="leanprover/lean4:v4.32.2",
-        capability_digest="sha256:" + hashlib.sha256(b"capabilities").hexdigest(),
+        capability_id="sha256:" + hashlib.sha256(b"capabilities").hexdigest(),
     )
 
-    assert capsule.id.startswith("capsule_")
-    with capsule.spawn_interactive(policy=ExecutionPolicy(timeout_seconds=10)) as session:
+    assert program.id.startswith("program_")
+    with program.spawn_interactive(policy=ExecutionPolicy(timeout_seconds=10)) as session:
         session.stdin.write('{"ping":true}\n')
         session.stdin.flush()
         assert session.stdout.readline() == '{"ping":true}\n'
     assert session.close().provenance is not None
-    assert session.close().provenance.capsule_id == capsule.id
+    assert session.close().provenance.program_id == program.id
 
-    reopened = runtime.open_capsule(capsule.id)
-    assert reopened.manifest.source_revision == _revision()
+    reopened = runtime.program(program.id)
+    assert reopened.description.source_revision == _revision()
 
 
-def test_capsule_rejects_payload_tampering(tmp_path: Path) -> None:
+def test_program_rejects_payload_tampering(tmp_path: Path) -> None:
     runtime = Runtime(home=tmp_path / "runtime")
-    capsule = runtime.create_capsule(
+    program = runtime.create_program(
         _payload(tmp_path), command=("echo-bridge",), source_revision=_revision()
     )
-    executable = capsule.root / "payload" / "echo-bridge"
+    executable = program.root / "payload" / "echo-bridge"
     executable.write_text("changed")
     with pytest.raises(EnvironmentError, match="payload digest mismatch"):
-        runtime.open_capsule(capsule.id)
+        runtime.program(program.id)
 
 
-def test_capsule_oci_round_trip_is_deterministic(tmp_path: Path) -> None:
+def test_program_oci_round_trip_is_deterministic(tmp_path: Path) -> None:
     producer = Runtime(home=tmp_path / "producer")
-    capsule = producer.create_capsule(
+    program = producer.create_program(
         _payload(tmp_path), command=("echo-bridge",), source_revision=_revision()
     )
     first = tmp_path / "first.oci.tar.gz"
     second = tmp_path / "second.oci.tar.gz"
-    first_info = producer.export_capsule(capsule.id, first)
-    second_info = producer.export_capsule(capsule.id, second)
+    first_info = producer.save_program_copy(program.id, first)
+    second_info = producer.save_program_copy(program.id, second)
 
     assert first.read_bytes() == second.read_bytes()
-    assert first_info.manifest_digest == second_info.manifest_digest
+    assert first_info.copy_id == second_info.copy_id
 
     consumer = Runtime(home=tmp_path / "consumer")
-    imported = consumer.import_capsule(first)
-    assert imported.id == capsule.id
-    assert imported.manifest_digest == first_info.manifest_digest
+    imported = consumer.open_program_copy(first)
+    assert imported.id == program.id
+    assert imported.copy_id == first_info.copy_id
 
 
-def test_capsule_rejects_command_outside_payload(tmp_path: Path) -> None:
+def test_program_rejects_command_outside_payload(tmp_path: Path) -> None:
     runtime = Runtime(home=tmp_path / "runtime")
     with pytest.raises(EnvironmentError, match="absent"):
-        runtime.create_capsule(
+        runtime.create_program(
             _payload(tmp_path), command=("missing",), source_revision=_revision()
         )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="test fixture uses a POSIX script")
-def test_capsule_cannot_switch_executable(tmp_path: Path) -> None:
+def test_program_cannot_switch_executable(tmp_path: Path) -> None:
     runtime = Runtime(home=tmp_path / "runtime")
-    capsule = runtime.create_capsule(
+    program = runtime.create_program(
         _payload(tmp_path), command=("echo-bridge",), source_revision=_revision()
     )
     with pytest.raises(EnvironmentError, match="declared executable"):
-        capsule.spawn_interactive(("other",))
+        program.spawn_interactive(("other",))

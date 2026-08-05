@@ -24,8 +24,8 @@ from .wire import envelope, error, serialize_execution_v1
 def _progress(event: RuntimeEvent) -> None:
     messages = {
         "package_reference.started": "Resolving dependency",
-        "prebuilt.lookup": "Looking for a cached environment",
-        "prebuilt.layer_download_started": "Downloading cached environment",
+        "library.lookup": "Looking for a cached environment",
+        "library.layer_download_started": "Downloading cached environment",
         "environment.build_started": "Building environment",
         "environment.cache_hit": "Using local environment",
     }
@@ -160,20 +160,20 @@ def main(argv: list[str] | None = None) -> int:
                 source_path,
                 embedded=arguments.lock is None,
             )
-            environment = runtime.ensure(EnvironmentLock.load(lock_path))
+            environment = runtime.open_exact(EnvironmentLock.load(lock_path))
             preparation = PhaseTiming(
                 "environment_open", round((time.monotonic() - preparation_started) * 1000)
             )
             result = environment.check(source, filename=source_path.name, policy=policy)
         elif context.requires:
             resolution_started = time.monotonic()
-            lock = runtime.resolve_references(context.requires, toolchain=context.toolchain)
+            lock = runtime.prepare_references(context.requires, toolchain=context.toolchain)
             resolution = PhaseTiming(
                 "resolution", round((time.monotonic() - resolution_started) * 1000)
             )
             if arguments.lock_out is not None:
                 lock.write(arguments.lock_out)
-            environment = runtime.ensure(lock)
+            environment = runtime.open_exact(lock)
             preparation = PhaseTiming(
                 "environment_open",
                 round((time.monotonic() - resolution_started) * 1000) - resolution.duration_ms,

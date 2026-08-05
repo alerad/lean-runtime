@@ -23,7 +23,7 @@ The resulting JSON records:
 - offline verification and captured-execution replay.
 
 The harness deliberately starts from an already prepared environment. Measure cold source
-preparation separately and state whether local, Lake, and OCI caches were empty. Do not combine
+preparation separately and state whether local, Lake, and OCI libraries were empty. Do not combine
 cold source builds and warm execution into one headline number.
 
 ## Clean-wheel acceptance

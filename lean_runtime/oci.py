@@ -20,7 +20,7 @@ from .bundles import (
     MANIFEST_MEDIA_TYPE,
     EnvironmentBundles,
 )
-from .errors import EnvironmentError, PrebuiltUnavailable
+from .errors import DownloadUnavailable, EnvironmentError
 from .events import EventEmitter
 from .lockfiles import EnvironmentLock
 from .locking import FileLock
@@ -31,7 +31,7 @@ _REPOSITORY = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z
 _BEARER_PARAMETER = re.compile(r'([a-zA-Z]+)="([^"]*)"')
 _DIGEST = re.compile(r"sha256:([0-9a-f]{64})")
 _ACCEPT = ", ".join((INDEX_MEDIA_TYPE, MANIFEST_MEDIA_TYPE))
-DEFAULT_CACHE_REPOSITORIES = ("oci://ghcr.io/alerad/lean-runtime-cache",)
+DEFAULT_ENVIRONMENT_LIBRARIES = ("oci://ghcr.io/alerad/lean-runtime-cache",)
 
 
 class SignatureVerifier(Protocol):
@@ -66,6 +66,8 @@ class OCIRepository:
 
     @classmethod
     def parse(cls, value: str) -> OCIRepository:
+        if "://" not in value:
+            value = "oci://" + value
         if value.startswith("oci+http://"):
             insecure = True
             raw = value.removeprefix("oci+http://")
@@ -73,7 +75,7 @@ class OCIRepository:
             insecure = False
             raw = value.removeprefix("oci://")
         else:
-            raise ValueError("OCI cache must start with 'oci://' or 'oci+http://'")
+            raise ValueError("environment library must be a host and repository path")
         registry, separator, repository = raw.partition("/")
         if (
             not separator
@@ -81,7 +83,7 @@ class OCIRepository:
             or not _REPOSITORY.fullmatch(repository)
             or "@" in registry
         ):
-            raise ValueError(f"invalid OCI cache repository: {value!r}")
+            raise ValueError(f"invalid environment library: {value!r}")
         return cls(registry.lower(), repository.lower(), insecure)
 
     @property
@@ -179,12 +181,12 @@ class OCIRegistryClient:
                 recorded_digest = response.headers.get("Docker-Content-Digest")
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
-                raise PrebuiltUnavailable(
+                raise DownloadUnavailable(
                     f"OCI manifest is not available: {self.repository.display}:{reference}"
                 ) from exc
-            raise PrebuiltUnavailable(f"OCI registry request failed: HTTP {exc.code}") from exc
+            raise DownloadUnavailable(f"OCI registry request failed: HTTP {exc.code}") from exc
         except OSError as exc:
-            raise PrebuiltUnavailable(f"OCI registry is unavailable: {exc}") from exc
+            raise DownloadUnavailable(f"OCI registry is unavailable: {exc}") from exc
         if len(data) > 4 * 1024 * 1024:
             raise EnvironmentError("OCI manifest exceeds the supported size limit")
         digest = "sha256:" + hashlib.sha256(data).hexdigest()
@@ -209,7 +211,7 @@ class OCIRegistryClient:
         with FileLock(store.lock_dir / f"oci-{match.group(1)}.lock", timeout=1800):
             if destination.is_file() and destination.stat().st_size == size:
                 if _digest_path(destination) == digest:
-                    events.emit("prebuilt.layer_cached", "Reusing cached OCI blob", digest=digest)
+                    events.emit("library.layer_cached", "Reusing cached OCI blob", digest=digest)
                     return destination
                 destination.unlink()
             temporary = destination.with_name(f".{destination.name}.partial")
@@ -220,7 +222,7 @@ class OCIRegistryClient:
             if offset:
                 request.add_header("Range", f"bytes={offset}-")
             events.emit(
-                "prebuilt.layer_download_started",
+                "library.layer_download_started",
                 "Downloading OCI blob",
                 digest=digest,
                 size=size,
@@ -256,9 +258,9 @@ class OCIRegistryClient:
                     raise EnvironmentError("downloaded OCI blob failed digest verification")
                 temporary.replace(destination)
             except urllib.error.HTTPError as exc:
-                raise PrebuiltUnavailable(f"OCI blob download failed: HTTP {exc.code}") from exc
+                raise DownloadUnavailable(f"OCI blob download failed: HTTP {exc.code}") from exc
             except OSError as exc:
-                raise PrebuiltUnavailable(f"OCI blob download failed: {exc}") from exc
+                raise DownloadUnavailable(f"OCI blob download failed: {exc}") from exc
         return destination
 
     def blob_exists(self, digest: str) -> bool:
@@ -270,9 +272,9 @@ class OCIRegistryClient:
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return False
-            raise PrebuiltUnavailable(f"OCI blob lookup failed: HTTP {exc.code}") from exc
+            raise DownloadUnavailable(f"OCI blob lookup failed: HTTP {exc.code}") from exc
         except OSError as exc:
-            raise PrebuiltUnavailable(f"OCI registry is unavailable: {exc}") from exc
+            raise DownloadUnavailable(f"OCI registry is unavailable: {exc}") from exc
 
     def manifest_exists(self, digest: str) -> bool:
         encoded = urllib.parse.quote(digest, safe=":")
@@ -285,9 +287,9 @@ class OCIRegistryClient:
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return False
-            raise PrebuiltUnavailable(f"OCI manifest lookup failed: HTTP {exc.code}") from exc
+            raise DownloadUnavailable(f"OCI manifest lookup failed: HTTP {exc.code}") from exc
         except OSError as exc:
-            raise PrebuiltUnavailable(f"OCI registry is unavailable: {exc}") from exc
+            raise DownloadUnavailable(f"OCI registry is unavailable: {exc}") from exc
 
     def upload_blob(self, path: Path, digest: str) -> None:
         if _digest_path(path) != digest:
@@ -313,9 +315,9 @@ class OCIRegistryClient:
                     if response.status != 201:
                         raise EnvironmentError("OCI registry did not accept the blob upload")
         except urllib.error.HTTPError as exc:
-            raise PrebuiltUnavailable(f"OCI blob upload failed: HTTP {exc.code}") from exc
+            raise DownloadUnavailable(f"OCI blob upload failed: HTTP {exc.code}") from exc
         except OSError as exc:
-            raise PrebuiltUnavailable(f"OCI blob upload failed: {exc}") from exc
+            raise DownloadUnavailable(f"OCI blob upload failed: {exc}") from exc
 
     def publish_manifest(self, reference: str, data: bytes, media_type: str) -> str:
         digest = "sha256:" + hashlib.sha256(data).hexdigest()
@@ -329,9 +331,9 @@ class OCIRegistryClient:
                     raise EnvironmentError("OCI registry did not accept the manifest")
                 recorded = response.headers.get("Docker-Content-Digest")
         except urllib.error.HTTPError as exc:
-            raise PrebuiltUnavailable(f"OCI manifest upload failed: HTTP {exc.code}") from exc
+            raise DownloadUnavailable(f"OCI manifest upload failed: HTTP {exc.code}") from exc
         except OSError as exc:
-            raise PrebuiltUnavailable(f"OCI manifest upload failed: {exc}") from exc
+            raise DownloadUnavailable(f"OCI manifest upload failed: {exc}") from exc
         if recorded is not None and recorded != digest:
             raise EnvironmentError("OCI registry reported a mismatched published manifest digest")
         return digest
@@ -393,8 +395,8 @@ class OCIEnvironmentCache:
 
     def pull(self, lock: EnvironmentLock, *, name: str | None = None) -> str:
         self.events.emit(
-            "prebuilt.lookup",
-            "Looking up a prebuilt environment",
+            "library.lookup",
+            "Looking up a downloadable environment",
             registry=self.repository.display,
             lock_id=lock.lock_id,
         )
@@ -402,8 +404,8 @@ class OCIEnvironmentCache:
         if self.verifier is not None:
             self.verifier.verify(self.repository, response.digest)
             self.events.emit(
-                "prebuilt.signature_verified",
-                "Verified prebuilt publisher signature",
+                "library.signature_verified",
+                "Verified environment publisher signature",
                 registry=self.repository.display,
                 digest=response.digest,
             )
@@ -416,7 +418,7 @@ class OCIEnvironmentCache:
                 item for item in manifests if isinstance(item, dict) and _platform_matches(item)
             ]
             if not candidates:
-                raise PrebuiltUnavailable("OCI index has no compatible platform manifest")
+                raise DownloadUnavailable("OCI index has no compatible platform manifest")
             descriptor = candidates[0]
             selected = self.client.manifest(str(descriptor.get("digest")))
             if selected.digest != descriptor.get("digest") or len(selected.data) != descriptor.get(
@@ -474,12 +476,12 @@ class OCIEnvironmentCache:
             info = self.bundles.import_layout(
                 index,
                 entries,
-                origin={"kind": "prebuilt", "registry": self.repository.display},
+                origin={"kind": "downloadable", "library": self.repository.display},
                 name=name,
             )
         self.events.emit(
-            "prebuilt.verified",
-            "Imported a verified prebuilt environment",
+            "library.verified",
+            "Imported a verified downloadable environment",
             environment_id=info.environment_id,
             registry=self.repository.display,
         )
@@ -503,24 +505,24 @@ class OCIEnvironmentCache:
 
 
 @dataclass(frozen=True, slots=True)
-class PublishInfo:
-    repository: str
-    lock_id: str
+class PublicationInfo:
+    library: str
+    exact_environment_id: str
     environment_id: str
-    manifest_digest: str
-    index_digest: str | None
-    uploaded_blobs: int
-    platform_descriptor: dict[str, Any]
+    computer_copy_id: str
+    publication_id: str | None
+    uploaded_files: int
+    computer_record: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "repository": self.repository,
-            "lock_id": self.lock_id,
+            "library": self.library,
+            "exact_environment_id": self.exact_environment_id,
             "environment_id": self.environment_id,
-            "manifest_digest": self.manifest_digest,
-            "index_digest": self.index_digest,
-            "uploaded_blobs": self.uploaded_blobs,
-            "platform_descriptor": self.platform_descriptor,
+            "computer_copy_id": self.computer_copy_id,
+            "publication_id": self.publication_id,
+            "uploaded_files": self.uploaded_files,
+            "computer_record": self.computer_record,
         }
 
 
@@ -544,7 +546,7 @@ class OCIEnvironmentPublisher:
         *,
         tags: tuple[str, ...] = (),
         finalize: bool = True,
-    ) -> PublishInfo:
+    ) -> PublicationInfo:
         with tempfile.TemporaryDirectory(prefix="lean-runtime-publish-") as temporary:
             temporary_root = Path(temporary)
             bundle_path = temporary_root / "environment.oci.tar.gz"
@@ -591,21 +593,23 @@ class OCIEnvironmentPublisher:
             if tags and not finalize:
                 raise ValueError("tags can only be published while finalizing an OCI index")
             index_digest = (
-                self.publish_index(bundle_info.lock_id, [manifest_descriptor], tags=tags)
+                self.publish_index(
+                    bundle_info.exact_environment_id, [manifest_descriptor], tags=tags
+                )
                 if finalize
                 else None
             )
             self.events.emit(
-                "prebuilt.published",
-                "Published prebuilt environment",
+                "library.published",
+                "Published downloadable environment",
                 registry=self.repository.display,
-                lock_id=bundle_info.lock_id,
+                exact_environment_id=bundle_info.exact_environment_id,
                 environment_id=environment_id,
                 index_digest=index_digest,
             )
-            return PublishInfo(
+            return PublicationInfo(
                 self.repository.display,
-                bundle_info.lock_id,
+                bundle_info.exact_environment_id,
                 environment_id,
                 manifest_digest,
                 index_digest,

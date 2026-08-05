@@ -123,21 +123,21 @@ def test_bundle_export_is_deterministic_and_imports_into_fresh_store(tmp_path: P
     producer, environment_id, lock = _published_runtime(tmp_path / "producer")
     first = tmp_path / "first.oci.tar.gz"
     second = tmp_path / "second.oci.tar.gz"
-    info = producer.export_environment(environment_id, first)
-    producer.export_environment(environment_id, second)
+    info = producer.save_portable_copy(environment_id, first)
+    producer.save_portable_copy(environment_id, second)
 
     assert first.read_bytes() == second.read_bytes()
-    assert info.lock_id == lock.lock_id
-    assert info.manifest_digest.startswith("sha256:")
+    assert info.exact_environment_id == lock.lock_id
+    assert info.copy_id.startswith("sha256:")
 
     consumer = Runtime(home=tmp_path / "consumer")
-    imported = consumer.import_environment(first, name="portable", probe=False)
+    imported = consumer.open_portable_copy(first, name="portable", probe=False)
     assert imported.id == environment_id
     assert imported.lock.lock_id == lock.lock_id
-    assert consumer.open("portable").id == environment_id
+    assert consumer.environment("portable").id == environment_id
     assert not consumer.store.source_path(lock.packages[0].source_id).exists()
     metadata = json.loads((imported.root / "metadata.json").read_text())
-    assert metadata["origin"]["kind"] == "prebuilt"
+    assert metadata["origin"]["kind"] == "portable_copy"
     bundled_package = imported.workspace / ".lake" / "packages" / "sample"
     assert (bundled_package / ".lake" / "build" / "lib" / "lean" / "Sample.olean").is_file()
 
@@ -145,7 +145,7 @@ def test_bundle_export_is_deterministic_and_imports_into_fresh_store(tmp_path: P
 def test_bundle_import_rejects_a_corrupted_blob(tmp_path: Path) -> None:
     producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
     bundle = tmp_path / "environment.oci.tar.gz"
-    producer.export_environment(environment_id, bundle)
+    producer.save_portable_copy(environment_id, bundle)
     entries = _archive_entries(bundle)
     blob_name = next(name for name in entries if name.startswith("blobs/sha256/"))
     entries[blob_name] += b"corruption"
@@ -154,16 +154,16 @@ def test_bundle_import_rejects_a_corrupted_blob(tmp_path: Path) -> None:
 
     consumer = Runtime(home=tmp_path / "consumer")
     with pytest.raises(EnvironmentError, match="digest mismatch"):
-        consumer.import_environment(corrupted, probe=False)
+        consumer.open_portable_copy(corrupted, probe=False)
     assert not any(consumer.store.environments.glob("env_*"))
 
 
 def test_bundle_bytes_have_stable_sha256(tmp_path: Path) -> None:
     producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
     bundle = tmp_path / "environment.oci.tar.gz"
-    producer.export_environment(environment_id, bundle)
+    producer.save_portable_copy(environment_id, bundle)
     first = hashlib.sha256(bundle.read_bytes()).digest()
-    producer.export_environment(environment_id, bundle)
+    producer.save_portable_copy(environment_id, bundle)
     assert hashlib.sha256(bundle.read_bytes()).digest() == first
 
 
@@ -172,7 +172,7 @@ def test_bundle_export_rejects_workspace_content_that_diverges_from_lock(tmp_pat
     workspace = producer.store.environment_path(environment_id) / "workspace"
     (workspace / "lakefile.toml").write_text('name = "tampered"\n')
     with pytest.raises(EnvironmentError, match="root workspace does not match lock"):
-        producer.export_environment(environment_id, tmp_path / "tampered.oci.tar.gz")
+        producer.save_portable_copy(environment_id, tmp_path / "tampered.oci.tar.gz")
 
 
 def test_bundle_export_rejects_modified_checked_out_package(tmp_path: Path) -> None:
@@ -187,7 +187,7 @@ def test_bundle_export_rejects_modified_checked_out_package(tmp_path: Path) -> N
     )
     package.write_text("def sampleValue : Nat := 666\n")
     with pytest.raises(EnvironmentError, match="checked-out content mismatch"):
-        producer.export_environment(environment_id, tmp_path / "tampered.oci.tar.gz")
+        producer.save_portable_copy(environment_id, tmp_path / "tampered.oci.tar.gz")
 
 
 def test_bundle_export_accepts_gitignored_generated_build_artifact(tmp_path: Path) -> None:
@@ -202,7 +202,7 @@ def test_bundle_export_accepts_gitignored_generated_build_artifact(tmp_path: Pat
     (package / "generated.hash").write_text("derived build state\n")
 
     bundle = tmp_path / "generated.oci.tar.gz"
-    producer.export_environment(environment_id, bundle)
+    producer.save_portable_copy(environment_id, bundle)
 
     assert bundle.is_file()
 
@@ -219,7 +219,7 @@ def test_bundle_export_rejects_untracked_nonignored_package_content(tmp_path: Pa
     (package / "unexpected.txt").write_text("not a declared source or ignored build artifact\n")
 
     with pytest.raises(EnvironmentError, match="checked-out content mismatch"):
-        producer.export_environment(environment_id, tmp_path / "tampered.oci.tar.gz")
+        producer.save_portable_copy(environment_id, tmp_path / "tampered.oci.tar.gz")
 
 
 class _FakeToolchains:
@@ -237,7 +237,7 @@ class _FakeToolchains:
 def test_transparent_authenticated_oci_pull_and_blob_reuse(tmp_path: Path) -> None:
     producer, environment_id, lock = _published_runtime(tmp_path / "producer")
     bundle = tmp_path / "environment.oci.tar.gz"
-    producer.export_environment(environment_id, bundle)
+    producer.save_portable_copy(environment_id, bundle)
     entries = _archive_entries(bundle)
     index = json.loads(entries["index.json"])
     manifest_descriptor = index["manifests"][0]
@@ -323,8 +323,8 @@ def test_transparent_authenticated_oci_pull_and_blob_reuse(tmp_path: Path) -> No
         consumer_home = tmp_path / "consumer"
         runtime = Runtime(
             toolchains=_FakeToolchains(consumer_home),  # type: ignore[arg-type]
-            prebuilt="require",
-            caches=[cache],
+            availability="required",
+            libraries=[cache],
         )
         manifest_value = json.loads(manifest)
         resumed_descriptor = manifest_value["layers"][0]
@@ -335,15 +335,15 @@ def test_transparent_authenticated_oci_pull_and_blob_reuse(tmp_path: Path) -> No
             "." + resumed_descriptor["digest"].removeprefix("sha256:") + ".partial"
         )
         partial.write_bytes(resumed_data[: len(resumed_data) // 2])
-        imported = runtime.ensure(lock)
+        imported = runtime.open_exact(lock)
         assert imported.id == environment_id
         imported_metadata = json.loads((imported.root / "metadata.json").read_text())
-        assert imported_metadata["origin"]["registry"] == cache
+        assert imported_metadata["origin"]["library"] == cache
         first_blob_requests = len([path for path in requests if "/blobs/" in path])
         assert ranges
 
         shutil.rmtree(runtime.store.environment_path(environment_id))
-        runtime.ensure(lock)
+        runtime.open_exact(lock)
         assert len([path for path in requests if "/blobs/" in path]) == first_blob_requests
     finally:
         server.shutdown()
@@ -383,6 +383,6 @@ def test_oci_publisher_uploads_blobs_before_manifests(tmp_path: Path) -> None:
     kinds = [kind for kind, _value in operations]
     first_manifest = kinds.index("manifest")
     assert all(kind in {"exists", "blob"} for kind in kinds[:first_manifest])
-    assert result.lock_id == lock.lock_id
-    assert result.uploaded_blobs == 3
+    assert result.exact_environment_id == lock.lock_id
+    assert result.uploaded_files == 3
     assert operations[-2:] == [("manifest", lock.lock_id), ("manifest", "v1")]

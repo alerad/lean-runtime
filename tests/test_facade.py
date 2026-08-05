@@ -34,7 +34,7 @@ class FakeRuntime:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
 
-    def ensure_references(self, deps, *, toolchain=None, name=None, cancel=None):
+    def open_references(self, deps, *, toolchain=None, name=None, cancel=None):
         del cancel
         self.calls.append(("deps", (deps, toolchain, name)))
         return Prepared()

@@ -9,16 +9,37 @@ from types import SimpleNamespace
 import pytest
 
 from lean_runtime import EnvironmentLock, LockedPackage, MatrixContext, Runtime
-from lean_runtime.diffing import diff_locks
+from lean_runtime.comparison import compare_locks
 from lean_runtime.facade import check_matrix_async
 from lean_runtime.matrix import load_matrix, run_matrix
 from lean_runtime.models import ExecutionResult
 from lean_runtime.profiling import run_profile
-from lean_runtime.runtime import _prebuilt_reason
+from lean_runtime.runtime import _download_reason
 from lean_runtime.serialization import write_json_atomic
 from lean_runtime.store import environment_identity, platform_compatibility, platform_record
 from lean_runtime.verification import load_lock_subject
 from lean_runtime.wire import serialize_execution_v1, serialize_verify_v1
+
+
+def test_removed_v1_runtime_names_are_absent() -> None:
+    removed = {
+        "resolve",
+        "ensure",
+        "open",
+        "resolve_references",
+        "ensure_references",
+        "export_environment",
+        "import_environment",
+        "publish_environment_index",
+        "gc",
+        "gc_oci_blobs",
+        "open_program",
+        "export_program",
+        "import_program",
+        "pull_program",
+        "publish_program_index",
+    }
+    assert not {name for name in removed if hasattr(Runtime, name)}
 
 
 def lock(*, toolchain: str = "leanprover/lean4:v4.32.0", revision: str = "a" * 40):
@@ -73,8 +94,8 @@ def test_diff_is_order_independent_and_distinguishes_same_tree_new_commit() -> N
         manifest=lock().manifest,
         packages=tuple(reversed(lock().packages)),
     )
-    assert diff_locks(lock(), same).equal
-    changed = diff_locks(lock(), lock(revision="e" * 40))
+    assert compare_locks(lock(), same).equal
+    changed = compare_locks(lock(), lock(revision="e" * 40))
     assert [item.path for item in changed.changes] == ["packages.sample.revision"]
     assert changed.changes[0].identity_effect
 
@@ -99,7 +120,7 @@ def test_matrix_parser_is_closed_and_execution_preserves_context_order(tmp_path:
     environment = SimpleNamespace(check=lambda *_args, **_kwargs: result())
     runtime = SimpleNamespace(
         check=lambda *_args, **_kwargs: result(),
-        open=lambda _name: environment,
+        environment=lambda _name: environment,
     )
     report = run_matrix(
         runtime,
@@ -188,7 +209,7 @@ def test_execution_serializer_has_stable_envelope() -> None:
 
 
 def test_verify_distinguishes_platform_mismatch_before_open(tmp_path: Path) -> None:
-    runtime = Runtime(home=tmp_path, prebuilt="never")
+    runtime = Runtime(home=tmp_path, availability="local")
     selected = lock()
     runtime.store.publish_lock(selected)
     environment_id = environment_identity(selected)
@@ -229,4 +250,4 @@ def test_matrix_context_is_public() -> None:
     ],
 )
 def test_prebuilt_failures_have_stable_reason_codes(message: str, code: str) -> None:
-    assert _prebuilt_reason(RuntimeError(message)) == code
+    assert _download_reason(RuntimeError(message)) == code

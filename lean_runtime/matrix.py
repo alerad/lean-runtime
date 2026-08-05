@@ -115,15 +115,17 @@ def run_matrix(
         if cancel is not None and cancel.is_set():
             raise RuntimeError("matrix execution was cancelled")
         if context.requires:
-            environment = runtime.ensure_references(
+            environment = runtime.open_references(
                 context.requires, toolchain=context.toolchain, cancel=cancel
             )
             result = environment.check(source, filename=filename, cancel=cancel)
         elif context.lock is not None:
-            environment = runtime.ensure(EnvironmentLock.load(base / context.lock), cancel=cancel)
+            environment = runtime.open_exact(
+                EnvironmentLock.load(base / context.lock), cancel=cancel
+            )
             result = environment.check(source, filename=filename, cancel=cancel)
         elif context.environment is not None:
-            result = runtime.open(context.environment).check(
+            result = runtime.environment(context.environment).check(
                 source, filename=filename, cancel=cancel
             )
         elif context.project is not None:

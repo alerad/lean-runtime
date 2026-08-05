@@ -38,11 +38,11 @@ class FakeRuntime:
         self.lock = Lock()
         FakeRuntime.instance = self
 
-    def resolve_references(self, requires, *, toolchain=None) -> Lock:
+    def prepare_references(self, requires, *, toolchain=None) -> Lock:
         self.calls.append(("resolve", (requires, toolchain)))
         return self.lock
 
-    def ensure(self, lock) -> Environment:
+    def open_exact(self, lock) -> Environment:
         self.calls.append(("ensure", lock))
         return Environment()
 

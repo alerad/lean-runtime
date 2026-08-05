@@ -36,9 +36,9 @@ def _validator(name: str) -> Draft202012Validator:
 def test_every_v1_schema_compiles_eagerly() -> None:
     paths = sorted(SCHEMAS.glob("*-v1.schema.json"))
     assert {path.stem for path in paths} == {
-        "diff-v1.schema",
+        "comparison-v1.schema",
         "execution-v1.schema",
-        "gc-v1.schema",
+        "cleanup-v1.schema",
         "inspect-v1.schema",
         "matrix-v1.schema",
         "profile-v1.schema",
@@ -72,9 +72,9 @@ def test_execution_success_fixture_matches_v1_schema() -> None:
 
 def test_every_v1_schema_accepts_its_closed_error_envelope() -> None:
     schemas = {
-        "diff": "lean-runtime.diff/v1",
+        "comparison": "lean-runtime.comparison/v1",
         "execution": "lean-runtime.execution/v1",
-        "gc": "lean-runtime.gc/v1",
+        "cleanup": "lean-runtime.cleanup/v1",
         "inspect": "lean-runtime.inspect/v1",
         "matrix": "lean-runtime.matrix/v1",
         "profile": "lean-runtime.profile/v1",
@@ -106,7 +106,7 @@ def test_inspect_and_gc_success_fixtures_are_closed() -> None:
     )
     _validator("inspect-v1.schema.json").validate(inspect)
     gc = envelope(
-        "lean-runtime.gc/v1",
+        "lean-runtime.cleanup/v1",
         ok=True,
         data={
             "environments": {
@@ -115,10 +115,10 @@ def test_inspect_and_gc_success_fixtures_are_closed() -> None:
                 "retained": [],
                 "dry_run": True,
             },
-            "oci_blobs": None,
+            "downloaded_files": None,
         },
     )
-    _validator("gc-v1.schema.json").validate(gc)
+    _validator("cleanup-v1.schema.json").validate(gc)
 
 
 def test_timing_phase_vocabulary_and_duration_are_bounded() -> None:

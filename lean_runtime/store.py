@@ -131,7 +131,7 @@ def clone_tree(source: Path, destination: Path) -> None:
 
 
 @dataclass(frozen=True, slots=True)
-class GarbageCollectionReport:
+class CleanupReport:
     candidates: tuple[str, ...]
     removed: tuple[str, ...]
     retained: tuple[str, ...]
@@ -147,7 +147,7 @@ class GarbageCollectionReport:
 
 
 @dataclass(frozen=True, slots=True)
-class BlobGarbageCollectionReport:
+class DownloadCleanupReport:
     candidates: tuple[str, ...]
     removed: tuple[str, ...]
     retained: tuple[str, ...]
@@ -198,7 +198,7 @@ class EnvironmentStore:
         self.sources = home / "sources" / "git"
         self.locks = home / "locks"
         self.environments = home / "environments"
-        self.capsules = home / "capsules"
+        self.programs = home / "programs"
         self.names = home / "names"
         self.jobs = home / "jobs"
         self.executions = home / "executions"
@@ -210,7 +210,7 @@ class EnvironmentStore:
             self.sources,
             self.locks,
             self.environments,
-            self.capsules,
+            self.programs,
             self.names,
             self.jobs,
             self.executions,
@@ -514,9 +514,9 @@ class EnvironmentStore:
             bytes_free=shutil.disk_usage(self.home).free,
         )
 
-    def gc(
+    def clean(
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
-    ) -> GarbageCollectionReport:
+    ) -> CleanupReport:
         """Remove old environments not reachable through a name.
 
         Locks, immutable sources, and OCI blobs are retained in the current store schema.
@@ -557,11 +557,11 @@ class EnvironmentStore:
                         shutil.rmtree(path)
                         usage.unlink(missing_ok=True)
                         removed.append(path.name)
-        return GarbageCollectionReport(tuple(candidates), tuple(removed), tuple(retained), dry_run)
+        return CleanupReport(tuple(candidates), tuple(removed), tuple(retained), dry_run)
 
-    def gc_oci_blobs(
+    def clean_downloads(
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
-    ) -> BlobGarbageCollectionReport:
+    ) -> DownloadCleanupReport:
         """Remove old OCI blobs not referenced by an imported environment or active pull."""
         candidates: list[str] = []
         removed: list[str] = []
@@ -599,6 +599,6 @@ class EnvironmentStore:
                     path.unlink()
                     reclaimed_bytes += size
                     removed.append(path.name)
-        return BlobGarbageCollectionReport(
+        return DownloadCleanupReport(
             tuple(candidates), tuple(removed), tuple(retained), reclaimed_bytes, dry_run
         )

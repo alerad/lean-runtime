@@ -1,106 +1,104 @@
-# Environment bundles
+# Portable copies and environment libraries
 
 Lean Runtime can move an already built environment between compatible machines
 without rebuilding its Lake packages:
 
 ```bash
-lean-runtime export research-stack --output research-stack.oci.tar.gz
-lean-runtime --home /tmp/fresh import research-stack.oci.tar.gz --name research-stack
+lean-runtime save-copy research-stack --output research-stack.lean-environment
+lean-runtime --home /tmp/fresh open-copy research-stack.lean-environment --name research-stack
 ```
 
 The equivalent Python API is:
 
 ```python
-info = runtime.export_environment("research-stack", "research-stack.oci.tar.gz")
-environment = another_runtime.import_environment("research-stack.oci.tar.gz", name="research-stack")
+info = runtime.save_portable_copy("research-stack", "research-stack.lean-environment")
+environment = another_runtime.open_portable_copy(
+    "research-stack.lean-environment", name="research-stack"
+)
 ```
 
-Import verifies the OCI manifest and every blob digest, recomputes the lock and
-environment identities, requires an exact platform compatibility match, checks
-each package's Git commit and tree, and runs a Lean probe. Publication uses a
-staging directory and atomic rename, so a failed import is never visible as a
-ready environment. `--no-probe` exists for inspection and testing workflows;
-normal imports should keep the probe enabled.
+Opening a copy verifies its exact environment identity, computer compatibility,
+package revisions, and a real Lean import before making it available. A failed
+open never appears as a ready environment. `--no-probe` exists for inspection
+and testing; normal use should keep the probe enabled.
 
-Layer construction, archive writing, import, and registry downloads are
-disk-backed and streamed. Peak memory does not scale with package-layer size.
+Saving, opening, and downloading are disk-backed and streamed. Peak memory does
+not scale with the size of the environment.
 
-## OCI global caches
+## Environment libraries
 
 By default, Lean Runtime checks the public
-`oci://ghcr.io/alerad/lean-runtime-cache` mirror. A miss or availability failure
+`ghcr.io/alerad/lean-runtime-cache` library. A missing or unavailable copy
 falls back to the existing source build, so environment specifications do not
-change. Set `LEAN_RUNTIME_CACHES=` or construct `Runtime(caches=[])` to disable
-all remote cache lookups.
+change. Set `LEAN_RUNTIME_LIBRARIES=` or construct `Runtime(libraries=[])` to disable
+all library lookups.
 
-Configure one or more cache repositories without changing the environment
+Configure one or more libraries without changing the environment
 specification or lock:
 
 ```python
 runtime = Runtime(
-    caches=["oci://ghcr.io/alerad/leancert-runtime"],
-    prebuilt="auto",
+    libraries=["ghcr.io/alerad/leancert-runtime"],
+    availability="auto",
 )
-environment = runtime.ensure(lock)
+environment = runtime.open_exact(lock)
 ```
 
 The equivalent environment variables are:
 
 ```bash
-export LEAN_RUNTIME_CACHES=oci://ghcr.io/alerad/leancert-runtime
-export LEAN_RUNTIME_PREBUILT=auto
+export LEAN_RUNTIME_LIBRARIES=ghcr.io/alerad/leancert-runtime
+export LEAN_RUNTIME_AVAILABILITY=auto
 ```
 
-`auto` tries caches in order and builds from source when an artifact is absent,
-incompatible, or temporarily unavailable. `require` makes an ordinary cache
-miss an error. `never` disables remote lookup. Digest, lock, archive-safety, and
-probe failures are security failures and never silently fall back to source.
+`auto` tries libraries in order and builds locally when a copy is absent,
+incompatible, or temporarily unavailable. `required` makes a missing copy an
+error. `local` disables library lookup. Verification failures never silently
+fall back to a local build.
 
 Explicit prefetch uses the same verified path:
 
 ```bash
 lean-runtime \
-  --cache oci://ghcr.io/alerad/leancert-runtime \
-  pull environment.lock.json
+  --library ghcr.io/alerad/leancert-runtime \
+  download environment.lock.json
 ```
 
-Registry blobs are retained content-addressed under the runtime home. Pulling a
-second environment with an identical package layer reuses it without another
-download.
+Downloaded files are retained under the runtime home. Opening another
+environment with identical dependencies reuses them without another download.
 
 Old blobs can be included in garbage collection explicitly:
 
 ```bash
 # Preview, then apply after reviewing the candidates.
-lean-runtime gc --include-blobs
-lean-runtime gc --include-blobs --execute
+lean-runtime clean --include-downloads
+lean-runtime clean --include-downloads --execute
 ```
 
-Blobs referenced by an imported environment or leased by an active pull are
-retained. Collection rechecks both conditions while holding the same per-blob
-lock used by downloads.
+Files used by a ready environment or an active download are retained. Cleanup
+rechecks both conditions before removing anything.
 
-### Required publisher signatures
+### Required publisher publisher_verification
 
 For high-trust workflows, require a Sigstore signature from one exact GitHub
 Actions identity:
 
 ```python
 runtime = Runtime(
-    caches=["oci://ghcr.io/alerad/leancert-runtime"],
-    signatures="require",
-    trusted_identity=(
+    libraries=["ghcr.io/alerad/leancert-runtime"],
+    publisher_verification="required",
+    trusted_publisher=(
         "https://github.com/alerad/leancert/.github/workflows/cache.yml@refs/heads/main"
     ),
     trusted_issuer="https://token.actions.githubusercontent.com",
 )
 ```
 
-CLI equivalents are `--signatures require`, `--trusted-identity`, and
+CLI equivalents are `--publisher_verification required`, `--trusted-publisher`, and
 `--trusted-issuer`. Verification uses an installed Cosign 2.6.2 or 3.0.4+ and
 binds the canonical lock-index digest, certificate identity, issuer, and
 transparency-log claims. Older versions are rejected because of the patched
-[Cosign verification advisory](https://github.com/sigstore/cosign/security/advisories/GHSA-whqx-f9j3-ch6m).
+[Cosign verification advisory](https://github.com/sigstore/verification_tool/security/advisories/GHSA-whqx-f9j3-ch6m).
 
 Signature failure is an integrity failure and never triggers source fallback.
 
@@ -112,8 +110,8 @@ Publish the current platform after ensuring the lock:
 export LEAN_RUNTIME_REGISTRY_USERNAME=alerad
 export LEAN_RUNTIME_REGISTRY_PASSWORD="$GHCR_TOKEN"
 
-lean-runtime build-and-push environment.lock.json \
-  --push-to oci://ghcr.io/alerad/leancert-runtime \
+lean-runtime build-and-publish environment.lock.json \
+  --publish-to ghcr.io/alerad/leancert-runtime \
   --tag v4.32.2.4 \
   --sign --attest
 ```
@@ -135,21 +133,21 @@ permissions:
 
 steps:
   - uses: actions/checkout@v4
-  - uses: ./.github/actions/cache
+  - uses: ./.github/actions/publish-environment
     with:
       lock: environment.lock.json
-      repository: oci://ghcr.io/${{ github.repository_owner }}/leancert-runtime
+      library: ghcr.io/${{ github.repository_owner }}/leancert-runtime
       tag: ${{ github.ref_name }}
-      registry-username: ${{ github.actor }}
-      registry-password: ${{ secrets.GITHUB_TOKEN }}
+      username: ${{ github.actor }}
+      password: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 For a build matrix, have each platform publish without changing the canonical
 index and retain its JSON result:
 
 ```bash
-lean-runtime build-and-push environment.lock.json \
-  --push-to oci://ghcr.io/alerad/leancert-runtime \
+lean-runtime build-and-publish environment.lock.json \
+  --publish-to ghcr.io/alerad/leancert-runtime \
   --platform-only > platform-result.json
 ```
 
@@ -157,8 +155,8 @@ After collecting the result files, one final job publishes the deterministic
 multi-platform index and human aliases:
 
 ```bash
-lean-runtime publish-index "$LOCK_ID" results/*.json \
-  --repository oci://ghcr.io/alerad/leancert-runtime \
+lean-runtime finalize-publication "$LOCK_ID" results/*.json \
+  --library ghcr.io/alerad/leancert-runtime \
   --tag "$GITHUB_REF_NAME"
 ```
 
@@ -192,7 +190,7 @@ separate byte-reproducibility measurement: a mismatch is reported but is not
 treated as failed source/proof verification, because native toolchains and package build
 steps are not promised to produce byte-identical artifacts.
 
-## Format version 1
+## Advanced storage details
 
 The gzip file is a deterministic OCI image-layout archive. It contains a
 standard `oci-layout`, `index.json`, one image manifest, a Lean Runtime config
@@ -220,9 +218,9 @@ environment twice therefore produces identical bytes and digests.
 `lock_id` identifies the platform-independent locked source graph.
 `environment_id` additionally includes the release build profile and the
 versioned platform compatibility record. Informational host details remain in
-metadata but do not invalidate compatible caches across OS patch releases.
+metadata but do not invalidate compatible libraries across OS patch releases.
 
-A bundle is trusted executable build output. Digest, lock, Git-tree, and probe
+A portable copy is trusted executable build output. Digest, lock, Git-tree, and probe
 verification detect corruption and identity substitution, but do not prove that
-the builder compiled the sources faithfully. Registry credentials authenticate
-access but are not a builder attestation; only use cache publishers you trust.
+the builder compiled the sources faithfully. Library credentials authenticate
+access but are not a builder attestation; only use environment publishers you trust.

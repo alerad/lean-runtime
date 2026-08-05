@@ -22,7 +22,7 @@ from .timings import render_timings
 from .wire import (
     envelope,
     error,
-    serialize_diff_v1,
+    serialize_comparison_v1,
     serialize_execution_v1,
     serialize_matrix_v1,
     serialize_profile_v1,
@@ -33,10 +33,10 @@ from .wire import (
 def _schema_for(command: str) -> str:
     return {
         "verify": "lean-runtime.verify/v1",
-        "diff": "lean-runtime.diff/v1",
+        "compare": "lean-runtime.comparison/v1",
         "profile": "lean-runtime.profile/v1",
         "matrix": "lean-runtime.matrix/v1",
-        "gc": "lean-runtime.gc/v1",
+        "clean": "lean-runtime.cleanup/v1",
         "inspect": "lean-runtime.inspect/v1",
     }.get(command, "lean-runtime.execution/v1")
 
@@ -97,36 +97,36 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--verbose", action="store_true", help="show detailed decisions and checks")
     root.add_argument("--timings", action="store_true", help="show stable operation phase timings")
     root.add_argument(
-        "--cache",
+        "--library",
         action="append",
-        dest="caches",
-        help="OCI cache repository; repeatable (oci://registry/owner/repository)",
+        dest="libraries",
+        help="environment library; repeatable (for example ghcr.io/owner/environments)",
     )
-    root.add_argument("--prebuilt", choices=("auto", "require", "never"), default=None)
-    root.add_argument("--signatures", choices=("ignore", "require"), default="ignore")
-    root.add_argument("--trusted-identity")
+    root.add_argument("--availability", choices=("auto", "required", "local"), default=None)
+    root.add_argument("--publisher-verification", choices=("ignore", "required"), default="ignore")
+    root.add_argument("--trusted-publisher")
     root.add_argument("--trusted-issuer")
-    root.add_argument("--cosign", default="cosign")
+    root.add_argument("--verification-tool", default="cosign")
     commands = root.add_subparsers(dest="command", required=True)
 
-    resolve = commands.add_parser("resolve", help="compile a TOML/JSON spec into a lock")
+    resolve = commands.add_parser("prepare", help="prepare an exact environment description")
     resolve.add_argument("spec", type=Path)
     resolve.add_argument("--output", type=Path)
     resolve.add_argument("--timeout", type=float, default=900)
 
-    ensure = commands.add_parser("ensure", help="build or reopen a locked environment")
+    ensure = commands.add_parser("open", help="open or build an exact environment")
     ensure.add_argument("lock", type=Path)
     ensure.add_argument("--name")
 
-    pull = commands.add_parser("pull", help="require and import a prebuilt locked environment")
+    pull = commands.add_parser("download", help="download an exact environment from a library")
     pull.add_argument("lock", type=Path)
     pull.add_argument("--name")
 
     push = commands.add_parser(
-        "build-and-push", help="ensure a lock and publish its prebuilt environment"
+        "build-and-publish", help="build an exact environment and publish it to a library"
     )
     push.add_argument("lock", type=Path)
-    push.add_argument("--push-to", required=True)
+    push.add_argument("--publish-to", required=True)
     push.add_argument("--tag", action="append", default=[])
     push.add_argument("--name")
     push.add_argument(
@@ -140,67 +140,69 @@ def parser() -> argparse.ArgumentParser:
     )
 
     publish_index = commands.add_parser(
-        "publish-index", help="finalize a lock index from platform-result JSON files"
+        "finalize-publication", help="combine computer-specific publication results"
     )
     publish_index.add_argument("lock_id")
     publish_index.add_argument("platform_results", nargs="+", type=Path)
-    publish_index.add_argument("--repository", required=True)
+    publish_index.add_argument("--library", required=True)
     publish_index.add_argument("--tag", action="append", default=[])
 
-    export = commands.add_parser("export", help="export a deterministic OCI environment bundle")
+    export = commands.add_parser("save-copy", help="save a verified portable environment copy")
     export.add_argument("environment")
     export.add_argument("--output", required=True, type=Path)
 
     import_bundle = commands.add_parser(
-        "import", help="verify and import an OCI environment bundle"
+        "open-copy", help="verify and open a portable environment copy"
     )
-    import_bundle.add_argument("bundle", type=Path)
+    import_bundle.add_argument("copy", type=Path)
     import_bundle.add_argument("--name")
     import_bundle.add_argument("--no-probe", action="store_true", help="skip the Lean import probe")
 
-    capsule_create = commands.add_parser(
-        "capsule-create", help="create a thin content-addressed executable capsule"
+    program_create = commands.add_parser(
+        "program-create", help="create a verified ready-to-run program"
     )
-    capsule_create.add_argument("payload", type=Path)
-    capsule_create.add_argument("--command", dest="capsule_command", nargs="+", required=True)
-    capsule_create.add_argument("--source-revision", required=True)
-    capsule_create.add_argument("--source-environment-id")
-    capsule_create.add_argument("--source-lock-id")
-    capsule_create.add_argument("--toolchain", default="unknown")
-    capsule_create.add_argument("--capability-digest")
+    program_create.add_argument("payload", type=Path)
+    program_create.add_argument("--command", dest="program_command", nargs="+", required=True)
+    program_create.add_argument("--source-revision", required=True)
+    program_create.add_argument("--source-environment-id")
+    program_create.add_argument("--exact-environment-id")
+    program_create.add_argument("--toolchain", default="unknown")
+    program_create.add_argument("--capability-id")
 
-    capsule_export = commands.add_parser(
-        "capsule-export", help="export a thin capsule as an OCI archive"
+    program_export = commands.add_parser(
+        "program-save-copy", help="save a portable copy of a ready-to-run program"
     )
-    capsule_export.add_argument("capsule_id")
-    capsule_export.add_argument("--output", required=True, type=Path)
+    program_export.add_argument("program_id")
+    program_export.add_argument("--output", required=True, type=Path)
 
-    capsule_import = commands.add_parser(
-        "capsule-import", help="verify and import a local capsule OCI archive"
+    program_import = commands.add_parser(
+        "program-open-copy", help="verify and open a portable program copy"
     )
-    capsule_import.add_argument("bundle", type=Path)
+    program_import.add_argument("copy", type=Path)
 
-    capsule_pull = commands.add_parser(
-        "capsule-pull", help="pull a compatible thin capsule from OCI"
+    program_pull = commands.add_parser(
+        "program-download", help="download a compatible ready-to-run program"
     )
-    capsule_pull.add_argument("repository")
-    capsule_pull.add_argument("reference")
-    capsule_pull.add_argument("--source-revision")
+    program_pull.add_argument("library")
+    program_pull.add_argument("reference")
+    program_pull.add_argument("--source-revision")
 
-    capsule_push = commands.add_parser("capsule-push", help="publish a platform capsule to OCI")
-    capsule_push.add_argument("capsule_id")
-    capsule_push.add_argument("--repository", required=True)
-    capsule_push.add_argument("--tag", action="append", default=[])
-    capsule_push.add_argument("--sign", action="store_true")
-
-    capsule_index = commands.add_parser(
-        "capsule-publish-index", help="finalize a multi-platform capsule OCI index"
+    program_push = commands.add_parser(
+        "program-publish", help="publish this computer's ready-to-run program"
     )
-    capsule_index.add_argument("source_revision")
-    capsule_index.add_argument("platform_results", nargs="+", type=Path)
-    capsule_index.add_argument("--repository", required=True)
-    capsule_index.add_argument("--tag", action="append", default=[])
-    capsule_index.add_argument("--sign", action="store_true")
+    program_push.add_argument("program_id")
+    program_push.add_argument("--library", required=True)
+    program_push.add_argument("--tag", action="append", default=[])
+    program_push.add_argument("--sign", action="store_true")
+
+    program_index = commands.add_parser(
+        "program-finalize-publication", help="combine computer-specific program publications"
+    )
+    program_index.add_argument("source_revision")
+    program_index.add_argument("computer_results", nargs="+", type=Path)
+    program_index.add_argument("--library", required=True)
+    program_index.add_argument("--tag", action="append", default=[])
+    program_index.add_argument("--sign", action="store_true")
 
     check = commands.add_parser(
         "check", help="check with --with packages or in a published environment"
@@ -230,9 +232,9 @@ def parser() -> argparse.ArgumentParser:
     inspect.add_argument("--packages", action="store_true", help="include exact package locks")
     inspect.add_argument("--explain", action="store_true", help="explain identity and reuse")
 
-    commands.add_parser("env-list", help="list published environments")
-    commands.add_parser("cache-status", help="show cache counts and disk usage")
-    commands.add_parser("doctor", help="check local prerequisites and cache health")
+    commands.add_parser("environments", help="list ready environments")
+    commands.add_parser("storage", help="show downloaded and built storage usage")
+    commands.add_parser("doctor", help="check local prerequisites and environment storage")
 
     verify = commands.add_parser("verify", help="verify a lock or published environment")
     verify.add_argument("subject")
@@ -240,7 +242,7 @@ def parser() -> argparse.ArgumentParser:
     verify.add_argument("--rebuild", action="store_true")
     verify.add_argument("--json", action="store_true")
 
-    diff = commands.add_parser("diff", help="compare two exact Lean contexts")
+    diff = commands.add_parser("compare", help="compare two exact Lean environments")
     diff.add_argument("left")
     diff.add_argument("right")
     diff.add_argument("--json", action="store_true")
@@ -262,15 +264,15 @@ def parser() -> argparse.ArgumentParser:
     replay.add_argument("capture", type=Path)
     replay.add_argument("--json", action="store_true")
 
-    gc = commands.add_parser("gc", help="collect old unreferenced environments")
+    gc = commands.add_parser("clean", help="clean up old unused environments")
     gc.add_argument("--execute", action="store_true", help="remove candidates; default is dry-run")
     gc.add_argument("--minimum-age-hours", type=float, default=24 * 30)
     gc.add_argument(
-        "--include-blobs", action="store_true", help="also collect unreferenced OCI blobs"
+        "--include-downloads", action="store_true", help="also clean unused downloaded files"
     )
 
     raw = commands.add_parser(
-        "raw-check", help="check a file, discovering its local Lake project when possible"
+        "check-file", help="check a file, discovering its local Lake project when possible"
     )
     raw.add_argument("file", type=Path, help="Lean source file, or - for stdin")
     raw.add_argument("--toolchain")
@@ -278,7 +280,7 @@ def parser() -> argparse.ArgumentParser:
     raw.add_argument("--json", action="store_true")
     _add_policy(raw)
 
-    build = commands.add_parser("project-build", help="build an existing Lake project")
+    build = commands.add_parser("build", help="build an existing Lake project")
     build.add_argument("project", type=Path)
     build.add_argument("targets", nargs="*")
     build.add_argument("--toolchain")
@@ -296,19 +298,19 @@ def main(argv: list[str] | None = None) -> int:
     runtime = Runtime(
         home=args.home,
         on_event=None if args.quiet else _progress,
-        prebuilt=args.prebuilt,
-        caches=args.caches,
-        signatures=args.signatures,
-        trusted_identity=args.trusted_identity,
+        availability=args.availability,
+        libraries=args.libraries,
+        publisher_verification=args.publisher_verification,
+        trusted_publisher=args.trusted_publisher,
         trusted_issuer=args.trusted_issuer,
-        cosign=args.cosign,
+        verification_tool=args.verification_tool,
     )
     try:
         if args.command == "install":
             print(runtime.toolchains.ensure(args.toolchain))
             return 0
-        if args.command == "resolve":
-            lock = runtime.resolve(EnvironmentSpec.load(args.spec), timeout=args.timeout)
+        if args.command == "prepare":
+            lock = runtime.prepare(EnvironmentSpec.load(args.spec), timeout=args.timeout)
             if args.output:
                 lock.write(args.output)
                 print(lock.lock_id)
@@ -326,8 +328,8 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
             return 0
-        if args.command == "ensure":
-            environment = runtime.ensure(EnvironmentLock.load(args.lock), name=args.name)
+        if args.command == "open":
+            environment = runtime.open_exact(EnvironmentLock.load(args.lock), name=args.name)
             _json(environment.inspect().to_dict())
             if args.timings:
                 print(
@@ -342,17 +344,17 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
             return 0
-        if args.command == "pull":
-            runtime.prebuilt = "require"
-            environment = runtime.ensure(EnvironmentLock.load(args.lock), name=args.name)
+        if args.command == "download":
+            runtime.availability = "required"
+            environment = runtime.open_exact(EnvironmentLock.load(args.lock), name=args.name)
             _json(environment.inspect().to_dict())
             return 0
-        if args.command == "build-and-push":
-            environment = runtime.ensure(EnvironmentLock.load(args.lock), name=args.name)
+        if args.command == "build-and-publish":
+            environment = runtime.open_exact(EnvironmentLock.load(args.lock), name=args.name)
             _json(
                 runtime.publish_environment(
                     environment.id,
-                    args.push_to,
+                    args.publish_to,
                     tags=args.tag,
                     finalize=not args.platform_only,
                     sign=args.sign,
@@ -360,7 +362,7 @@ def main(argv: list[str] | None = None) -> int:
                 ).to_dict()
             )
             return 0
-        if args.command == "publish-index":
+        if args.command == "finalize-publication":
             descriptors = []
             for path in args.platform_results:
                 value = json.loads(path.read_text(encoding="utf-8"))
@@ -368,79 +370,79 @@ def main(argv: list[str] | None = None) -> int:
                 if not isinstance(descriptor, dict):
                     raise ValueError(f"invalid platform result: {path}")
                 descriptors.append(descriptor)
-            digest = runtime.publish_environment_index(
-                args.repository, args.lock_id, descriptors, tags=args.tag
+            digest = runtime.finalize_publication(
+                args.library, args.lock_id, descriptors, tags=args.tag
             )
-            _json({"lock_id": args.lock_id, "index_digest": digest})
+            _json({"exact_environment_id": args.lock_id, "publication_id": digest})
             return 0
-        if args.command == "export":
-            _json(runtime.export_environment(args.environment, args.output).to_dict())
+        if args.command == "save-copy":
+            _json(runtime.save_portable_copy(args.environment, args.output).to_dict())
             return 0
-        if args.command == "import":
-            environment = runtime.import_environment(
-                args.bundle, name=args.name, probe=not args.no_probe
+        if args.command == "open-copy":
+            environment = runtime.open_portable_copy(
+                args.copy, name=args.name, probe=not args.no_probe
             )
             _json(environment.inspect().to_dict())
             return 0
-        if args.command == "capsule-create":
-            capsule = runtime.create_capsule(
+        if args.command == "program-create":
+            program = runtime.create_program(
                 args.payload,
-                command=args.capsule_command,
+                command=args.program_command,
                 source_revision=args.source_revision,
                 source_environment_id=args.source_environment_id,
-                source_lock_id=args.source_lock_id,
+                exact_environment_id=args.exact_environment_id,
                 toolchain=args.toolchain,
-                capability_digest=args.capability_digest,
+                capability_id=args.capability_id,
             )
             _json(
                 {
-                    "capsule_id": capsule.id,
-                    "manifest": capsule.manifest.to_dict(),
-                    "path": str(capsule.root),
+                    "program_id": program.id,
+                    "description": program.description.to_dict(),
+                    "location": str(program.root),
                 }
             )
             return 0
-        if args.command == "capsule-export":
-            _json(runtime.export_capsule(args.capsule_id, args.output).to_dict())
+        if args.command == "program-save-copy":
+            _json(runtime.save_program_copy(args.program_id, args.output).to_dict())
             return 0
-        if args.command == "capsule-import":
-            capsule = runtime.import_capsule(args.bundle)
-            _json({"capsule_id": capsule.id, "manifest": capsule.manifest.to_dict()})
+        if args.command == "program-open-copy":
+            program = runtime.open_program_copy(args.copy)
+            _json({"program_id": program.id, "description": program.description.to_dict()})
             return 0
-        if args.command == "capsule-pull":
-            capsule = runtime.pull_capsule(
-                args.repository,
+        if args.command == "program-download":
+            program = runtime.download_program(
+                args.library,
                 args.reference,
                 expected_source_revision=args.source_revision,
             )
-            _json({"capsule_id": capsule.id, "manifest": capsule.manifest.to_dict()})
+            _json({"program_id": program.id, "description": program.description.to_dict()})
             return 0
-        if args.command == "capsule-push":
+        if args.command == "program-publish":
             _json(
-                runtime.publish_capsule(
-                    args.capsule_id,
-                    args.repository,
+                runtime.publish_program(
+                    args.program_id,
+                    args.library,
                     tags=args.tag,
                     sign=args.sign,
                 ).to_dict()
             )
             return 0
-        if args.command == "capsule-publish-index":
+        if args.command == "program-finalize-publication":
             descriptors = []
-            for path in args.platform_results:
+            for path in args.computer_results:
                 value = json.loads(path.read_text(encoding="utf-8"))
-                descriptor = value.get("platform_descriptor") if isinstance(value, dict) else None
+                descriptor = value.get("computer_record") if isinstance(value, dict) else None
                 if not isinstance(descriptor, dict):
-                    raise ValueError(f"invalid capsule platform result: {path}")
+                    raise ValueError(f"invalid program computer result: {path}")
                 descriptors.append(descriptor)
-            digest = runtime.publish_capsule_index(
-                args.repository,
+            digest = runtime.finalize_program_publication(
+                args.library,
                 args.source_revision,
                 descriptors,
                 tags=args.tag,
                 sign=args.sign,
             )
-            _json({"source_revision": args.source_revision, "index_digest": digest})
+            _json({"source_revision": args.source_revision, "publication_id": digest})
             return 0
         if args.command == "inspect":
             subject_path = Path(args.environment).expanduser()
@@ -455,7 +457,7 @@ def main(argv: list[str] | None = None) -> int:
                     "decisions": [item.to_dict() for item in runtime.explain(args.environment)],
                 }
             else:
-                environment = runtime.open(args.environment)
+                environment = runtime.environment(args.environment)
                 payload = {
                     "subject": args.environment,
                     "subject_kind": "environment",
@@ -474,10 +476,10 @@ def main(argv: list[str] | None = None) -> int:
                     ]
             _json(envelope("lean-runtime.inspect/v1", ok=True, data=payload))
             return 0
-        if args.command == "env-list":
+        if args.command == "environments":
             _json(list(runtime.list_environments()))
             return 0
-        if args.command == "cache-status":
+        if args.command == "storage":
             _json(runtime.store_status().to_dict())
             return 0
         if args.command == "doctor":
@@ -502,10 +504,10 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
             return 0 if report.ok else 1
-        if args.command == "diff":
-            difference = runtime.diff(args.left, args.right)
+        if args.command == "compare":
+            difference = runtime.compare(args.left, args.right)
             if args.json:
-                _json(serialize_diff_v1(difference))
+                _json(serialize_comparison_v1(difference))
             elif difference.equal:
                 print("Contexts are identical.")
             else:
@@ -555,23 +557,23 @@ def main(argv: list[str] | None = None) -> int:
             if capture.expected_ok is not None and result.ok != capture.expected_ok:
                 return 1
             return 0 if result.ok else 1
-        if args.command == "gc":
-            gc_report = runtime.gc(
+        if args.command == "clean":
+            gc_report = runtime.clean(
                 dry_run=not args.execute,
                 minimum_age_seconds=args.minimum_age_hours * 3600,
             )
             gc_payload: dict[str, Any] = {
                 "environments": gc_report.to_dict(),
-                "oci_blobs": None,
+                "downloaded_files": None,
             }
-            if args.include_blobs:
-                gc_payload["oci_blobs"] = runtime.gc_oci_blobs(
+            if args.include_downloads:
+                gc_payload["downloaded_files"] = runtime.clean_downloads(
                     dry_run=not args.execute,
                     minimum_age_seconds=args.minimum_age_hours * 3600,
                 ).to_dict()
             _json(
                 envelope(
-                    "lean-runtime.gc/v1",
+                    "lean-runtime.cleanup/v1",
                     ok=True,
                     data=gc_payload,
                 )
@@ -581,14 +583,14 @@ def main(argv: list[str] | None = None) -> int:
             if args.package_refs:
                 if len(args.inputs) != 1:
                     raise ValueError("check with --with expects exactly one FILE")
-                environment = runtime.ensure_references(args.package_refs, toolchain=args.toolchain)
+                environment = runtime.open_references(args.package_refs, toolchain=args.toolchain)
                 source_file = Path(args.inputs[0])
             else:
                 if len(args.inputs) != 2:
                     raise ValueError("check expects ENVIRONMENT FILE, or FILE with --with")
                 if args.toolchain:
                     raise ValueError("check --toolchain is only valid with --with")
-                environment = runtime.open(args.inputs[0])
+                environment = runtime.environment(args.inputs[0])
                 source_file = Path(args.inputs[1])
             if str(source_file) == "-":
                 if args.include:
@@ -602,7 +604,7 @@ def main(argv: list[str] | None = None) -> int:
                     entrypoint=_cli_source_name(source_file),
                     policy=_policy(args),
                 )
-        elif args.command == "raw-check":
+        elif args.command == "check-file":
             if str(args.file) == "-":
                 result = runtime.check(
                     sys.stdin.read(),

@@ -9,7 +9,7 @@ from .lockfiles import EnvironmentLock, LockedPackage
 
 
 @dataclass(frozen=True, slots=True)
-class DiffEntry:
+class ComparisonEntry:
     path: str
     kind: str
     identity_effect: bool
@@ -27,10 +27,10 @@ class DiffEntry:
 
 
 @dataclass(frozen=True, slots=True)
-class ContextDiff:
+class EnvironmentComparison:
     left: dict[str, Any]
     right: dict[str, Any]
-    changes: tuple[DiffEntry, ...]
+    changes: tuple[ComparisonEntry, ...]
 
     @property
     def equal(self) -> bool:
@@ -72,13 +72,13 @@ def _package_fields(package: LockedPackage) -> dict[str, Any]:
     }
 
 
-def diff_locks(left: EnvironmentLock, right: EnvironmentLock) -> ContextDiff:
-    changes: list[DiffEntry] = []
+def compare_locks(left: EnvironmentLock, right: EnvironmentLock) -> EnvironmentComparison:
+    changes: list[ComparisonEntry] = []
     for field in ("toolchain", "spec_digest", "root_lakefile", "root_module", "manifest"):
         before = getattr(left, field)
         after = getattr(right, field)
         if before != after:
-            changes.append(DiffEntry(field, "changed", True, before, after))
+            changes.append(ComparisonEntry(field, "changed", True, before, after))
     left_packages = {item.name: item for item in left.packages}
     right_packages = {item.name: item for item in right.packages}
     for name in sorted(left_packages.keys() | right_packages.keys()):
@@ -87,13 +87,13 @@ def diff_locks(left: EnvironmentLock, right: EnvironmentLock) -> ContextDiff:
         if before is None:
             assert after is not None
             changes.append(
-                DiffEntry(f"packages.{name}", "added", True, None, _package_fields(after))
+                ComparisonEntry(f"packages.{name}", "added", True, None, _package_fields(after))
             )
             continue
         if after is None:
             assert before is not None
             changes.append(
-                DiffEntry(f"packages.{name}", "removed", True, _package_fields(before), None)
+                ComparisonEntry(f"packages.{name}", "removed", True, _package_fields(before), None)
             )
             continue
         before_fields = _package_fields(before)
@@ -101,7 +101,7 @@ def diff_locks(left: EnvironmentLock, right: EnvironmentLock) -> ContextDiff:
         for field in before_fields:
             if before_fields[field] != after_fields[field]:
                 changes.append(
-                    DiffEntry(
+                    ComparisonEntry(
                         f"packages.{name}.{field}",
                         "changed",
                         True,
@@ -109,7 +109,7 @@ def diff_locks(left: EnvironmentLock, right: EnvironmentLock) -> ContextDiff:
                         after_fields[field],
                     )
                 )
-    return ContextDiff(
+    return EnvironmentComparison(
         {"kind": "lock", "lock_id": left.lock_id},
         {"kind": "lock", "lock_id": right.lock_id},
         tuple(changes),

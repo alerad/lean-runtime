@@ -1,5 +1,5 @@
 site_name: Lean Runtime
-site_description: Content-addressed execution environments for Lean 4
+site_description: Exact, reusable environments for Lean projects
 site_url: https://alerad.github.io/lean-runtime/
 repo_url: https://github.com/alerad/lean-runtime
 repo_name: alerad/lean-runtime
@@ -34,11 +34,12 @@ nav:
       - Standalone Lean files: standalone-files.md
       - Environments: environments.md
       - Local Lake projects: local-projects.md
-      - Environment bundles: bundles.md
+      - Portable copies and libraries: portable-copies.md
+      - Ready-to-run programs: ready-programs.md
       - Python API: python-api.md
       - CLI: cli.md
       - Execution captures: captures.md
-      - Verify, diff, profile, and matrix: v1-precision.md
+      - Verify, compare, profile, and matrix: v1-precision.md
       - V1 release case study: case-study-v1.md
   - Concepts:
       - Architecture: architecture.md

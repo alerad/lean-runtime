@@ -60,7 +60,7 @@ class EnvironmentError(LeanRuntimeError):
     """A content-addressed environment could not be opened or built."""
 
 
-class PrebuiltUnavailable(EnvironmentError):
+class DownloadUnavailable(EnvironmentError):
     """A prebuilt cache had no usable artifact or could not be reached."""
 
 

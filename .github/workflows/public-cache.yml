@@ -36,7 +36,7 @@ jobs:
           python - <<'PY'
           import os
           from lean_runtime import Runtime
-          lock = Runtime(caches=[]).resolve_references([os.environ["PACKAGE_REFERENCE"]])
+          lock = Runtime(libraries=[]).prepare_references([os.environ["PACKAGE_REFERENCE"]])
           lock.write("environment.lock.json")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"lock_id={lock.lock_id}\n")
@@ -75,8 +75,8 @@ jobs:
           LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
           LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          lean-runtime --prebuilt never build-and-push environment.lock.json \
-            --push-to oci://ghcr.io/alerad/lean-runtime-cache \
+          lean-runtime --availability local build-and-publish environment.lock.json \
+            --publish-to ghcr.io/alerad/lean-runtime-cache \
             --platform-only --attest > platform-result.json
       - uses: actions/upload-artifact@v4
         with:
@@ -107,8 +107,8 @@ jobs:
           LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           ALIAS_TAG: ${{ inputs.alias-tag }}
         run: |
-          args=(publish-index "${{ needs.resolve.outputs.lock-id }}" results/*.json \
-            --repository oci://ghcr.io/alerad/lean-runtime-cache)
+          args=(finalize-publication "${{ needs.resolve.outputs.lock-id }}" results/*.json \
+            --library ghcr.io/alerad/lean-runtime-cache)
           if [[ -n "$ALIAS_TAG" ]]; then args+=(--tag "$ALIAS_TAG"); fi
           lean-runtime "${args[@]}"
       - name: Verify a clean public-cache client
@@ -118,8 +118,8 @@ jobs:
         run: |
           acceptance_home="$RUNNER_TEMP/lean-runtime-cache-acceptance"
           lean-runtime --home "$acceptance_home" \
-            --cache oci://ghcr.io/alerad/lean-runtime-cache \
-            --prebuilt require pull environment.lock.json --name acceptance
+            --library ghcr.io/alerad/lean-runtime-cache \
+            --availability required download environment.lock.json --name acceptance
           lean-runtime --home "$acceptance_home" verify acceptance --offline
           printf 'import RuntimeEnvironment\n' > Main.lean
           lean-runtime --home "$acceptance_home" check acceptance Main.lean

@@ -46,11 +46,11 @@ def test_aliases_and_garbage_collection(tmp_path: Path) -> None:
     os.utime(retained, (old, old))
     os.utime(candidate, (old, old))
 
-    dry = store.gc(dry_run=True, minimum_age_seconds=0)
+    dry = store.clean(dry_run=True, minimum_age_seconds=0)
     assert dry.candidates == (candidate.name,)
     assert candidate.is_dir()
 
-    applied = store.gc(dry_run=False, minimum_age_seconds=0)
+    applied = store.clean(dry_run=False, minimum_age_seconds=0)
     assert applied.removed == (candidate.name,)
     assert retained.is_dir()
     assert not candidate.exists()
@@ -75,7 +75,7 @@ def test_recent_usage_retains_an_unnamed_environment(tmp_path: Path) -> None:
     environment.mkdir()
     os.utime(environment, (1_000_000_000, 1_000_000_000))
     store.touch_environment(CANDIDATE)
-    report = store.gc(dry_run=True, minimum_age_seconds=60)
+    report = store.clean(dry_run=True, minimum_age_seconds=60)
     assert CANDIDATE in report.retained
 
 
@@ -84,10 +84,10 @@ def test_execution_lease_prevents_collection(tmp_path: Path) -> None:
     environment = store.environment_path(CANDIDATE)
     environment.mkdir()
     with store.execution_lease(CANDIDATE):
-        report = store.gc(dry_run=True, minimum_age_seconds=0)
+        report = store.clean(dry_run=True, minimum_age_seconds=0)
         assert CANDIDATE in report.retained
         assert CANDIDATE not in report.candidates
-    report = store.gc(dry_run=True, minimum_age_seconds=0)
+    report = store.clean(dry_run=True, minimum_age_seconds=0)
     assert CANDIDATE in report.candidates
 
 
@@ -105,18 +105,18 @@ def test_oci_blob_gc_retains_environment_references_and_active_leases(tmp_path: 
     )
 
     with store.oci_blob_lease([f"sha256:{leased}"]):
-        report = store.gc_oci_blobs(dry_run=False, minimum_age_seconds=0)
+        report = store.clean_downloads(dry_run=False, minimum_age_seconds=0)
         assert report.removed == (candidate,)
         assert referenced in report.retained
         assert leased in report.retained
-    assert store.gc_oci_blobs(dry_run=False, minimum_age_seconds=0).removed == (leased,)
+    assert store.clean_downloads(dry_run=False, minimum_age_seconds=0).removed == (leased,)
 
 
 def test_oci_blob_gc_reports_reclaimed_bytes(tmp_path: Path) -> None:
     store = EnvironmentStore(tmp_path)
     digest = "4" * 64
     (store.oci_blobs / digest).write_bytes(b"payload")
-    report = store.gc_oci_blobs(dry_run=False, minimum_age_seconds=0)
+    report = store.clean_downloads(dry_run=False, minimum_age_seconds=0)
     assert report.reclaimed_bytes == len(b"payload")
 
 
