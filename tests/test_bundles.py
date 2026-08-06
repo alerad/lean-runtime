@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import http.server
+import io
 import json
 import os
 import shutil
@@ -15,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from lean_runtime import EnvironmentError, EnvironmentLock, LockedPackage, Runtime
-from lean_runtime.bundles import _oci_archive
+from lean_runtime.bundles import _extract_layer, _oci_archive
 from lean_runtime.environments import ENVIRONMENT_SCHEMA
 from lean_runtime.oci import OCIEnvironmentPublisher, OCIRepository
 from lean_runtime.store import environment_identity, platform_record, source_snapshot_digest
@@ -117,6 +118,57 @@ def _archive_entries(path: Path) -> dict[str, bytes]:
             assert source is not None
             result[member.name] = source.read()
     return result
+
+
+def _layer(*members: tuple[str, str, bytes | str]) -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
+        for kind, name, value in members:
+            info = tarfile.TarInfo(name)
+            info.mode = 0o644
+            if kind == "file":
+                assert isinstance(value, bytes)
+                info.size = len(value)
+                archive.addfile(info, io.BytesIO(value))
+            else:
+                assert kind == "symlink" and isinstance(value, str)
+                info.type = tarfile.SYMTYPE
+                info.linkname = value
+                archive.addfile(info)
+    return output.getvalue()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows runners may not permit symlink creation")
+def test_layer_extract_accepts_internal_parent_symlink(tmp_path: Path) -> None:
+    layer = _layer(
+        ("file", "README.md", b"Batteries\n"),
+        ("symlink", "docs/README.md", "../README.md"),
+    )
+
+    _extract_layer(layer, tmp_path / "output")
+
+    link = tmp_path / "output" / "docs" / "README.md"
+    assert link.is_symlink()
+    assert link.read_text() == "Batteries\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows runners may not permit symlink creation")
+def test_layer_extract_rejects_symlink_outside_destination(tmp_path: Path) -> None:
+    layer = _layer(("symlink", "docs/README.md", "../../outside"))
+
+    with pytest.raises(EnvironmentError, match="unsafe bundle symlink"):
+        _extract_layer(layer, tmp_path / "output")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows runners may not permit symlink creation")
+def test_layer_extract_rejects_later_write_through_symlink(tmp_path: Path) -> None:
+    layer = _layer(
+        ("symlink", "redirect", "inside"),
+        ("file", "redirect/payload", b"must not be written"),
+    )
+
+    with pytest.raises(EnvironmentError, match="traverses an extracted symlink"):
+        _extract_layer(layer, tmp_path / "output")
 
 
 def test_bundle_export_is_deterministic_and_imports_into_fresh_store(tmp_path: Path) -> None:
