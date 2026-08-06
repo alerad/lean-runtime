@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.3
+
+- Accept portable-copy symlinks whose normalized targets remain inside the
+  extracted copy, including common links such as `docs/README.md -> ../README.md`.
+- Continue rejecting absolute or escaping symlink targets, duplicate archive
+  members, and later archive writes that traverse an extracted symlink.
+
 ## 2.0.2
 
 - Remove staged environments safely when Git-for-Windows leaves source pack
