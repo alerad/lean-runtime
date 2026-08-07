@@ -203,9 +203,52 @@ def _require_media_type(descriptor: dict[str, Any], expected: str, label: str) -
 
 def _safe_name(name: str) -> PurePosixPath:
     path = PurePosixPath(name)
-    if not name or path.is_absolute() or ".." in path.parts or "\x00" in name:
+    if (
+        not name
+        or path == PurePosixPath(".")
+        or path.is_absolute()
+        or ".." in path.parts
+        or "\\" in name
+        or "\x00" in name
+    ):
         raise EnvironmentError(f"unsafe bundle member path: {name!r}")
     return path
+
+
+def _internal_link_target(member: PurePosixPath, linkname: str) -> PurePosixPath:
+    link = PurePosixPath(linkname)
+    if not linkname or link.is_absolute() or "\\" in linkname or "\x00" in linkname:
+        raise EnvironmentError(f"unsafe bundle symlink: {member.as_posix()!r}")
+    parts: list[str] = []
+    for part in member.parent.joinpath(link).parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise EnvironmentError(f"unsafe bundle symlink: {member.as_posix()!r}")
+            parts.pop()
+        else:
+            parts.append(part)
+    return PurePosixPath(*parts) if parts else PurePosixPath(".")
+
+
+def _ensure_directories(destination: Path, relative: PurePosixPath) -> None:
+    current = destination
+    for part in relative.parts:
+        if part == ".":
+            continue
+        current = current / part
+        if current.is_symlink():
+            raise EnvironmentError(
+                f"bundle member traverses an extracted symlink: {relative.as_posix()!r}"
+            )
+        if current.exists():
+            if not current.is_dir():
+                raise EnvironmentError(
+                    f"bundle member parent is not a directory: {relative.as_posix()!r}"
+                )
+        else:
+            current.mkdir()
 
 
 def _packages_directory(lock: EnvironmentLock) -> PurePosixPath:
@@ -221,6 +264,8 @@ def _packages_directory(lock: EnvironmentLock) -> PurePosixPath:
 def _extract_layer(data: bytes | Path, destination: Path) -> None:
     total = 0
     count = 0
+    if destination.is_symlink():
+        raise EnvironmentError("bundle extraction destination must not be a symlink")
     destination.mkdir(parents=True, exist_ok=True)
     try:
         if isinstance(data, Path):
@@ -240,10 +285,12 @@ def _extract_layer(data: bytes | Path, destination: Path) -> None:
             relative = _safe_name(member.name)
             target = destination.joinpath(*relative.parts)
             if member.isdir():
-                target.mkdir(parents=True, exist_ok=True)
+                _ensure_directories(destination, relative)
                 target.chmod(member.mode & 0o777)
             elif member.isfile():
-                target.parent.mkdir(parents=True, exist_ok=True)
+                _ensure_directories(destination, relative.parent)
+                if target.exists() or target.is_symlink():
+                    raise EnvironmentError(f"duplicate bundle member: {member.name!r}")
                 source = archive.extractfile(member)
                 if source is None:
                     raise EnvironmentError(f"bundle member has no content: {member.name}")
@@ -251,11 +298,10 @@ def _extract_layer(data: bytes | Path, destination: Path) -> None:
                     shutil.copyfileobj(source, handle)
                 target.chmod(member.mode & 0o777)
             elif member.issym():
-                link = PurePosixPath(member.linkname)
-                resolved = relative.parent.joinpath(link)
-                if link.is_absolute() or ".." in resolved.parts:
-                    raise EnvironmentError(f"unsafe bundle symlink: {member.name!r}")
-                target.parent.mkdir(parents=True, exist_ok=True)
+                _internal_link_target(relative, member.linkname)
+                _ensure_directories(destination, relative.parent)
+                if target.exists() or target.is_symlink():
+                    raise EnvironmentError(f"duplicate bundle member: {member.name!r}")
                 target.symlink_to(member.linkname)
             else:
                 raise EnvironmentError(f"unsupported bundle member: {member.name!r}")
