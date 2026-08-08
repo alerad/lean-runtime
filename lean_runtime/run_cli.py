@@ -9,6 +9,14 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+from .discovery import (
+    Catalog,
+    Discovery,
+    DiscoveryError,
+    DiscoveryPolicy,
+    DiscoveryResult,
+    default_catalog,
+)
 from .errors import LeanRuntimeError, ProjectError, SpecificationError
 from .events import RuntimeEvent
 from .frontmatter import LeanFrontmatter, parse_frontmatter
@@ -42,6 +50,24 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--lock", type=Path, help="use an exact environment lock")
     root.add_argument("--lock-out", type=Path, help="write the resolved exact lock")
     root.add_argument("--toolchain", help="Lean version for a core-only file")
+    root.add_argument("--catalog", type=Path, help="override the bundled discovery catalog")
+    root.add_argument(
+        "--no-discover",
+        action="store_true",
+        help="require explicit context or a pinned Lake project",
+    )
+    root.add_argument(
+        "--offline",
+        action="store_true",
+        help="use retained local environments only",
+    )
+    root.add_argument(
+        "--no-source-build",
+        action="store_true",
+        help="allow verified downloads but do not build missing environments",
+    )
+    root.add_argument("--max-candidates", type=int, default=3)
+    root.add_argument("--discovery-timeout", type=float, default=90.0)
     root.add_argument("--home", help="runtime store root")
     root.add_argument("--json", action="store_true")
     root.add_argument("--quiet", action="store_true")
@@ -53,6 +79,41 @@ def parser() -> argparse.ArgumentParser:
     )
     root.add_argument("--timeout", type=float, default=120)
     return root
+
+
+def _catalog(path: Path | None) -> Catalog:
+    return Catalog.from_file(path.expanduser().resolve()) if path is not None else default_catalog()
+
+
+def _discovery_policy(arguments: argparse.Namespace) -> DiscoveryPolicy:
+    return DiscoveryPolicy(
+        max_candidates=arguments.max_candidates,
+        max_total_seconds=arguments.discovery_timeout,
+        allow_download=not arguments.offline,
+        allow_source_build=not arguments.offline and not arguments.no_source_build,
+        candidate_timeout_seconds=arguments.timeout,
+    )
+
+
+def _discovery_failure(result: DiscoveryResult) -> str:
+    details = [item.detail for item in result.diagnostics]
+    if not details:
+        details = [item.diagnostics[0].detail for item in result.attempts if item.diagnostics]
+    suffix = f" ({len(result.attempts)} candidate(s) tested)" if result.attempts else ""
+    return (details[0] if details else "no compatible environment was found") + suffix
+
+
+def _explain_discovery(arguments: argparse.Namespace, source: str) -> dict[str, object]:
+    plan = Discovery(
+        catalog=_catalog(arguments.catalog),
+        policy=_discovery_policy(arguments),
+    ).plan(source)
+    return {
+        "decision": "automatic_discovery",
+        "context": "catalog candidates",
+        "subject": [candidate.entry.id for candidate in plan.candidates],
+        "plan": plan.to_dict(),
+    }
 
 
 def _combine(arguments: argparse.Namespace, metadata: LeanFrontmatter | None) -> LeanFrontmatter:
@@ -114,27 +175,57 @@ def main(argv: list[str] | None = None) -> int:
             if context.lock is not None:
                 selected = "exact lock"
                 detail = context.lock
+                explanation: dict[str, object] = {
+                    "decision": "context_selected",
+                    "context": selected,
+                    "subject": detail,
+                }
             elif context.requires:
                 selected = "standalone dependencies"
                 detail = ", ".join(context.requires)
+                explanation = {
+                    "decision": "context_selected",
+                    "context": selected,
+                    "subject": detail,
+                }
             elif context.toolchain is not None:
                 selected = "standalone toolchain"
                 detail = context.toolchain
+                explanation = {
+                    "decision": "context_selected",
+                    "context": selected,
+                    "subject": detail,
+                }
             else:
-                project = discover_project(source_path)
-                selected = "local project"
-                detail = str(project.root)
+                try:
+                    project = discover_project(source_path)
+                except ProjectError:
+                    if arguments.no_discover:
+                        raise SpecificationError(
+                            "the file has no explicit context or pinned Lake project"
+                        ) from None
+                    explanation = _explain_discovery(arguments, source)
+                    selected = "automatic discovery"
+                    candidates = explanation["subject"]
+                    if isinstance(candidates, list):
+                        detail = ", ".join(candidates)
+                    else:
+                        detail = str(candidates)
+                else:
+                    selected = "local project"
+                    detail = str(project.root)
+                    explanation = {
+                        "decision": "context_selected",
+                        "context": selected,
+                        "subject": detail,
+                    }
             if arguments.json:
                 print(
                     json.dumps(
                         {
                             "schema": "lean-runtime.inspect/v1",
                             "ok": True,
-                            "data": {
-                                "decision": "context_selected",
-                                "context": selected,
-                                "subject": detail,
-                            },
+                            "data": explanation,
                             "warnings": [],
                             "errors": [],
                         },
@@ -147,9 +238,21 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Context: {selected}\nSelected: {detail}")
             return 0
         preparation_started = time.monotonic()
+        runtime_events: list[RuntimeEvent] = []
+
+        def observe(event: RuntimeEvent) -> None:
+            runtime_events.append(event)
+            if not arguments.quiet and not arguments.json:
+                _progress(event)
+
+        availability = (
+            "local" if arguments.offline else ("required" if arguments.no_source_build else "auto")
+        )
         runtime = Runtime(
             home=arguments.home,
-            on_event=None if arguments.quiet or arguments.json else _progress,
+            on_event=observe,
+            availability=availability,
+            libraries=() if arguments.offline else None,
         )
         policy = ExecutionPolicy(timeout_seconds=arguments.timeout)
         if context.lock is not None:
@@ -180,10 +283,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             result = environment.check(source, filename=source_path.name, policy=policy)
             result = replace(result, timings=(resolution, preparation, *result.timings))
-        elif arguments.lock_out is not None:
-            raise SpecificationError(
-                "--lock-out requires dependencies declared with --with or frontmatter"
-            )
         elif context.toolchain is not None:
             preparation = PhaseTiming(
                 "toolchain", round((time.monotonic() - preparation_started) * 1000)
@@ -195,11 +294,34 @@ def main(argv: list[str] | None = None) -> int:
                     "environment_open", round((time.monotonic() - preparation_started) * 1000)
                 )
                 result = runtime.check_file(source_path, policy=policy)
-            except ProjectError as exc:
-                raise SpecificationError(
-                    "the file has no execution context; add frontmatter, pass --with or "
-                    "--toolchain, provide --lock, or place it in a pinned Lake project"
-                ) from exc
+                if arguments.lock_out is not None:
+                    raise SpecificationError(
+                        "--lock-out is only available for explicit dependencies or discovery"
+                    )
+            except ProjectError:
+                if arguments.no_discover:
+                    raise SpecificationError(
+                        "the file has no execution context; add frontmatter, pass --with or "
+                        "--toolchain, provide --lock, or place it in a pinned Lake project"
+                    ) from None
+                if not arguments.quiet and not arguments.json:
+                    print("lean-run: Discovering an exact environment", file=sys.stderr)
+                discovery_started = time.monotonic()
+                discovered = Discovery(
+                    catalog=_catalog(arguments.catalog),
+                    policy=_discovery_policy(arguments),
+                    runtime=runtime,
+                    runtime_events=runtime_events,
+                ).discover_and_check(source)
+                if discovered.status != "found" or discovered.execution_result is None:
+                    raise SpecificationError(_discovery_failure(discovered)) from None
+                if arguments.lock_out is not None:
+                    assert discovered.lock is not None
+                    discovered.lock.write(arguments.lock_out)
+                preparation = PhaseTiming(
+                    "discovery", round((time.monotonic() - discovery_started) * 1000)
+                )
+                result = discovered.execution_result
         if context.lock is not None or context.toolchain is not None or not context.requires:
             result = replace(result, timings=(preparation, *result.timings))
         _emit(
@@ -209,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
             show_timings=arguments.timings,
         )
         return 0 if result.ok else 1
-    except (LeanRuntimeError, OSError, UnicodeError, ValueError) as exc:
+    except (DiscoveryError, LeanRuntimeError, OSError, UnicodeError, ValueError) as exc:
         if arguments.json:
             print(
                 json.dumps(

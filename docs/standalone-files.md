@@ -6,11 +6,18 @@
 2. `--with` or frontmatter `requires`;
 3. an explicit `--toolchain` or frontmatter `toolchain`;
 4. the nearest pinned local Lake project discovered from the file;
-5. an actionable missing-context error.
+5. bounded discovery from the bundled exact-environment catalog;
+6. an actionable discovery or missing-context error.
 
-Conflicting CLI and frontmatter declarations are rejected. Imports are never
-used to guess repositories or versions because a Lean module name does not
-identify its package source or compatible dependency graph.
+Conflicting CLI and frontmatter declarations are rejected. Imports filter and
+rank curated exact catalog entries; they are never treated as proof that an
+environment is compatible. Runtime materializes each bounded candidate and
+Lean authoritatively checks the source before discovery can succeed.
+
+The bundled bootstrap catalog contains core Lean v4.32.2 plus exact Mathlib
+v4.32.2, v4.31.0, and v4.30.0 locks. `--catalog PATH` selects another validated catalog,
+`--max-candidates` and `--discovery-timeout` bound the search, and
+`--no-discover` restores strict explicit-context behavior.
 
 ## Frontmatter format
 
@@ -35,9 +42,14 @@ non-comment content inside the block, and late frontmatter are errors.
 
 ## Lock output
 
-`--lock-out PATH` is valid only with dependency declarations. It resolves the
-graph, writes the canonical lock, ensures the environment, and still checks the
-file. It cannot be combined with an exact input lock.
+`--lock-out PATH` is valid with dependency declarations or automatic discovery.
+It writes the canonical successful lock, ensures the environment, and still
+checks the file. It cannot be combined with an exact input lock or a mutable
+local project.
+
+Discovery tries local and downloadable environments before a source build.
+`--no-source-build` forbids that fallback; `--offline` permits retained local
+environments only.
 
 ## Output
 

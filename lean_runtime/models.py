@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 Severity = Literal["error", "warning", "information", "unknown"]
 TimingPhase = Literal[
+    "discovery",
     "toolchain",
     "resolution",
     "source_acquisition",
@@ -25,6 +26,7 @@ TimingPhase = Literal[
 ]
 TIMING_PHASES = frozenset(
     {
+        "discovery",
         "toolchain",
         "resolution",
         "source_acquisition",

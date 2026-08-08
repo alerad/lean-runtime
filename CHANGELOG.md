@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Integrate bounded exact-environment discovery into the `lean-runtime` package.
+- Make `lean-run FILE` discover standalone Mathlib environments automatically when
+  no exact context or pinned Lake project is present.
+- Bundle an initial deterministic catalog for core Lean v4.32.2 and Mathlib
+  v4.32.2, v4.31.0, and v4.30.0, including exact Runtime locks and module inventories.
+- Add `lean_runtime.discovery` for explicit planning, catalog, and authoritative
+  discovery APIs, plus the `lean-runtime-catalog` maintainer command.
+
 ## 2.0.3
 
 - Accept portable-copy symlinks whose normalized targets remain inside the
