@@ -11,11 +11,17 @@ lean-run Main.lean --lock environment.lock.json
 lean-run Main.lean --json
 lean-run Main.lean --explain
 lean-run Main.lean --timings
+lean-run Main.lean --lock-out environment.lock.json
+lean-run Main.lean --no-source-build
+lean-run Main.lean --offline
 ```
 
-Use `--lock-out environment.lock.json` with dependencies to retain the exact
-resolved graph. See [Standalone Lean files](standalone-files.md) for frontmatter,
-routing precedence, conflict rules, and output behavior.
+Without explicit context or a pinned Lake project, `lean-run` automatically
+searches its bundled exact-environment catalog. Use `--lock-out` to retain the
+successful lock, `--no-discover` to require explicit context,
+`--catalog PATH` to override the catalog, and `--max-candidates` plus
+`--discovery-timeout` to bound search. See
+[Standalone Lean files](standalone-files.md) for routing and policy details.
 
 ## `lean-runtime`
 

@@ -22,7 +22,22 @@ lean-run MyProject/Main.lean
 Lean Runtime walks upward to the nearest `lakefile.toml` or `lakefile.lean` with
 a `lean-toolchain`, then checks the actual project-relative path.
 
-Standalone files can declare their context in strict TOML frontmatter:
+Standalone files can be checked directly:
+
+```lean
+import Mathlib
+example : 2 + 2 = 4 := by norm_num
+```
+
+```bash
+lean-run Main.lean
+```
+
+`lean-run` uses its bundled catalog to rank a bounded set of exact environments,
+then lets Lean determine which candidate accepts the source. Use
+`--lock-out environment.lock.json` to pin the successful environment.
+
+Strict TOML frontmatter remains available when the context is already known:
 
 ```lean
 -- /// lean-runtime
@@ -30,11 +45,6 @@ Standalone files can declare their context in strict TOML frontmatter:
 -- ///
 
 import Mathlib
-example : 2 + 2 = 4 := by norm_num
-```
-
-```bash
-lean-run Main.lean
 ```
 
 Dependencies may instead be supplied without editing the file:

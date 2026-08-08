@@ -27,6 +27,30 @@ result = lean.check_file("./my-project/MyProject/Main.lean")
 result = lean.replay("execution.capture.json")
 ```
 
+## Environment discovery
+
+The `lean-run` command performs discovery automatically for context-free
+standalone files. Applications can use the same bounded planner and
+compiler-authoritative search explicitly:
+
+```python
+from lean_runtime.discovery import Discovery, default_catalog
+
+discovery = Discovery(catalog=default_catalog())
+result = discovery.discover_and_check("""
+import Mathlib
+example : 2 + 2 = 4 := by norm_num
+""")
+result.raise_for_error()
+
+print(result.lock_id)
+print(result.environment_id)
+```
+
+Every successful result contains the exact `EnvironmentLock` accepted by Lean.
+Pass that lock to ordinary Runtime operations to bypass discovery on future
+runs. Planning metadata narrows candidates but never asserts compatibility.
+
 ## Results
 
 Results remain inspectable values. Scripts that prefer exceptions can use:
