@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 2.0.6
+
+- Preserve the highest-ranked Lean compiler rejection when automatic discovery
+  exhausts its candidates, including raw output and parsed diagnostics in both
+  human and JSON `lean-run` output.
+- Add line-oriented and NDJSON request/response helpers to `InteractiveSession`
+  for incremental REPLs and ready-to-run checker programs.
+
 ## 2.0.5
 
 - Integrate bounded exact-environment discovery into the `lean-runtime` package.

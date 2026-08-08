@@ -17,7 +17,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Generic, TextIO, TypeVar, cast
+from typing import Any, Generic, Literal, TextIO, TypeVar, cast
 
 from ._git import git_command
 from ._paths import remove_tree
@@ -291,6 +291,7 @@ class InteractiveSession:
         self._cleanup = cleanup
         self._result: ExecutionResult | None = None
         self._closing = threading.Lock()
+        self._io = threading.RLock()
 
     @property
     def stdin(self) -> TextIO:
@@ -315,6 +316,63 @@ class InteractiveSession:
     def poll(self) -> int | None:
         """Return the process exit code, or ``None`` while it is running."""
         return self._process.poll()
+
+    def _reader(self, stream: Literal["stdout", "stderr"]) -> InteractiveTextReader:
+        if stream == "stdout":
+            return self.stdout
+        if stream == "stderr":
+            return self.stderr
+        raise ValueError("stream must be 'stdout' or 'stderr'")
+
+    def send_line(self, line: str) -> None:
+        """Send and flush one line-oriented protocol request."""
+        if not isinstance(line, str):
+            raise TypeError("interactive request must be a string")
+        if "\n" in line or "\r" in line:
+            raise ValueError("interactive request must contain exactly one line")
+        with self._io:
+            if not self.running:
+                raise EnvironmentError("interactive process is not running")
+            try:
+                self.stdin.write(line + "\n")
+                self.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError) as exc:
+                raise EnvironmentError("interactive process did not accept the request") from exc
+
+    def read_line(self, *, stream: Literal["stdout", "stderr"] = "stdout") -> str:
+        """Read one response line from stdout or stderr."""
+        with self._io:
+            response = self._reader(stream).readline()
+            if response == "":
+                raise EnvironmentError(
+                    f"interactive process ended before producing a {stream} response"
+                )
+            return response.removesuffix("\n").removesuffix("\r")
+
+    def request_line(
+        self,
+        line: str,
+        *,
+        response_stream: Literal["stdout", "stderr"] = "stdout",
+    ) -> str:
+        """Atomically send one line and read its corresponding response."""
+        with self._io:
+            self.send_line(line)
+            return self.read_line(stream=response_stream)
+
+    def request_json(
+        self,
+        value: object,
+        *,
+        response_stream: Literal["stdout", "stderr"] = "stdout",
+    ) -> Any:
+        """Round-trip one newline-delimited JSON value through the live process."""
+        request = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        response = self.request_line(request, response_stream=response_stream)
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError as exc:
+            raise EnvironmentError("interactive process returned invalid JSON") from exc
 
     def close(self) -> ExecutionResult:
         """Send EOF, stop if necessary, persist provenance, and remove the instance."""

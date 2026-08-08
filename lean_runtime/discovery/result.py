@@ -124,9 +124,22 @@ class DiscoveryResult:
         compiled = next((item for item in self.attempts if item.status == "compiled"), None)
         return compiled.environment_id if compiled is not None else None
 
+    @property
+    def rejection_attempt(self) -> CandidateAttempt | None:
+        """Return the highest-ranked attempt for which Lean rejected the source."""
+        return next(
+            (
+                attempt
+                for attempt in self.attempts
+                if attempt.status == "lean_rejected" and attempt.execution_result is not None
+            ),
+            None,
+        )
+
     def raise_for_error(self) -> DiscoveryResult:
         if self.status != "found":
-            detail = self.diagnostics[0].detail if self.diagnostics else self.status
+            details = [item.detail for item in self.diagnostics]
+            detail = ": ".join(dict.fromkeys(details)) if details else self.status
             raise DiscoveryError(f"Lean environment discovery did not succeed: {detail}")
         return self
 

@@ -1,20 +1,27 @@
+import json
 from pathlib import Path
 
 from lean_runtime import ProjectError
-from lean_runtime.models import ExecutionResult
+from lean_runtime.models import Diagnostic, ExecutionResult
 from lean_runtime.run_cli import main
 
 
-def _result() -> ExecutionResult:
+def _result(
+    *,
+    ok: bool = True,
+    stderr: str = "",
+    diagnostics: tuple[Diagnostic, ...] = (),
+) -> ExecutionResult:
     return ExecutionResult(
-        ok=True,
-        exit_code=0,
+        ok=ok,
+        exit_code=0 if ok else 1,
         toolchain="leanprover/lean4:v4.32.0",
         command=("lean", "Main.lean"),
         cwd="/tmp",
         stdout="",
-        stderr="",
+        stderr=stderr,
         elapsed_seconds=0.01,
+        diagnostics=diagnostics,
     )
 
 
@@ -156,6 +163,65 @@ def test_lean_run_discovers_standalone_file_and_writes_lock(
     assert main([str(source), "--lock-out", str(output), "--quiet"]) == 0
     assert Found.lock.written == output
     assert "accepted" in capsys.readouterr().out
+
+
+def test_lean_run_preserves_discovered_compiler_rejection(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("import Mathlib\nexample : False := by trivial\n")
+    rejection = _result(
+        ok=False,
+        stderr="Main.lean:2:22: error: tactic 'trivial' failed",
+        diagnostics=(
+            Diagnostic(
+                "error",
+                "tactic 'trivial' failed",
+                file="Main.lean",
+                line=2,
+                column=22,
+            ),
+        ),
+    )
+
+    class NoProjectRuntime(FakeRuntime):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.availability = "auto"
+            self.libraries = ()
+
+        def check_file(self, *_args, **_kwargs) -> ExecutionResult:
+            raise ProjectError("no project")
+
+    class Attempt:
+        execution_result = rejection
+
+    class Rejected:
+        status = "not_found"
+        execution_result = None
+        rejection_attempt = Attempt()
+
+    class FakeDiscovery:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def discover_and_check(self, _source: str) -> Rejected:
+            return Rejected()
+
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", NoProjectRuntime)
+    monkeypatch.setattr("lean_runtime.run_cli.Discovery", FakeDiscovery)
+
+    assert main([str(source), "--quiet"]) == 1
+    captured = capsys.readouterr()
+    assert "tactic 'trivial' failed" in captured.err
+    assert "rejected" in captured.out
+
+    assert main([str(source), "--json", "--quiet"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["data"]["stderr"].endswith("tactic 'trivial' failed")
+    assert payload["data"]["diagnostics"][0]["message"] == "tactic 'trivial' failed"
+    assert payload["data"]["timings"][0]["phase"] == "discovery"
 
 
 def test_lean_run_can_disable_automatic_discovery(monkeypatch, tmp_path: Path, capsys) -> None:

@@ -336,11 +336,17 @@ def discover(
             DISCOVERY_EXHAUSTED,
             f"Lean did not accept the source in any of {len(attempts)} tested candidates",
         )
+    rejection_diagnostics = tuple(
+        diagnostic
+        for attempt in attempts
+        if attempt.status == "lean_rejected"
+        for diagnostic in attempt.diagnostics
+    )
     return DiscoveryResult(
         status="not_found",
         confidence="exhausted",
         plan=plan,
         attempts=tuple(attempts),
         duration_seconds=time.monotonic() - started,
-        diagnostics=(reason,),
+        diagnostics=(reason, *rejection_diagnostics),
     )

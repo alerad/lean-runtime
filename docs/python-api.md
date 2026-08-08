@@ -179,9 +179,7 @@ with environment.spawn_interactive(
     policy=ExecutionPolicy(timeout_seconds=3600, memory_mb=4096),
 ) as session:
     request = {"id": 1, "method": "get_info", "params": {}}
-    session.stdin.write(json.dumps(request) + "\n")
-    session.stdin.flush()
-    response = json.loads(session.stdout.readline())
+    response = session.request_json(request)
     assert session.running
 
 result = session.close()
@@ -198,6 +196,12 @@ unwinding.
 the original text is still returned to the caller. Callers of tools that emit
 substantial data on both streams should drain both streams to avoid ordinary
 subprocess pipe backpressure.
+
+For line-oriented tools, `send_line()` and `read_line()` provide incremental
+REPL-style access. `request_line()` serializes one request/response exchange,
+and `request_json()` does the same for NDJSON protocols. The request helpers
+are locked so concurrent callers cannot interleave protocol frames. The raw
+`stdin`, `stdout`, and `stderr` pipes remain available for other protocols.
 
 ## Progress events
 

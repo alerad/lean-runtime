@@ -314,14 +314,18 @@ def main(argv: list[str] | None = None) -> int:
                     runtime_events=runtime_events,
                 ).discover_and_check(source)
                 if discovered.status != "found" or discovered.execution_result is None:
-                    raise SpecificationError(_discovery_failure(discovered)) from None
-                if arguments.lock_out is not None:
-                    assert discovered.lock is not None
-                    discovered.lock.write(arguments.lock_out)
+                    rejection = discovered.rejection_attempt
+                    if rejection is None or rejection.execution_result is None:
+                        raise SpecificationError(_discovery_failure(discovered)) from None
+                    result = rejection.execution_result
+                else:
+                    if arguments.lock_out is not None:
+                        assert discovered.lock is not None
+                        discovered.lock.write(arguments.lock_out)
+                    result = discovered.execution_result
                 preparation = PhaseTiming(
                     "discovery", round((time.monotonic() - discovery_started) * 1000)
                 )
-                result = discovered.execution_result
         if context.lock is not None or context.toolchain is not None or not context.requires:
             result = replace(result, timings=(preparation, *result.timings))
         _emit(

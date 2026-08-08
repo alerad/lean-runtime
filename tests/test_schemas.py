@@ -58,7 +58,7 @@ def test_execution_success_fixture_matches_v1_schema() -> None:
         stdout="",
         stderr="",
         elapsed_seconds=0.01,
-        timings=(PhaseTiming("execution", 10),),
+        timings=(PhaseTiming("discovery", 5), PhaseTiming("execution", 10)),
     )
     _validator("execution-v1.schema.json").validate(serialize_execution_v1(result))
 
