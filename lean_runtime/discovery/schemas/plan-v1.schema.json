@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alerad/lean-runtime/schemas/discovery/plan-v1.schema.json",
+  "title": "Lean Runtime discovery planning envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "ok", "data", "warnings", "errors"],
+  "properties": {
+    "schema": {"const": "lean-runtime.discovery.plan/v1"},
+    "ok": {"type": "boolean"},
+    "data": {"type": ["object", "null"]},
+    "warnings": {"type": "array"},
+    "errors": {"type": "array"}
+  }
+}

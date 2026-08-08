@@ -27,13 +27,9 @@ Inside an existing pinned Lake project, just pass the file:
 lean-run MyProject/Main.lean
 ```
 
-For a portable standalone file, declare exact dependencies in TOML frontmatter:
+Standalone files do not need a throwaway Lake project or dependency declaration:
 
 ```lean
--- /// lean-runtime
--- requires = ["mathlib@v4.32.2"]
--- ///
-
 import Mathlib
 
 example : 2 + 2 = 4 := by norm_num
@@ -43,13 +39,38 @@ example : 2 + 2 = 4 := by norm_num
 lean-run Main.lean
 ```
 
+When no explicit context or pinned Lake project exists, `lean-run` analyzes imports,
+ranks a bounded set of exact environments from its bundled catalog, and asks Lean to
+check each candidate. The successful exact lock is retained by Runtime. Pin it for
+portable reuse whenever desired:
+
+```bash
+lean-run Main.lean --lock-out environment.lock.json
+lean-run Main.lean --lock environment.lock.json
+```
+
+The initial catalog covers core Lean v4.32.2 plus Mathlib v4.32.2, v4.31.0, and
+v4.30.0. Runtime first tries its local store and downloadable environment libraries,
+then builds the exact source environment when necessary. Use `--no-source-build` to
+forbid that potentially large fallback or `--offline` to use retained environments only.
+
+Explicit frontmatter remains available when the desired context is already known:
+
+```lean
+-- /// lean-runtime
+-- requires = ["mathlib@v4.32.2"]
+-- ///
+
+import Mathlib
+```
+
 The same context can be supplied from the command line:
 
 ```bash
 lean-run Main.lean --with mathlib@v4.32.2
 ```
 
-Create an exact lock for CI without changing the file:
+Create an exact lock from an explicit dependency for CI without changing the file:
 
 ```bash
 lean-run Main.lean --with mathlib@v4.32.2 \

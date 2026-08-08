@@ -30,6 +30,19 @@ major transitive libraries:
 python scripts/run_compatibility.py compatibility/mathlib-4.32.2.json
 ```
 
+The bundled discovery catalog is generated deterministically from exact locks:
+
+```bash
+lean-runtime-catalog build catalog/environments.toml \
+  --runtime-home .catalog-runtime \
+  --output lean_runtime/discovery/data/catalog.json
+```
+
+Missing locks are resolved once; existing locks remain authoritative. Module
+inventories come from Runtime-validated exact source snapshots. The builder
+sets Mathlib's `MATHLIB_NO_CACHE_ON_UPDATE=1` by default because catalog
+generation does not require the multi-gigabyte compiled cache.
+
 ## Release focus
 
 The decisive invariant is:

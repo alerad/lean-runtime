@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from lean_runtime import ProjectError
 from lean_runtime.models import ExecutionResult
 from lean_runtime.run_cli import main
 
@@ -120,3 +121,60 @@ def test_lean_run_explains_explicit_dependencies_without_execution(
     output = capsys.readouterr().out
     assert "Context: standalone dependencies" in output
     assert "mathlib@v4.32.2" in output
+
+
+def test_lean_run_discovers_standalone_file_and_writes_lock(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("import Mathlib\nexample : 2 + 2 = 4 := by norm_num\n")
+    output = tmp_path / "environment.lock.json"
+
+    class NoProjectRuntime(FakeRuntime):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.availability = "auto"
+            self.libraries = ()
+
+        def check_file(self, *_args, **_kwargs) -> ExecutionResult:
+            raise ProjectError("no project")
+
+    class Found:
+        status = "found"
+        execution_result = _result()
+        lock = Lock()
+
+    class FakeDiscovery:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def discover_and_check(self, _source: str) -> Found:
+            return Found()
+
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", NoProjectRuntime)
+    monkeypatch.setattr("lean_runtime.run_cli.Discovery", FakeDiscovery)
+    assert main([str(source), "--lock-out", str(output), "--quiet"]) == 0
+    assert Found.lock.written == output
+    assert "accepted" in capsys.readouterr().out
+
+
+def test_lean_run_can_disable_automatic_discovery(monkeypatch, tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("import Mathlib\n")
+
+    class NoProjectRuntime(FakeRuntime):
+        def check_file(self, *_args, **_kwargs) -> ExecutionResult:
+            raise ProjectError("no project")
+
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", NoProjectRuntime)
+    assert main([str(source), "--no-discover", "--quiet"]) == 2
+    assert "no execution context" in capsys.readouterr().err
+
+
+def test_lean_run_explains_bundled_catalog_candidates(tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("import Mathlib\n")
+    assert main([str(source), "--explain"]) == 0
+    output = capsys.readouterr().out
+    assert "Context: automatic discovery" in output
+    assert "mathlib-v4.32.2" in output

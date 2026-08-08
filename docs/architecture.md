@@ -77,6 +77,33 @@ instead of treating a package's development pin as a version constraint.
 Lean Runtime does not interpret semantic-version constraints or invent a
 second dependency solver.
 
+## Discovery
+
+Discovery is an internal subsystem layered above the exact Runtime API:
+
+```text
+Lean source
+    │
+    ▼
+static evidence + exact catalog
+    │
+    ▼
+bounded candidate plan
+    │
+    ▼
+Runtime.open_exact(candidate lock)
+    │
+    ▼
+Lean acceptance or rejection
+```
+
+Catalog metadata and deterministic scores only choose which exact locks to
+try. A candidate succeeds exclusively when Runtime materializes its verified
+identity and Lean accepts the source. Discovery does not resolve transitive
+dependencies, alter environment identity, infer minimum versions, or replace
+Lake. Once a lock is found, callers can use the ordinary deterministic Runtime
+path directly.
+
 ## Materialization
 
 Materialization is guarded by an OS-level cross-process lock. A process builds

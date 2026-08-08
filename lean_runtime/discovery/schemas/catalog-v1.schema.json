@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alerad/lean-runtime/schemas/discovery/catalog-v1.schema.json",
+  "title": "Lean Runtime discovery catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "generated_at", "entries"],
+  "properties": {
+    "schema": {"const": "lean-runtime.discovery.catalog/v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "channel", "toolchain", "lock_id", "lock", "modules", "library_hints", "created_at"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "channel": {"type": "string", "minLength": 1},
+          "toolchain": {"type": "string", "minLength": 1},
+          "lock_id": {"type": "string", "pattern": "^lock_[0-9a-f]{64}$"},
+          "lock": {"type": "object"},
+          "modules": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "library_hints": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "created_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  }
+}

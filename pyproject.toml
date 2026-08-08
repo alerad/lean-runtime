@@ -37,12 +37,14 @@ Changelog = "https://github.com/alerad/lean-runtime/blob/main/CHANGELOG.md"
 [project.scripts]
 lean-runtime = "lean_runtime.cli:main"
 lean-run = "lean_runtime.run_cli:main"
+lean-runtime-catalog = "lean_runtime.discovery.catalog_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["lean_runtime*"]
 
 [tool.setuptools.package-data]
 lean_runtime = ["py.typed"]
+"lean_runtime.discovery" = ["py.typed", "data/*.json", "schemas/*.json"]
 
 [tool.setuptools.data-files]
 "share/lean-runtime/schemas" = ["schemas/*.json"]

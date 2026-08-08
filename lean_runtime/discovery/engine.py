@@ -1,0 +1,346 @@
+"""Bounded authoritative candidate orchestration."""
+
+from __future__ import annotations
+
+import threading
+import time
+
+from ..errors import LeanRuntimeError
+from .candidate import DiscoveryPlan
+from .probe import CandidateProbe, ProbeIntegrityFailure, ProbeUnavailable
+from .result import AttemptStatus, CandidateAttempt, DiscoveryResult, ResultDiagnostic
+
+DISCOVERY_FOUND = "DISCOVERY_FOUND"
+DISCOVERY_CANDIDATE_LIMIT = "DISCOVERY_CANDIDATE_LIMIT"
+DISCOVERY_TIME_LIMIT = "DISCOVERY_TIME_LIMIT"
+DISCOVERY_NO_CANDIDATES = "DISCOVERY_NO_CANDIDATES"
+DISCOVERY_EXHAUSTED = "DISCOVERY_EXHAUSTED"
+DISCOVERY_EXPLICIT_LOCK = "DISCOVERY_EXPLICIT_LOCK"
+DISCOVERY_CANCELLED = "DISCOVERY_CANCELLED"
+DISCOVERY_RUNTIME_ERROR = "DISCOVERY_RUNTIME_ERROR"
+CANDIDATE_LEAN_REJECTED = "CANDIDATE_LEAN_REJECTED"
+CANDIDATE_UNAVAILABLE = "CANDIDATE_UNAVAILABLE"
+CANDIDATE_INTEGRITY_FAILURE = "CANDIDATE_INTEGRITY_FAILURE"
+CANDIDATE_TIMEOUT = "CANDIDATE_TIMEOUT"
+CANDIDATE_CANCELLED = "CANDIDATE_CANCELLED"
+CANDIDATE_RUNTIME_ERROR = "CANDIDATE_RUNTIME_ERROR"
+
+
+class _AttemptCancellation:
+    def __init__(self, timeout_seconds: float, external: threading.Event | None) -> None:
+        self.cancel = threading.Event()
+        self.timed_out = threading.Event()
+        self._stop = threading.Event()
+        self._timer = threading.Timer(timeout_seconds, self._expire)
+        self._timer.daemon = True
+        self._relay: threading.Thread | None = None
+        if external is not None:
+            self._relay = threading.Thread(
+                target=self._relay_external,
+                args=(external,),
+                daemon=True,
+            )
+
+    def _expire(self) -> None:
+        self.timed_out.set()
+        self.cancel.set()
+
+    def _relay_external(self, external: threading.Event) -> None:
+        while not self._stop.wait(0.05):
+            if external.is_set():
+                self.cancel.set()
+                return
+
+    def __enter__(self) -> _AttemptCancellation:
+        self._timer.start()
+        if self._relay is not None:
+            self._relay.start()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self._stop.set()
+        self._timer.cancel()
+        if self._relay is not None:
+            self._relay.join(timeout=0.1)
+
+
+def _diagnostic(code: str, detail: str) -> tuple[ResultDiagnostic, ...]:
+    return (ResultDiagnostic(code=code, detail=detail),)
+
+
+def _rejection_detail(stderr: str, stdout: str) -> str:
+    return stderr.strip() or stdout.strip() or "Lean rejected the source"
+
+
+def discover(
+    source: str,
+    plan: DiscoveryPlan,
+    probe: CandidateProbe | None,
+    *,
+    cancel: threading.Event | None = None,
+) -> DiscoveryResult:
+    """Execute a plan sequentially and return only compiler-backed success."""
+
+    started = time.monotonic()
+    if plan.explicit_lock is not None:
+        return DiscoveryResult(
+            status="invalid_request",
+            confidence="exhausted",
+            plan=plan,
+            attempts=(),
+            duration_seconds=time.monotonic() - started,
+            diagnostics=_diagnostic(
+                DISCOVERY_EXPLICIT_LOCK,
+                "source already declares an exact Runtime lock; open it directly",
+            ),
+        )
+    if not plan.candidates:
+        return DiscoveryResult(
+            status="not_found",
+            confidence="exhausted",
+            plan=plan,
+            attempts=(),
+            duration_seconds=time.monotonic() - started,
+            diagnostics=_diagnostic(
+                DISCOVERY_NO_CANDIDATES, "catalog contains no plausible candidate"
+            ),
+        )
+
+    deadline = started + plan.policy.max_total_seconds
+    if probe is None:
+        raise ValueError("an authoritative candidate probe is required")
+    attempts: list[CandidateAttempt] = []
+    for candidate in plan.candidates:
+        if cancel is not None and cancel.is_set():
+            return DiscoveryResult(
+                status="cancelled",
+                confidence="exhausted",
+                plan=plan,
+                attempts=tuple(attempts),
+                duration_seconds=time.monotonic() - started,
+                diagnostics=_diagnostic(DISCOVERY_CANCELLED, "discovery was cancelled"),
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return DiscoveryResult(
+                status="not_found",
+                confidence="exhausted",
+                plan=plan,
+                attempts=tuple(attempts),
+                duration_seconds=time.monotonic() - started,
+                diagnostics=_diagnostic(DISCOVERY_TIME_LIMIT, "total search budget expired"),
+            )
+        timeout = min(
+            remaining,
+            plan.policy.candidate_timeout_seconds or remaining,
+        )
+        attempt_started = time.monotonic()
+        with _AttemptCancellation(timeout, cancel) as attempt_cancel:
+            try:
+                outcome = probe.check(
+                    candidate,
+                    source,
+                    timeout_seconds=timeout,
+                    cancel=attempt_cancel.cancel,
+                )
+            except ProbeIntegrityFailure as exc:
+                attempt = CandidateAttempt(
+                    candidate_id=candidate.entry.id,
+                    lock_id=candidate.entry.lock.lock_id,
+                    status="environment_integrity_failure",
+                    duration_seconds=time.monotonic() - attempt_started,
+                    diagnostics=_diagnostic(CANDIDATE_INTEGRITY_FAILURE, str(exc)),
+                )
+                attempts.append(attempt)
+                return DiscoveryResult(
+                    status="failed",
+                    confidence="exhausted",
+                    plan=plan,
+                    attempts=tuple(attempts),
+                    duration_seconds=time.monotonic() - started,
+                    diagnostics=attempt.diagnostics,
+                )
+            except ProbeUnavailable as exc:
+                if cancel is not None and cancel.is_set():
+                    attempt = CandidateAttempt(
+                        candidate_id=candidate.entry.id,
+                        lock_id=candidate.entry.lock.lock_id,
+                        status="cancelled",
+                        duration_seconds=time.monotonic() - attempt_started,
+                        diagnostics=_diagnostic(CANDIDATE_CANCELLED, str(exc)),
+                    )
+                    attempts.append(attempt)
+                    return DiscoveryResult(
+                        status="cancelled",
+                        confidence="exhausted",
+                        plan=plan,
+                        attempts=tuple(attempts),
+                        duration_seconds=time.monotonic() - started,
+                        diagnostics=attempt.diagnostics,
+                    )
+                unavailable_status: AttemptStatus = (
+                    "timeout" if attempt_cancel.timed_out.is_set() else "environment_unavailable"
+                )
+                code = (
+                    CANDIDATE_TIMEOUT if unavailable_status == "timeout" else CANDIDATE_UNAVAILABLE
+                )
+                attempts.append(
+                    CandidateAttempt(
+                        candidate_id=candidate.entry.id,
+                        lock_id=candidate.entry.lock.lock_id,
+                        status=unavailable_status,
+                        duration_seconds=time.monotonic() - attempt_started,
+                        diagnostics=_diagnostic(code, str(exc)),
+                    )
+                )
+                continue
+            except LeanRuntimeError as exc:
+                if cancel is not None and cancel.is_set():
+                    error_status: AttemptStatus = "cancelled"
+                    code = CANDIDATE_CANCELLED
+                elif attempt_cancel.timed_out.is_set():
+                    error_status = "timeout"
+                    code = CANDIDATE_TIMEOUT
+                else:
+                    error_status = "runtime_error"
+                    code = CANDIDATE_RUNTIME_ERROR
+                attempt = CandidateAttempt(
+                    candidate_id=candidate.entry.id,
+                    lock_id=candidate.entry.lock.lock_id,
+                    status=error_status,
+                    duration_seconds=time.monotonic() - attempt_started,
+                    diagnostics=_diagnostic(code, str(exc)),
+                )
+                attempts.append(attempt)
+                if error_status == "timeout":
+                    continue
+                return DiscoveryResult(
+                    status="cancelled" if error_status == "cancelled" else "failed",
+                    confidence="exhausted",
+                    plan=plan,
+                    attempts=tuple(attempts),
+                    duration_seconds=time.monotonic() - started,
+                    diagnostics=attempt.diagnostics,
+                )
+            except Exception as exc:  # defensive adapter boundary
+                attempt = CandidateAttempt(
+                    candidate_id=candidate.entry.id,
+                    lock_id=candidate.entry.lock.lock_id,
+                    status="runtime_error",
+                    duration_seconds=time.monotonic() - attempt_started,
+                    diagnostics=_diagnostic(CANDIDATE_RUNTIME_ERROR, str(exc)),
+                )
+                attempts.append(attempt)
+                return DiscoveryResult(
+                    status="failed",
+                    confidence="exhausted",
+                    plan=plan,
+                    attempts=tuple(attempts),
+                    duration_seconds=time.monotonic() - started,
+                    diagnostics=_diagnostic(DISCOVERY_RUNTIME_ERROR, str(exc)),
+                )
+
+        result = outcome.execution_result
+        attempt_duration = time.monotonic() - attempt_started
+        identity_error: str | None = None
+        if result.lock_id is not None and result.lock_id != candidate.entry.lock.lock_id:
+            identity_error = "Runtime execution lock does not match the candidate lock"
+        elif result.environment_id is not None and result.environment_id != outcome.environment_id:
+            identity_error = "Runtime execution environment does not match the opened environment"
+        elif result.toolchain != candidate.entry.toolchain:
+            identity_error = "Runtime execution toolchain does not match the candidate toolchain"
+        if identity_error is not None:
+            attempt = CandidateAttempt(
+                candidate_id=candidate.entry.id,
+                lock_id=candidate.entry.lock.lock_id,
+                status="environment_integrity_failure",
+                duration_seconds=attempt_duration,
+                acquisition=outcome.acquisition,
+                environment_id=outcome.environment_id,
+                execution_id=result.execution_id,
+                execution_result=result,
+                diagnostics=_diagnostic(CANDIDATE_INTEGRITY_FAILURE, identity_error),
+            )
+            attempts.append(attempt)
+            return DiscoveryResult(
+                status="failed",
+                confidence="exhausted",
+                plan=plan,
+                attempts=tuple(attempts),
+                duration_seconds=time.monotonic() - started,
+                diagnostics=attempt.diagnostics,
+            )
+        if cancel is not None and cancel.is_set():
+            outcome_status: AttemptStatus = "cancelled"
+            code = CANDIDATE_CANCELLED
+            detail = "candidate execution was cancelled"
+        elif result.timed_out or attempt_cancel.timed_out.is_set():
+            outcome_status = "timeout"
+            code = CANDIDATE_TIMEOUT
+            detail = "candidate execution exceeded its time budget"
+        elif result.cancelled:
+            outcome_status = "cancelled"
+            code = CANDIDATE_CANCELLED
+            detail = "candidate execution was cancelled"
+        elif result.ok:
+            outcome_status = "compiled"
+            code = DISCOVERY_FOUND
+            detail = "Lean accepted the source in this exact environment"
+        else:
+            outcome_status = "lean_rejected"
+            code = CANDIDATE_LEAN_REJECTED
+            detail = _rejection_detail(result.stderr, result.stdout)
+        attempt = CandidateAttempt(
+            candidate_id=candidate.entry.id,
+            lock_id=candidate.entry.lock.lock_id,
+            status=outcome_status,
+            duration_seconds=attempt_duration,
+            acquisition=outcome.acquisition,
+            environment_id=outcome.environment_id,
+            execution_id=result.execution_id,
+            execution_result=result,
+            diagnostics=_diagnostic(code, detail),
+        )
+        attempts.append(attempt)
+        if outcome_status == "compiled":
+            return DiscoveryResult(
+                status="found",
+                confidence="compiled",
+                plan=plan,
+                selected_candidate=candidate,
+                lock=candidate.entry.lock,
+                execution_result=result,
+                attempts=tuple(attempts),
+                duration_seconds=time.monotonic() - started,
+                diagnostics=_diagnostic(DISCOVERY_FOUND, detail),
+            )
+        if outcome_status == "cancelled":
+            return DiscoveryResult(
+                status="cancelled",
+                confidence="exhausted",
+                plan=plan,
+                attempts=tuple(attempts),
+                duration_seconds=time.monotonic() - started,
+                diagnostics=attempt.diagnostics,
+            )
+
+    if time.monotonic() >= deadline:
+        reason = ResultDiagnostic(DISCOVERY_TIME_LIMIT, "total search budget expired")
+    elif plan.truncated:
+        reason = ResultDiagnostic(
+            DISCOVERY_CANDIDATE_LIMIT,
+            f"tested {len(attempts)} candidates; additional plausible candidates were bounded",
+        )
+    else:
+        reason = ResultDiagnostic(
+            DISCOVERY_EXHAUSTED,
+            f"Lean did not accept the source in any of {len(attempts)} tested candidates",
+        )
+    return DiscoveryResult(
+        status="not_found",
+        confidence="exhausted",
+        plan=plan,
+        attempts=tuple(attempts),
+        duration_seconds=time.monotonic() - started,
+        diagnostics=(reason,),
+    )
