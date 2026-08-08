@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.5
+
 - Integrate bounded exact-environment discovery into the `lean-runtime` package.
 - Make `lean-run FILE` discover standalone Mathlib environments automatically when
   no exact context or pinned Lake project is present.
@@ -9,6 +11,9 @@
   v4.32.2, v4.31.0, and v4.30.0, including exact Runtime locks and module inventories.
 - Add `lean_runtime.discovery` for explicit planning, catalog, and authoritative
   discovery APIs, plus the `lean-runtime-catalog` maintainer command.
+
+Version 2.0.4 was not published because its release tag retained 2.0.3 package
+metadata.
 
 ## 2.0.3
 
