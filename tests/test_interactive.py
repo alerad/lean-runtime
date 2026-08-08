@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from lean_runtime import EnvironmentLock, ExecutionPolicy
+from lean_runtime import EnvironmentError, EnvironmentLock, ExecutionPolicy
 from lean_runtime.backends import LocalBackend
 from lean_runtime.environments import Environment, EnvironmentManager
 from lean_runtime.store import EnvironmentStore
@@ -79,9 +79,7 @@ def test_interactive_session_round_trips_and_records_transcript(tmp_path: Path) 
         execution_id = session.execution_id
         assert session.running
         assert session.poll() is None
-        session.stdin.write("hello lean\n")
-        session.stdin.flush()
-        assert session.stdout.readline() == "HELLO LEAN\n"
+        assert session.request_line("hello lean") == "HELLO LEAN"
         assert any(environment.manager.store.jobs.iterdir())
 
     result = session.close()
@@ -95,6 +93,23 @@ def test_interactive_session_round_trips_and_records_transcript(tmp_path: Path) 
     assert session.close() is result
     record = json.loads((environment.manager.store.executions / f"{execution_id}.json").read_text())
     assert record["operation"] == "interactive"
+
+
+def test_interactive_session_round_trips_ndjson(tmp_path: Path) -> None:
+    environment = _environment(tmp_path)
+    script = (
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        " value = json.loads(line)\n"
+        " print(json.dumps({'id': value['id'], 'answer': value['value'] + 1}), flush=True)"
+    )
+    with environment.spawn_interactive([sys.executable, "-u", "-c", script]) as session:
+        assert session.request_json({"id": 7, "value": 41}) == {"id": 7, "answer": 42}
+        with pytest.raises(ValueError, match="exactly one line"):
+            session.send_line("first\nsecond")
+
+    with pytest.raises(EnvironmentError, match="not running"):
+        session.send_line("late request")
 
 
 def test_interactive_timeout_is_enforced_and_instance_is_removed(tmp_path: Path) -> None:

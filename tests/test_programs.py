@@ -34,9 +34,7 @@ def test_program_identity_payload_validation_and_interactive_execution(tmp_path:
 
     assert program.id.startswith("program_")
     with program.spawn_interactive(policy=ExecutionPolicy(timeout_seconds=10)) as session:
-        session.stdin.write('{"ping":true}\n')
-        session.stdin.flush()
-        assert session.stdout.readline() == '{"ping":true}\n'
+        assert session.request_json({"ping": True}) == {"ping": True}
     assert session.close().provenance is not None
     assert session.close().provenance.program_id == program.id
 

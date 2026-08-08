@@ -20,10 +20,13 @@ program = runtime.create_program(
 )
 
 with program.spawn_interactive() as session:
-    session.stdin.write("hello\n")
-    session.stdin.flush()
-    print(session.stdout.readline())
+    print(session.request_line("hello"))
 ```
+
+For an NDJSON checker, `session.request_json({...})` keeps the compiled process
+alive and returns one decoded response per request. This is the fast path for
+large batches: prepare and verify the checker once, then stream compact inputs
+instead of elaborating a new Lean source file for every item.
 
 `create_program` records the program's files and computer compatibility. Opening
 it later with `runtime.program(program.id)` verifies that neither has changed.

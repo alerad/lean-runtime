@@ -7,7 +7,13 @@ from dataclasses import dataclass, field
 import pytest
 
 from lean_runtime import ExecutionResult, Runtime
-from lean_runtime.discovery import Discovery, DiscoveryPolicy, PolicyError, ProbeOutcome
+from lean_runtime.discovery import (
+    Discovery,
+    DiscoveryError,
+    DiscoveryPolicy,
+    PolicyError,
+    ProbeOutcome,
+)
 from lean_runtime.discovery.candidate import Candidate
 from lean_runtime.discovery.probe import ProbeIntegrityFailure, ProbeUnavailable
 
@@ -85,6 +91,25 @@ def test_candidate_budget_never_opens_bounded_candidate(sample_catalog) -> None:
     assert len(result.attempts) == 1
     assert result.diagnostics[0].code == "DISCOVERY_CANDIDATE_LIMIT"
     assert probe.opened == ["mathlib-new"]
+
+
+def test_exhaustion_surfaces_the_highest_ranked_lean_rejection(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    probe = FakeProbe({"mathlib-new": execution(False, stderr="type mismatch")})
+    result = Discovery(
+        catalog=sample_catalog,
+        policy=DiscoveryPolicy(max_candidates=1),
+        probe=probe,
+    ).discover_and_check("import Mathlib\n")
+
+    assert result.status == "not_found"
+    assert result.rejection_attempt is result.attempts[0]
+    assert [item.code for item in result.diagnostics] == [
+        "DISCOVERY_CANDIDATE_LIMIT",
+        "CANDIDATE_LEAN_REJECTED",
+    ]
+    assert result.diagnostics[1].detail == "type mismatch"
+    with pytest.raises(DiscoveryError, match="type mismatch"):
+        result.raise_for_error()
 
 
 def test_unavailable_candidate_advances(sample_catalog) -> None:  # type: ignore[no-untyped-def]
