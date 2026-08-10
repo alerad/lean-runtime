@@ -18,8 +18,14 @@ import pytest
 from lean_runtime import EnvironmentError, EnvironmentLock, LockedPackage, Runtime
 from lean_runtime.bundles import _extract_layer, _oci_archive
 from lean_runtime.environments import ENVIRONMENT_SCHEMA
-from lean_runtime.oci import OCIEnvironmentPublisher, OCIRepository
-from lean_runtime.store import environment_identity, platform_record, source_snapshot_digest
+from lean_runtime.events import EventEmitter
+from lean_runtime.oci import OCIEnvironmentPublisher, OCIRegistryClient, OCIRepository
+from lean_runtime.store import (
+    EnvironmentStore,
+    environment_identity,
+    platform_record,
+    source_snapshot_digest,
+)
 
 
 def _git_package(path: Path) -> tuple[str, str]:
@@ -397,6 +403,52 @@ def test_transparent_authenticated_oci_pull_and_blob_reuse(tmp_path: Path) -> No
         shutil.rmtree(runtime.store.environment_path(environment_id))
         runtime.open_exact(lock)
         assert len([path for path in requests if "/blobs/" in path]) == first_blob_requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_oci_blob_integrity_failure_retries_once_from_scratch(tmp_path: Path) -> None:
+    data = b"verified layer contents"
+    digest = "sha256:" + hashlib.sha256(data).hexdigest()
+    requests = 0
+    cache_controls: list[str | None] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            nonlocal requests
+            requests += 1
+            cache_controls.append(self.headers.get("Cache-Control"))
+            response = b"x" * len(data) if requests == 1 else data
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    events = []
+    try:
+        repository = OCIRepository.parse(
+            f"oci+http://127.0.0.1:{server.server_port}/owner/cache"
+        )
+        path = OCIRegistryClient(repository).download_blob(
+            {"digest": digest, "size": len(data)},
+            EnvironmentStore(tmp_path / "consumer"),
+            EventEmitter(events.append),
+        )
+        assert path.read_bytes() == data
+        assert requests == 2
+        assert cache_controls == [None, "no-cache"]
+        assert [event.kind for event in events].count("library.layer_download_retry") == 1
+        starts = [event for event in events if event.kind == "library.layer_download_started"]
+        assert [event.data["attempt"] for event in starts] == [1, 2]
+        assert starts[1].data["resumed_bytes"] == 0
     finally:
         server.shutdown()
         server.server_close()
