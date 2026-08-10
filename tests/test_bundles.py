@@ -434,9 +434,7 @@ def test_oci_blob_integrity_failure_retries_once_from_scratch(tmp_path: Path) ->
     thread.start()
     events = []
     try:
-        repository = OCIRepository.parse(
-            f"oci+http://127.0.0.1:{server.server_port}/owner/cache"
-        )
+        repository = OCIRepository.parse(f"oci+http://127.0.0.1:{server.server_port}/owner/cache")
         path = OCIRegistryClient(repository).download_blob(
             {"digest": digest, "size": len(data)},
             EnvironmentStore(tmp_path / "consumer"),
