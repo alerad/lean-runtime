@@ -34,6 +34,7 @@ def _progress(event: RuntimeEvent) -> None:
         "package_reference.started": "Resolving dependency",
         "library.lookup": "Looking for a cached environment",
         "library.layer_download_started": "Downloading cached environment",
+        "library.layer_download_retry": "Retrying cached-environment download",
         "environment.build_started": "Building environment",
         "environment.cache_hit": "Using local environment",
     }

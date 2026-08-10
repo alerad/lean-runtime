@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Retry an OCI layer once from a clean partial after size or SHA-256 integrity
+  verification fails, bypassing intermediary caches while preserving strict
+  digest validation and emitting structured retry diagnostics.
+
 ## 2.0.6
 
 - Preserve the highest-ranked Lean compiler rejection when automatic discovery

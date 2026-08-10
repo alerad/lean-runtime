@@ -32,6 +32,7 @@ _BEARER_PARAMETER = re.compile(r'([a-zA-Z]+)="([^"]*)"')
 _DIGEST = re.compile(r"sha256:([0-9a-f]{64})")
 _ACCEPT = ", ".join((INDEX_MEDIA_TYPE, MANIFEST_MEDIA_TYPE))
 DEFAULT_ENVIRONMENT_LIBRARIES = ("oci://ghcr.io/alerad/lean-runtime-cache",)
+_BLOB_INTEGRITY_ATTEMPTS = 2
 
 
 class SignatureVerifier(Protocol):
@@ -215,52 +216,73 @@ class OCIRegistryClient:
                     return destination
                 destination.unlink()
             temporary = destination.with_name(f".{destination.name}.partial")
-            if temporary.exists() and temporary.stat().st_size > size:
-                temporary.unlink()
-            offset = temporary.stat().st_size if temporary.exists() else 0
-            request = urllib.request.Request(self._url(f"blobs/{digest}"))
-            if offset:
-                request.add_header("Range", f"bytes={offset}-")
-            events.emit(
-                "library.layer_download_started",
-                "Downloading OCI blob",
-                digest=digest,
-                size=size,
-            )
-            observed = hashlib.sha256()
-            written = offset
-            if offset:
-                with temporary.open("rb") as existing:
-                    for chunk in iter(lambda: existing.read(1024 * 1024), b""):
-                        observed.update(chunk)
-            try:
-                response = self._request(request)
-                if offset and response.status != 206:
-                    offset = 0
-                    written = 0
-                    observed = hashlib.sha256()
+            for attempt in range(1, _BLOB_INTEGRITY_ATTEMPTS + 1):
+                if temporary.exists() and temporary.stat().st_size > size:
+                    temporary.unlink()
+                offset = temporary.stat().st_size if temporary.exists() else 0
+                request = urllib.request.Request(self._url(f"blobs/{digest}"))
                 if offset:
-                    content_range = response.headers.get("Content-Range", "")
-                    if not content_range.startswith(f"bytes {offset}-"):
-                        response.close()
-                        temporary.unlink(missing_ok=True)
-                        raise EnvironmentError("OCI registry returned an invalid byte range")
-                mode = "ab" if offset else "wb"
-                with response, temporary.open(mode) as output:
-                    while chunk := response.read(1024 * 1024):
-                        written += len(chunk)
-                        if written > size:
-                            raise EnvironmentError("OCI blob exceeds its declared size")
-                        observed.update(chunk)
-                        output.write(chunk)
-                if written != size or "sha256:" + observed.hexdigest() != digest:
+                    request.add_header("Range", f"bytes={offset}-")
+                if attempt > 1:
+                    request.add_header("Cache-Control", "no-cache")
+                events.emit(
+                    "library.layer_download_started",
+                    "Downloading OCI blob",
+                    digest=digest,
+                    size=size,
+                    attempt=attempt,
+                    resumed_bytes=offset,
+                )
+                observed = hashlib.sha256()
+                written = offset
+                if offset:
+                    with temporary.open("rb") as existing:
+                        for chunk in iter(lambda: existing.read(1024 * 1024), b""):
+                            observed.update(chunk)
+                try:
+                    response = self._request(request)
+                    if offset and response.status != 206:
+                        offset = 0
+                        written = 0
+                        observed = hashlib.sha256()
+                    if offset:
+                        content_range = response.headers.get("Content-Range", "")
+                        if not content_range.startswith(f"bytes {offset}-"):
+                            response.close()
+                            temporary.unlink(missing_ok=True)
+                            raise EnvironmentError("OCI registry returned an invalid byte range")
+                    mode = "ab" if offset else "wb"
+                    with response, temporary.open(mode) as output:
+                        while chunk := response.read(1024 * 1024):
+                            written += len(chunk)
+                            if written > size:
+                                raise EnvironmentError("OCI blob exceeds its declared size")
+                            observed.update(chunk)
+                            output.write(chunk)
+                    observed_digest = "sha256:" + observed.hexdigest()
+                    if written == size and observed_digest == digest:
+                        temporary.replace(destination)
+                        break
                     temporary.unlink(missing_ok=True)
-                    raise EnvironmentError("downloaded OCI blob failed digest verification")
-                temporary.replace(destination)
-            except urllib.error.HTTPError as exc:
-                raise DownloadUnavailable(f"OCI blob download failed: HTTP {exc.code}") from exc
-            except OSError as exc:
-                raise DownloadUnavailable(f"OCI blob download failed: {exc}") from exc
+                    if attempt == _BLOB_INTEGRITY_ATTEMPTS:
+                        raise EnvironmentError(
+                            "downloaded OCI blob failed digest verification "
+                            f"after {attempt} attempts (expected {digest}, got "
+                            f"{observed_digest}, bytes {written}/{size})"
+                        )
+                    events.emit(
+                        "library.layer_download_retry",
+                        "Retrying OCI blob after integrity verification failed",
+                        digest=digest,
+                        attempt=attempt + 1,
+                        observed_digest=observed_digest,
+                        downloaded_bytes=written,
+                        expected_bytes=size,
+                    )
+                except urllib.error.HTTPError as exc:
+                    raise DownloadUnavailable(f"OCI blob download failed: HTTP {exc.code}") from exc
+                except OSError as exc:
+                    raise DownloadUnavailable(f"OCI blob download failed: {exc}") from exc
         return destination
 
     def blob_exists(self, digest: str) -> bool:
