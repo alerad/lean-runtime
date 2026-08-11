@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add a fail-closed release toolkit: `scripts/registry_preflight.py` verifies
+  every bundled catalog entry is anonymously downloadable, and the
+  announcement-gate workflow runs the advertised PyPI journeys on clean
+  unauthenticated Linux and macOS runners (dispatch + daily canary).
+- `lean-run` now warns loudly when a downloadable environment is unavailable
+  and states that source builds can take 30+ minutes, with a
+  `--no-source-build` hint, instead of falling back silently.
+
 ## 2.1.0 - 2026-08-11
 
 - Add `lean-runtime toolchain-slim` and

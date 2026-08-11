@@ -36,9 +36,18 @@ def _progress(event: RuntimeEvent) -> None:
         "library.layer_download_started": "Downloading cached environment",
         "library.layer_download_retry": "Retrying cached-environment download",
         "toolchain.install_started": "Installing Lean toolchain (a first run can take minutes)",
-        "environment.build_started": "Building environment",
+        "environment.build_started": "Building environment from source (large dependencies "
+        "such as Mathlib can take 30+ minutes; pass --no-source-build to fail fast instead)",
         "environment.cache_hit": "Using local environment",
     }
+    if event.kind == "availability.fallback":
+        library = event.data.get("library", "environment library")
+        reason = event.data.get("reason_code") or event.data.get("reason") or "unavailable"
+        print(
+            f"lean-run: WARNING: downloadable environment unavailable from {library} ({reason})",
+            file=sys.stderr,
+        )
+        return
     message = messages.get(event.kind)
     if message:
         package = f" {event.data['reference']}" if "reference" in event.data else ""
