@@ -253,6 +253,8 @@ def test_lean_run_rewrites_staged_paths_to_the_user_path(
     source.write_text("example : 2 + 2 = 5 := rfl\n")
     staged = "/store/jobs/execution_ab/instance-cd"
 
+    dependency = f"{staged}/.lake/packages/batteries/Batteries/Data/Nat.lean"
+
     class RejectingRuntime(FakeRuntime):
         def check_file(self, path, *, toolchain=None, policy=None) -> ExecutionResult:
             del path, toolchain, policy
@@ -262,7 +264,10 @@ def test_lean_run_rewrites_staged_paths_to_the_user_path(
                 toolchain="leanprover/lean4:v4.32.0",
                 command=("lean", f"{staged}/Bad.lean"),
                 cwd=staged,
-                stdout=f"{staged}/Bad.lean:1:23: error: Type mismatch\n",
+                stdout=(
+                    f"{staged}/Bad.lean:1:23: error: Type mismatch\n"
+                    f"{dependency}:4:0: warning: declaration uses 'sorry'\n"
+                ),
                 stderr="",
                 elapsed_seconds=0.01,
             )
@@ -271,5 +276,7 @@ def test_lean_run_rewrites_staged_paths_to_the_user_path(
     assert main([str(source), "--quiet", "--toolchain", "v4.32.0"]) == 1
     captured = capsys.readouterr()
     assert f"{source}:1:23: error: Type mismatch" in captured.out
-    assert staged not in captured.out
+    assert f"{staged}/Bad.lean" not in captured.out
     assert f"✗ {source} rejected" in captured.out
+    # Only the staged entrypoint is rewritten; dependency paths are untouched.
+    assert f"{dependency}:4:0: warning" in captured.out

@@ -378,3 +378,11 @@ def test_injected_runtime_cannot_weaken_source_build_policy(
     runtime = Runtime(home=tmp_path / "runtime", availability="auto", libraries=())
     with pytest.raises(PolicyError, match="source fallback"):
         Discovery(catalog=sample_catalog, runtime=runtime).discover_and_check("import Mathlib\n")
+
+
+def test_probe_types_are_publicly_importable() -> None:
+    from lean_runtime.discovery import AcquiredCandidate as PublicAcquired
+    from lean_runtime.discovery import CandidateProbe as PublicProbe
+
+    assert PublicAcquired is AcquiredCandidate
+    assert PublicProbe is not None
