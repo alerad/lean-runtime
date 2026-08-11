@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.0 - 2026-08-11
 
 - Add `lean-runtime toolchain-slim` and
   `ToolchainManager.materialize_slim()`: a verified check-profile toolchain
