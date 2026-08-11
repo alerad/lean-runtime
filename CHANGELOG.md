@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.7
+
 - Retry an OCI layer once from a clean partial after size or SHA-256 integrity
   verification fails, bypassing intermediary caches while preserving strict
   digest validation and emitting structured retry diagnostics.
