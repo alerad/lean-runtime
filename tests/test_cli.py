@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from lean_runtime.bundles import PortableCopyInfo
 from lean_runtime.cli import _print_operation_failure, main, parser
@@ -170,6 +171,44 @@ def test_save_copy_cli_reports_copy_identity(monkeypatch, tmp_path: Path, capsys
     monkeypatch.setattr("lean_runtime.cli.Runtime.save_portable_copy", lambda *_args: info)
     assert main(["--quiet", "save-copy", "demo", "--output", str(output)]) == 0
     assert json.loads(capsys.readouterr().out)["copy_id"] == info.copy_id
+
+
+def test_program_create_cli_loads_content_addressed_provenance(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"example.protocol.version": "1.0.0"}))
+    observed = {}
+
+    def create_program(_runtime, selected_payload, **options):
+        observed.update(payload=selected_payload, **options)
+        return SimpleNamespace(
+            id="program_" + "a" * 64,
+            description=SimpleNamespace(to_dict=lambda: {"schema": "test"}),
+            root=payload,
+        )
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.create_program", create_program)
+    assert (
+        main(
+            [
+                "--quiet",
+                "program-create",
+                str(payload),
+                "--command",
+                "bin/checker",
+                "--source-revision",
+                "b" * 40,
+                "--provenance-file",
+                str(profile),
+            ]
+        )
+        == 0
+    )
+    assert observed["provenance"] == {"example.protocol.version": "1.0.0"}
+    assert json.loads(capsys.readouterr().out)["program_id"].startswith("program_")
 
 
 def test_finalize_publication_reads_computer_records(monkeypatch, tmp_path: Path, capsys) -> None:

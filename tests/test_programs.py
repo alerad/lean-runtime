@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from lean_runtime import EnvironmentError, ExecutionPolicy, Runtime
+from lean_runtime.programs import LEGACY_PROGRAM_SCHEMA, ProgramDescription
 
 
 def _revision() -> str:
@@ -30,6 +31,10 @@ def test_program_identity_payload_validation_and_interactive_execution(tmp_path:
         source_revision=_revision(),
         toolchain="leanprover/lean4:v4.32.2",
         capability_id="sha256:" + hashlib.sha256(b"capabilities").hexdigest(),
+        provenance={
+            "lean.toolchain": "leanprover/lean4:v4.32.2",
+            "leancert.core.revision": "b" * 40,
+        },
     )
 
     assert program.id.startswith("program_")
@@ -40,6 +45,40 @@ def test_program_identity_payload_validation_and_interactive_execution(tmp_path:
 
     reopened = runtime.program(program.id)
     assert reopened.description.source_revision == _revision()
+    assert reopened.description.provenance["leancert.core.revision"] == "b" * 40
+
+
+def test_program_provenance_is_content_addressed(tmp_path: Path) -> None:
+    runtime = Runtime(home=tmp_path / "runtime")
+    payload = _payload(tmp_path)
+    first = runtime.create_program(
+        payload,
+        command=("echo-bridge",),
+        source_revision=_revision(),
+        provenance={"leancert.core.revision": "b" * 40},
+    )
+    second = runtime.create_program(
+        payload,
+        command=("echo-bridge",),
+        source_revision=_revision(),
+        provenance={"leancert.core.revision": "c" * 40},
+    )
+
+    assert first.id != second.id
+
+
+def test_legacy_program_identity_remains_stable() -> None:
+    description = ProgramDescription(
+        command=("echo-bridge",),
+        files={"echo-bridge": {"kind": "file", "sha256": "sha256:" + "0" * 64}},
+        computer_compatibility={"schema": "computer/1"},
+        source_revision=_revision(),
+        schema=LEGACY_PROGRAM_SCHEMA,
+    )
+
+    restored = ProgramDescription.from_dict(description.to_dict())
+    assert restored.program_id == description.program_id
+    assert "provenance" not in restored.to_dict()
 
 
 def test_program_rejects_payload_tampering(tmp_path: Path) -> None:

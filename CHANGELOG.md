@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 2.0.8 - 2026-08-10
+
+- Add immutable, content-addressed provenance to ready-to-run program
+  descriptions and accept it through `program-create --provenance-file`.
+- Preserve the identity and import compatibility of existing version 1 program
+  descriptions while emitting version 2 descriptions for newly created programs.
+
 ## 2.0.7
 
 - Retry an OCI layer once from a clean partial after size or SHA-256 integrity
