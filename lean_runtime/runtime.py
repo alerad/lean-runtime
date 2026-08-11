@@ -171,6 +171,7 @@ class Runtime:
         name: str | None = None,
         build_profile: str = "release",
         build_timeout: float = 1800,
+        accelerate: bool = False,
         cancel: threading.Event | None = None,
     ) -> Environment:
         environment_id = environment_identity(lock, build_profile)
@@ -209,6 +210,7 @@ class Runtime:
             name=name,
             build_profile=build_profile,
             build_timeout=build_timeout,
+            accelerate=accelerate,
             cancel=cancel,
         )
 

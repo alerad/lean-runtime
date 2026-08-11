@@ -153,6 +153,13 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="publish blobs and platform manifest without updating the lock index",
     )
+    push.add_argument(
+        "--accelerate",
+        action="store_true",
+        help="hydrate artifacts from known package caches (e.g. Mathlib's) for locked "
+        "packages without an artifact command; the lock identity is unchanged and the "
+        "built environment is still probe-verified before publication",
+    )
     push.add_argument("--sign", action="store_true", help="sign the published lock index")
     push.add_argument(
         "--attest", action="store_true", help="publish a signed source/probe attestation"
@@ -391,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
                 EnvironmentLock.load(args.lock),
                 name=args.name,
                 build_timeout=args.timeout,
+                accelerate=args.accelerate,
             )
             _json(
                 runtime.publish_environment(
