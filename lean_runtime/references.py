@@ -41,6 +41,20 @@ PACKAGE_ALIASES: dict[str, tuple[str, str, tuple[str, ...]]] = {
 }
 
 
+def artifact_accelerators() -> dict[str, tuple[str, ...]]:
+    """Map canonical package URLs to their known artifact-cache commands.
+
+    Used by opt-in build acceleration for locks whose packages carry no
+    ``artifact_command`` of their own. Keyed by exact URL so a fork that
+    merely shares a package name is never accelerated.
+    """
+    return {
+        f"https://github.com/{owner}/{repository}.git": command
+        for owner, repository, command in PACKAGE_ALIASES.values()
+        if command
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class PackageReference:
     """A human-friendly reference to one Git-hosted Lean package."""

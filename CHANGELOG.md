@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add `build-and-publish --accelerate`: hydrate artifacts from known package
+  caches (Mathlib's `lake exe cache get`) for locked packages that carry no
+  artifact command of their own. Acceleration is keyed by exact canonical
+  package URL, never changes the lock identity, is recorded in the hydration
+  report, and the built environment is still probe-verified before
+  publication. The public-cache workflow uses it, turning multi-hour Mathlib
+  source builds into minutes.
 - Add a fail-closed release toolkit: `scripts/registry_preflight.py` verifies
   every bundled catalog entry is anonymously downloadable, and the
   announcement-gate workflow runs the advertised PyPI journeys on clean

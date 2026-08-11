@@ -80,6 +80,7 @@ jobs:
           lean-runtime --availability local build-and-publish environment.lock.json \
             --publish-to ghcr.io/alerad/lean-runtime-cache \
             --timeout 18000 \
+            --accelerate \
             --platform-only --attest > platform-result.json
       - uses: actions/upload-artifact@v4
         with:

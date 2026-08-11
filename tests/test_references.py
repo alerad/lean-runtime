@@ -181,3 +181,19 @@ def test_reference_toolchains_must_agree_without_an_override(
     spec = runtime.spec_from_references(references, toolchain="4.32.0")
     assert spec.toolchain == "leanprover/lean4:v4.32.0"
     assert [package.name for package in spec.packages] == ["package1", "package2"]
+
+
+def test_artifact_accelerators_key_canonical_urls_only() -> None:
+    from lean_runtime.references import artifact_accelerators
+
+    accelerators = artifact_accelerators()
+    assert accelerators["https://github.com/leanprover-community/mathlib4.git"] == (
+        "lake",
+        "exe",
+        "cache",
+        "get",
+    )
+    # Aliases without a cache command must not appear.
+    assert not any("leancert" in url for url in accelerators)
+    # A fork sharing the package name is keyed out by URL.
+    assert "https://github.com/someone-else/mathlib4.git" not in accelerators
