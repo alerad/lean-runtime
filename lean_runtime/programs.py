@@ -14,9 +14,10 @@ import tempfile
 import uuid
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, cast
 
 from ._paths import remove_tree
@@ -47,8 +48,10 @@ from .policies import ExecutionPolicy
 from .serialization import canonical_json_bytes, sha256_id, write_json_atomic
 from .store import EnvironmentStore, clone_tree, platform_compatibility, platform_record
 
-PROGRAM_SCHEMA = "lean-runtime-execution-program/1"
-PROGRAM_CONFIG_MEDIA_TYPE = "application/vnd.lean-runtime.program.config.v1+json"
+LEGACY_PROGRAM_SCHEMA = "lean-runtime-execution-program/1"
+PROGRAM_SCHEMA = "lean-runtime-execution-program/2"
+LEGACY_PROGRAM_CONFIG_MEDIA_TYPE = "application/vnd.lean-runtime.program.config.v1+json"
+PROGRAM_CONFIG_MEDIA_TYPE = "application/vnd.lean-runtime.program.config.v2+json"
 PROGRAM_LAYER_MEDIA_TYPE = "application/vnd.lean-runtime.program.layer.v1.tar+gzip"
 _PROGRAM_ID = re.compile(r"program_[0-9a-f]{64}")
 
@@ -106,11 +109,14 @@ class ProgramDescription:
     exact_environment_id: str | None = None
     toolchain: str = "unknown"
     capability_id: str | None = None
+    provenance: Mapping[str, str] = field(default_factory=dict)
     schema: str = PROGRAM_SCHEMA
 
     def __post_init__(self) -> None:
-        if self.schema != PROGRAM_SCHEMA:
+        if self.schema not in {LEGACY_PROGRAM_SCHEMA, PROGRAM_SCHEMA}:
             raise EnvironmentError(f"unsupported program schema: {self.schema!r}")
+        if self.schema == LEGACY_PROGRAM_SCHEMA and self.provenance:
+            raise EnvironmentError("legacy program descriptions cannot contain provenance")
         if not self.command or any(not isinstance(part, str) or not part for part in self.command):
             raise EnvironmentError("program command must contain non-empty strings")
         _relative_executable(self.command[0])
@@ -118,13 +124,26 @@ class ProgramDescription:
             raise EnvironmentError("program command executable is absent from its file inventory")
         if not re.fullmatch(r"[0-9a-f]{40,64}", self.source_revision):
             raise EnvironmentError("program source revision must be an exact Git commit")
+        if not all(
+            isinstance(key, str)
+            and bool(re.fullmatch(r"[a-z0-9][a-z0-9._-]*", key))
+            and isinstance(value, str)
+            and bool(value)
+            for key, value in self.provenance.items()
+        ):
+            raise EnvironmentError(
+                "program provenance must contain non-empty string values under canonical keys"
+            )
+        object.__setattr__(
+            self, "provenance", MappingProxyType(dict(sorted(self.provenance.items())))
+        )
 
     @property
     def program_id(self) -> str:
         return sha256_id("program", self.to_dict(include_id=False))
 
     def to_dict(self, *, include_id: bool = True) -> dict[str, Any]:
-        value = {
+        value: dict[str, Any] = {
             "schema": self.schema,
             "command": list(self.command),
             "files": dict(sorted(self.files.items())),
@@ -135,6 +154,8 @@ class ProgramDescription:
             "toolchain": self.toolchain,
             "capability_id": self.capability_id,
         }
+        if self.schema == PROGRAM_SCHEMA:
+            value["provenance"] = dict(sorted(self.provenance.items()))
         return {"program_id": self.program_id, **value} if include_id else value
 
     @classmethod
@@ -150,6 +171,10 @@ class ProgramDescription:
             raise EnvironmentError("program manifest file inventory is invalid")
         if not isinstance(compatibility, dict):
             raise EnvironmentError("program platform compatibility is invalid")
+        schema = str(value.get("schema", ""))
+        provenance = value.get("provenance", {})
+        if not isinstance(provenance, dict):
+            raise EnvironmentError("program provenance is invalid")
         manifest = cls(
             command=tuple(command),
             files={str(name): dict(record) for name, record in files.items()},
@@ -169,7 +194,8 @@ class ProgramDescription:
             capability_id=(
                 str(value["capability_id"]) if value.get("capability_id") is not None else None
             ),
-            schema=str(value.get("schema", "")),
+            provenance={str(key): item for key, item in provenance.items()},
+            schema=schema,
         )
         recorded = value.get("program_id")
         if recorded is not None and recorded != manifest.program_id:
@@ -323,6 +349,7 @@ class ProgramManager:
         exact_environment_id: str | None = None,
         toolchain: str = "unknown",
         capability_id: str | None = None,
+        provenance: Mapping[str, str] | None = None,
     ) -> ReadyProgram:
         payload = payload.expanduser().resolve()
         if not payload.is_dir():
@@ -336,6 +363,7 @@ class ProgramManager:
             exact_environment_id=exact_environment_id,
             toolchain=toolchain,
             capability_id=capability_id,
+            provenance=dict(provenance or {}),
         )
         destination = self.store.programs / manifest.program_id
         with FileLock(self.store.lock_dir / f"{manifest.program_id}.lock", timeout=1800):
@@ -392,7 +420,12 @@ class ProgramManager:
                 )
                 config_path = staging / "config.json"
                 config_path.write_bytes(canonical_json_bytes(program.description.to_dict()))
-                config = _blob_descriptor_path(config_path, PROGRAM_CONFIG_MEDIA_TYPE)
+                config_media_type = (
+                    LEGACY_PROGRAM_CONFIG_MEDIA_TYPE
+                    if program.description.schema == LEGACY_PROGRAM_SCHEMA
+                    else PROGRAM_CONFIG_MEDIA_TYPE
+                )
+                config = _blob_descriptor_path(config_path, config_media_type)
                 manifest_path = staging / "manifest.json"
                 manifest_path.write_bytes(
                     canonical_json_bytes(
@@ -507,7 +540,11 @@ class ProgramManager:
             or len(layers) != 1
         ):
             raise EnvironmentError("program OCI manifest is incomplete")
-        _require_media_type(config_descriptor, PROGRAM_CONFIG_MEDIA_TYPE, "program config")
+        if config_descriptor.get("mediaType") not in {
+            LEGACY_PROGRAM_CONFIG_MEDIA_TYPE,
+            PROGRAM_CONFIG_MEDIA_TYPE,
+        }:
+            raise EnvironmentError("program config has an unsupported media type")
         _require_media_type(layers[0], PROGRAM_LAYER_MEDIA_TYPE, "program layer")
         config_path = _descriptor_blob_path(entries, config_descriptor, "program config")
         manifest = ProgramDescription.from_dict(

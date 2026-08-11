@@ -17,6 +17,7 @@ program = runtime.create_program(
     "build/program",
     command=["my-program"],
     source_revision="0123456789abcdef0123456789abcdef01234567",
+    provenance={"example.protocol.version": "1.0.0"},
 )
 
 with program.spawn_interactive() as session:
@@ -28,8 +29,11 @@ alive and returns one decoded response per request. This is the fast path for
 large batches: prepare and verify the checker once, then stream compact inputs
 instead of elaborating a new Lean source file for every item.
 
-`create_program` records the program's files and computer compatibility. Opening
-it later with `runtime.program(program.id)` verifies that neither has changed.
+`create_program` records the program's files, computer compatibility, and
+optional flat string provenance. All three contribute to the program ID.
+Opening it later with `runtime.program(program.id)` verifies that none has
+changed. The CLI accepts the same metadata as a JSON object through
+`program-create --provenance-file`.
 
 ## Move it or share it
 

@@ -219,6 +219,7 @@ class Runtime:
         exact_environment_id: str | None = None,
         toolchain: str = "unknown",
         capability_id: str | None = None,
+        provenance: Mapping[str, str] | None = None,
     ) -> ReadyProgram:
         """Create a verified ready-to-run program from a payload directory."""
         return self.programs.create(
@@ -229,6 +230,7 @@ class Runtime:
             exact_environment_id=exact_environment_id,
             toolchain=toolchain,
             capability_id=capability_id,
+            provenance=provenance,
         )
 
     def program(self, program_id: str) -> ReadyProgram:

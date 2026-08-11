@@ -181,6 +181,11 @@ def parser() -> argparse.ArgumentParser:
     program_create.add_argument("--exact-environment-id")
     program_create.add_argument("--toolchain", default="unknown")
     program_create.add_argument("--capability-id")
+    program_create.add_argument(
+        "--provenance-file",
+        type=Path,
+        help="JSON object of content-addressed program provenance",
+    )
 
     program_export = commands.add_parser(
         "program-save-copy", help="save a portable copy of a ready-to-run program"
@@ -398,6 +403,14 @@ def main(argv: list[str] | None = None) -> int:
             _json(environment.inspect().to_dict())
             return 0
         if args.command == "program-create":
+            provenance = None
+            if args.provenance_file is not None:
+                value = json.loads(args.provenance_file.read_text(encoding="utf-8"))
+                if not isinstance(value, dict) or not all(
+                    isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+                ):
+                    raise ValueError("program provenance file must contain a JSON string object")
+                provenance = value
             program = runtime.create_program(
                 args.payload,
                 command=args.program_command,
@@ -406,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
                 exact_environment_id=args.exact_environment_id,
                 toolchain=args.toolchain,
                 capability_id=args.capability_id,
+                provenance=provenance,
             )
             _json(
                 {
