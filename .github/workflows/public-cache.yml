@@ -75,8 +75,11 @@ jobs:
           LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
           LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Mathlib source builds need hours; the default 1800s build timeout
+          # killed every platform job of the maiden run at exactly 30 minutes.
           lean-runtime --availability local build-and-publish environment.lock.json \
             --publish-to ghcr.io/alerad/lean-runtime-cache \
+            --timeout 18000 \
             --platform-only --attest > platform-result.json
       - uses: actions/upload-artifact@v4
         with:
