@@ -62,6 +62,22 @@ def test_auto_falls_back_only_when_prebuilt_is_unavailable(
     assert runtime.open_exact(_lock()) is sentinel
 
 
+def test_open_exact_forwards_environment_build_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = Runtime(home=tmp_path, availability="local", libraries=[])
+    captured: dict[str, object] = {}
+
+    def ensure(*_args: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(runtime.environments, "ensure", ensure)
+    runtime.open_exact(_lock(), build_timeout=3600)
+
+    assert captured["build_timeout"] == 3600
+
+
 def test_auto_does_not_hide_prebuilt_integrity_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

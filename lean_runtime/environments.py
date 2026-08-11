@@ -1005,6 +1005,7 @@ class EnvironmentManager:
         *,
         name: str | None = None,
         build_profile: str = "release",
+        build_timeout: float = 1800,
         cancel: threading.Event | None = None,
     ) -> Environment:
         self.store.publish_lock(lock)
@@ -1018,7 +1019,14 @@ class EnvironmentManager:
         with FileLock(self.store.lock_dir / f"{environment_id}.lock", timeout=1800, cancel=cancel):
             if not destination.is_dir():
                 self._ensure_sources(lock)
-                self._materialize(lock, environment_id, destination, build_profile, cancel=cancel)
+                self._materialize(
+                    lock,
+                    environment_id,
+                    destination,
+                    build_profile,
+                    build_timeout=build_timeout,
+                    cancel=cancel,
+                )
             else:
                 self.events.emit(
                     "environment.cache_hit",
@@ -1061,6 +1069,7 @@ class EnvironmentManager:
         destination: Path,
         build_profile: str,
         *,
+        build_timeout: float,
         cancel: threading.Event | None,
     ) -> None:
         stage = self.store.environments / f".staging-{os.getpid()}-{uuid.uuid4().hex}"
@@ -1086,7 +1095,10 @@ class EnvironmentManager:
                         phase="acquisition",
                     )
                 clone_tree(source, packages_dir / package.name)
-            build_policy = ExecutionPolicy(timeout_seconds=1800, max_output_bytes=10_000_000)
+            build_policy = ExecutionPolicy(
+                timeout_seconds=build_timeout,
+                max_output_bytes=10_000_000,
+            )
             hydration: list[dict[str, Any]] = []
             for package in lock.packages:
                 if not package.artifact_command:
