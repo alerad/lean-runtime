@@ -1,0 +1,64 @@
+name: Announcement gate
+
+# Fail-closed release canary: proves that a clean, UNAUTHENTICATED machine can
+# install lean-runtime from PyPI and complete the advertised Mathlib journeys
+# using prebuilt downloadable environments only. No registry credentials are
+# provided anywhere in this workflow - that is the point.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: PyPI version to gate (empty = latest)
+        required: false
+        type: string
+  schedule:
+    - cron: "17 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install lean-runtime from PyPI
+        run: |
+          python -m pip install --no-cache-dir \
+            "lean-runtime${{ inputs.version && format('=={0}', inputs.version) || '' }}"
+      - name: Registry preflight (anonymous)
+        run: python scripts/registry_preflight.py
+
+  gate:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: macos-15
+            python: "3.12"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install lean-runtime from PyPI
+        run: |
+          python -m pip install --no-cache-dir \
+            "lean-runtime${{ inputs.version && format('=={0}', inputs.version) || '' }}"
+      - name: Run announcement gate
+        run: python scripts/announcement_gate.py --report gate-report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-report-${{ matrix.os }}-py${{ matrix.python }}
+          path: gate-report.json

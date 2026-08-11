@@ -78,3 +78,26 @@ a normal publisher and creates the PyPI project.
 PyPI does not permit replacing files for an already published version. If a
 release needs a correction, increment the version rather than recreating the
 tag.
+
+## Release and announcement protocol
+
+Catalog entries are public claims that a prebuilt environment is
+downloadable. The protocol below makes those claims fail-closed:
+
+1. Publish downloadable environments for every catalog entry and platform
+   (`public-cache.yml`) **before** shipping a wheel that references them, and
+   make the GHCR package publicly pullable.
+2. Run `python scripts/registry_preflight.py` — it verifies, anonymously,
+   that every catalog lock resolves to an index, platform manifests, and
+   readable blobs. CI-cheap; run it on every release.
+3. After publishing to PyPI, dispatch the **Announcement gate** workflow
+   (`announcement-gate.yml`). It installs from PyPI on clean unauthenticated
+   Linux and macOS runners and runs the advertised journeys from
+   `acceptance/`: a cold check with `--no-source-build` (fail-closed: a
+   broken registry fails in seconds instead of hiding behind a source
+   build), a warm re-check, a failing proof with logical diagnostic paths, a
+   lock round-trip, and the Python batch API. Release titles use `vX.Y.Z`,
+   matching the tag.
+4. Announce only after the gate is green. The same workflow runs daily as a
+   canary: registry permissions and docs deployments can break without any
+   code change.
