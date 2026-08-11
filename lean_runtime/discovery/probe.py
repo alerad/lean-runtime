@@ -77,10 +77,13 @@ class LeanRuntimeProbe:
         timeout_seconds: float,
         cancel: threading.Event,
     ) -> AcquiredCandidate:
-        del timeout_seconds  # bounded by the caller's cancellation event
         event_offset = len(self.events) if self.events is not None else 0
         try:
-            environment = self.runtime.open_exact(candidate.entry.lock, cancel=cancel)
+            environment = self.runtime.open_exact(
+                candidate.entry.lock,
+                build_timeout=timeout_seconds,
+                cancel=cancel,
+            )
         except MaterializationError as exc:
             if exc.phase in {"lock-validation", "source-validation", "bundle-validation"}:
                 raise ProbeIntegrityFailure(str(exc)) from exc

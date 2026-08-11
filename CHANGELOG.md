@@ -11,7 +11,11 @@
   deprecated aliases.
 - Split the candidate probe into `acquire` and `check` phases and announce
   first-time toolchain installation through a `toolchain.install_started`
-  event and a `lean-run` progress line.
+  event and a `lean-run` progress line. `CandidateProbe` implementers must now
+  provide both methods; `acquire` returns the newly exported
+  `AcquiredCandidate`, and its acquisition budget is forwarded to
+  `open_exact(build_timeout=...)` so `--acquire-timeout` governs source
+  builds.
 - Add `ExecutionResult.errors`, `.warnings`, and `.first_error` severity views,
   a `Diagnostic.location` property, and compact `repr` output for both types.
   `to_dict()` payloads are unchanged.

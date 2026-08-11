@@ -21,7 +21,7 @@ from .defaults import DEFAULT_CATALOG_PATH, default_catalog
 from .errors import CatalogError, DiscoveryError, PolicyError
 from .planner import Planner
 from .policy import DiscoveryPolicy
-from .probe import CandidateProbe, LeanRuntimeProbe, ProbeOutcome
+from .probe import AcquiredCandidate, CandidateProbe, LeanRuntimeProbe, ProbeOutcome
 from .result import (
     RESULT_SCHEMA,
     CandidateAttempt,
@@ -39,6 +39,7 @@ __all__ = [
     "AvailabilityObservation",
     "Candidate",
     "CandidateAttempt",
+    "AcquiredCandidate",
     "CandidateProbe",
     "CandidateReason",
     "Catalog",

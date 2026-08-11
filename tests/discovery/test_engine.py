@@ -237,8 +237,53 @@ def test_slow_acquisition_does_not_consume_search_budget(sample_catalog) -> None
     assert result.confidence == "compiled"
 
 
+def test_slow_failed_acquisition_does_not_consume_search_budget(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    """A slow unavailable candidate must not expire the budget for the next one."""
+    probe = FakeProbe(
+        {
+            "mathlib-new": ProbeUnavailable("not published"),
+            "mathlib-old": execution(True),
+        },
+        acquisition_delay=0.25,
+    )
+    result = Discovery(
+        catalog=sample_catalog,
+        policy=DiscoveryPolicy(max_total_seconds=0.2),
+        probe=probe,
+    ).discover_and_check("import Mathlib\n")
+    assert result.status == "found"
+    assert [item.status for item in result.attempts] == [
+        "environment_unavailable",
+        "compiled",
+    ]
+
+
+@dataclass
+class StuckAcquisitionProbe:
+    def acquire(
+        self,
+        candidate: Candidate,
+        *,
+        timeout_seconds: float,
+        cancel: threading.Event,
+    ) -> AcquiredCandidate:
+        del candidate, timeout_seconds
+        while not cancel.wait(0.005):
+            pass
+        raise ProbeUnavailable("download stalled")
+
+    def check(
+        self,
+        acquired: AcquiredCandidate,
+        source: str,
+        *,
+        timeout_seconds: float,
+        cancel: threading.Event,
+    ) -> ProbeOutcome:
+        raise AssertionError("a stuck acquisition must never reach check")
+
+
 def test_acquisition_timeout_bounds_a_stuck_download(sample_catalog) -> None:  # type: ignore[no-untyped-def]
-    probe = FakeProbe({"mathlib-new": execution(True)}, acquisition_delay=0.3)
     result = Discovery(
         catalog=sample_catalog,
         policy=DiscoveryPolicy(
@@ -246,11 +291,31 @@ def test_acquisition_timeout_bounds_a_stuck_download(sample_catalog) -> None:  #
             max_total_seconds=5,
             acquisition_timeout_seconds=0.05,
         ),
-        probe=probe,
+        probe=StuckAcquisitionProbe(),
     ).discover_and_check("import Mathlib\n")
-    # The fake ignores cancellation, so the engine still gets a result; a real
-    # probe observes the cancellation event.  The budget itself must be valid.
-    assert result.status in {"found", "not_found"}
+    assert result.status == "not_found"
+    assert result.attempts[0].status == "timeout"
+    assert result.duration_seconds < 0.5
+
+
+def test_lean_runtime_probe_passes_the_acquisition_budget_to_builds(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    from types import SimpleNamespace
+
+    from lean_runtime.discovery.probe import LeanRuntimeProbe
+
+    captured: dict[str, float] = {}
+
+    def open_exact(lock, *, build_timeout, cancel=None):  # type: ignore[no-untyped-def]
+        del lock, cancel
+        captured["build_timeout"] = build_timeout
+        return SimpleNamespace(id="env_fake")
+
+    runtime = SimpleNamespace(open_exact=open_exact, availability="auto")
+    probe = LeanRuntimeProbe(runtime=runtime)  # type: ignore[arg-type]
+    candidate = Discovery(catalog=sample_catalog).plan("import Mathlib\n").candidates[0]
+    acquired = probe.acquire(candidate, timeout_seconds=123.0, cancel=threading.Event())
+    assert captured["build_timeout"] == 123.0
+    assert acquired.environment_id == "env_fake"
 
 
 def test_external_cancellation_stops_active_probe(sample_catalog) -> None:  # type: ignore[no-untyped-def]

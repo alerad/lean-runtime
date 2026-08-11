@@ -189,11 +189,17 @@ def discover(
         acquisition_timeout = plan.policy.acquisition_timeout_seconds
         with _AttemptCancellation(acquisition_timeout, cancel) as acquisition_cancel:
             try:
-                acquired = probe.acquire(
-                    candidate,
-                    timeout_seconds=acquisition_timeout,
-                    cancel=acquisition_cancel.cancel,
-                )
+                # Acquisition (downloads, toolchain installs, builds) is
+                # budgeted separately; every acquisition outcome, including
+                # failures, credits its elapsed time back to the search budget.
+                try:
+                    acquired = probe.acquire(
+                        candidate,
+                        timeout_seconds=acquisition_timeout,
+                        cancel=acquisition_cancel.cancel,
+                    )
+                finally:
+                    deadline += time.monotonic() - attempt_started
             except Exception as exc:  # defensive adapter boundary
                 attempt, action = _failed_attempt(
                     exc,
@@ -216,9 +222,6 @@ def discover(
                     if action == "generic_failed"
                     else attempt.diagnostics,
                 )
-        # Acquisition (downloads, toolchain installs, builds) is budgeted
-        # separately; only compiler probes consume the search budget.
-        deadline += time.monotonic() - attempt_started
         remaining = deadline - time.monotonic()
         timeout = min(
             remaining,

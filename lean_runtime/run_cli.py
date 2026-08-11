@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from dataclasses import replace
@@ -166,9 +165,13 @@ def _lock_path(value: str, source: Path, *, embedded: bool) -> Path:
 
 
 def _display_text(text: str, result: ExecutionResult, filename: str, display_path: str) -> str:
-    """Rewrite staged sandbox paths to the path the user actually passed."""
+    """Rewrite the exact staged entrypoint path to the path the user passed.
+
+    Only the known staged source path is rewritten; dependency paths and path
+    text embedded inside compiler messages are left untouched.
+    """
     staged_entry = str(Path(result.cwd) / filename)
-    return text.replace(staged_entry, display_path).replace(result.cwd + os.sep, "")
+    return text.replace(staged_entry, display_path)
 
 
 def _emit(
