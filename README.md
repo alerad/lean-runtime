@@ -96,6 +96,24 @@ result = env.check(
 result.raise_for_error()
 ```
 
+Rejected proofs carry parsed diagnostics:
+
+```python
+result = env.check(broken_proof)
+
+for error in result.errors:
+    print(error.file, error.line, error.message)
+
+result.raise_for_error()  # raises LeanCheckError with the same detail
+```
+
+Core-only work does not need a dependency:
+
+```python
+core = lean.setup(toolchain="v4.32.2")
+core.check("example : 2 + 2 = 4 := rfl").raise_for_error()
+```
+
 Batch and asyncio APIs reuse that prepared environment:
 
 ```python

@@ -71,6 +71,24 @@ class Diagnostic:
     line: int | None = None
     column: int | None = None
 
+    @property
+    def location(self) -> str | None:
+        """Return ``file:line:column`` when the diagnostic names a position."""
+        if self.file is None:
+            return None
+        if self.line is None:
+            return self.file
+        if self.column is None:
+            return f"{self.file}:{self.line}"
+        return f"{self.file}:{self.line}:{self.column}"
+
+    def __repr__(self) -> str:
+        summary = self.message.splitlines()[0] if self.message else ""
+        if len(summary) > 60:
+            summary = summary[:57] + "..."
+        location = f", {self.location}" if self.location is not None else ""
+        return f"Diagnostic({self.severity}{location}, {summary!r})"
+
 
 @dataclass(frozen=True, slots=True)
 class PackageProvenance:
@@ -132,6 +150,21 @@ class ExecutionResult:
     timings: tuple[PhaseTiming, ...] = field(default_factory=tuple)
 
     @property
+    def errors(self) -> tuple[Diagnostic, ...]:
+        """Return only error-severity diagnostics."""
+        return tuple(item for item in self.diagnostics if item.severity == "error")
+
+    @property
+    def warnings(self) -> tuple[Diagnostic, ...]:
+        """Return only warning-severity diagnostics."""
+        return tuple(item for item in self.diagnostics if item.severity == "warning")
+
+    @property
+    def first_error(self) -> Diagnostic | None:
+        """Return the first error diagnostic, if any."""
+        return next(iter(self.errors), None)
+
+    @property
     def environment_id(self) -> str | None:
         return self.provenance.environment_id if self.provenance else None
 
@@ -142,6 +175,21 @@ class ExecutionResult:
     @property
     def lock_id(self) -> str | None:
         return self.provenance.lock_id if self.provenance else None
+
+    def __repr__(self) -> str:
+        parts = [
+            f"ok={self.ok}",
+            f"errors={len(self.errors)}",
+            f"elapsed={self.elapsed_seconds:.2f}s",
+        ]
+        first = self.first_error
+        if first is not None and first.location is not None:
+            parts.append(f"first_error={first.location!r}")
+        if self.timed_out:
+            parts.append("timed_out=True")
+        if self.cancelled:
+            parts.append("cancelled=True")
+        return f"ExecutionResult({', '.join(parts)})"
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
+from dataclasses import replace
 
 from .models import Diagnostic, Severity
 
@@ -44,6 +46,26 @@ def parse_diagnostics(output: str) -> tuple[Diagnostic, ...]:
             current["message"] = f"{message}\n{line}" if line else message
     finish()
     return tuple(diagnostics)
+
+
+def map_diagnostic_paths(
+    diagnostics: tuple[Diagnostic, ...],
+    path_map: Mapping[str, str] | None,
+) -> tuple[Diagnostic, ...]:
+    """Rewrite staged physical paths to the caller's logical input names.
+
+    Only exact staged-file matches are rewritten; package files may
+    legitimately share basenames, and raw compiler output remains authoritative
+    on the execution result.
+    """
+    if not path_map:
+        return diagnostics
+    return tuple(
+        replace(item, file=path_map[item.file])
+        if item.file is not None and item.file in path_map
+        else item
+        for item in diagnostics
+    )
 
 
 def error_diagnostic(message: str) -> Diagnostic:

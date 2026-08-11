@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from dataclasses import dataclass, field
 
 import pytest
@@ -15,7 +16,11 @@ from lean_runtime.discovery import (
     ProbeOutcome,
 )
 from lean_runtime.discovery.candidate import Candidate
-from lean_runtime.discovery.probe import ProbeIntegrityFailure, ProbeUnavailable
+from lean_runtime.discovery.probe import (
+    AcquiredCandidate,
+    ProbeIntegrityFailure,
+    ProbeUnavailable,
+)
 
 
 def execution(
@@ -44,22 +49,41 @@ def execution(
 class FakeProbe:
     outcomes: dict[str, ExecutionResult | Exception]
     opened: list[str] = field(default_factory=list)
+    acquisition_delay: float = 0.0
+
+    def acquire(
+        self,
+        candidate: Candidate,
+        *,
+        timeout_seconds: float,
+        cancel: threading.Event,
+    ) -> AcquiredCandidate:
+        del timeout_seconds, cancel
+        candidate_id = candidate.entry.id
+        self.opened.append(candidate_id)
+        if self.acquisition_delay:
+            time.sleep(self.acquisition_delay)
+        outcome = self.outcomes[candidate_id]
+        if isinstance(outcome, (ProbeUnavailable, ProbeIntegrityFailure)):
+            raise outcome
+        return AcquiredCandidate(
+            candidate=candidate,
+            environment_id=f"env_{candidate_id}",
+        )
 
     def check(
         self,
-        candidate: Candidate,
+        acquired: AcquiredCandidate,
         source: str,
         *,
         timeout_seconds: float,
         cancel: threading.Event,
     ) -> ProbeOutcome:
         del source, timeout_seconds, cancel
-        candidate_id = candidate.entry.id
-        self.opened.append(candidate_id)
-        outcome = self.outcomes[candidate_id]
+        outcome = self.outcomes[acquired.candidate.entry.id]
         if isinstance(outcome, Exception):
             raise outcome
-        return ProbeOutcome(environment_id=f"env_{candidate_id}", execution_result=outcome)
+        return ProbeOutcome(environment_id=acquired.environment_id, execution_result=outcome)
 
 
 def test_first_rejection_second_compilation_is_authoritative(sample_catalog) -> None:  # type: ignore[no-untyped-def]
@@ -157,15 +181,25 @@ def test_runtime_identity_mismatch_is_terminal(sample_catalog) -> None:  # type:
 class BlockingProbe:
     opened: int = 0
 
-    def check(
+    def acquire(
         self,
         candidate: Candidate,
+        *,
+        timeout_seconds: float,
+        cancel: threading.Event,
+    ) -> AcquiredCandidate:
+        del timeout_seconds, cancel
+        return AcquiredCandidate(candidate=candidate, environment_id="env_blocked")
+
+    def check(
+        self,
+        acquired: AcquiredCandidate,
         source: str,
         *,
         timeout_seconds: float,
         cancel: threading.Event,
     ) -> ProbeOutcome:
-        del candidate, source, timeout_seconds
+        del acquired, source, timeout_seconds
         self.opened += 1
         while not cancel.wait(0.005):
             pass
@@ -189,6 +223,99 @@ def test_per_candidate_timeout_is_enforced(sample_catalog) -> None:  # type: ign
     assert result.status == "not_found"
     assert result.attempts[0].status == "timeout"
     assert result.duration_seconds < 0.5
+
+
+def test_slow_acquisition_does_not_consume_search_budget(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    """A slow download must not expire the search budget before a fast, green check."""
+    probe = FakeProbe({"mathlib-new": execution(True)}, acquisition_delay=0.3)
+    result = Discovery(
+        catalog=sample_catalog,
+        policy=DiscoveryPolicy(max_candidates=1, max_total_seconds=0.2),
+        probe=probe,
+    ).discover_and_check("import Mathlib\n")
+    assert result.status == "found"
+    assert result.confidence == "compiled"
+
+
+def test_slow_failed_acquisition_does_not_consume_search_budget(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    """A slow unavailable candidate must not expire the budget for the next one."""
+    probe = FakeProbe(
+        {
+            "mathlib-new": ProbeUnavailable("not published"),
+            "mathlib-old": execution(True),
+        },
+        acquisition_delay=0.25,
+    )
+    result = Discovery(
+        catalog=sample_catalog,
+        policy=DiscoveryPolicy(max_total_seconds=0.2),
+        probe=probe,
+    ).discover_and_check("import Mathlib\n")
+    assert result.status == "found"
+    assert [item.status for item in result.attempts] == [
+        "environment_unavailable",
+        "compiled",
+    ]
+
+
+@dataclass
+class StuckAcquisitionProbe:
+    def acquire(
+        self,
+        candidate: Candidate,
+        *,
+        timeout_seconds: float,
+        cancel: threading.Event,
+    ) -> AcquiredCandidate:
+        del candidate, timeout_seconds
+        while not cancel.wait(0.005):
+            pass
+        raise ProbeUnavailable("download stalled")
+
+    def check(
+        self,
+        acquired: AcquiredCandidate,
+        source: str,
+        *,
+        timeout_seconds: float,
+        cancel: threading.Event,
+    ) -> ProbeOutcome:
+        raise AssertionError("a stuck acquisition must never reach check")
+
+
+def test_acquisition_timeout_bounds_a_stuck_download(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    result = Discovery(
+        catalog=sample_catalog,
+        policy=DiscoveryPolicy(
+            max_candidates=1,
+            max_total_seconds=5,
+            acquisition_timeout_seconds=0.05,
+        ),
+        probe=StuckAcquisitionProbe(),
+    ).discover_and_check("import Mathlib\n")
+    assert result.status == "not_found"
+    assert result.attempts[0].status == "timeout"
+    assert result.duration_seconds < 0.5
+
+
+def test_lean_runtime_probe_passes_the_acquisition_budget_to_builds(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    from types import SimpleNamespace
+
+    from lean_runtime.discovery.probe import LeanRuntimeProbe
+
+    captured: dict[str, float] = {}
+
+    def open_exact(lock, *, build_timeout, cancel=None):  # type: ignore[no-untyped-def]
+        del lock, cancel
+        captured["build_timeout"] = build_timeout
+        return SimpleNamespace(id="env_fake")
+
+    runtime = SimpleNamespace(open_exact=open_exact, availability="auto")
+    probe = LeanRuntimeProbe(runtime=runtime)  # type: ignore[arg-type]
+    candidate = Discovery(catalog=sample_catalog).plan("import Mathlib\n").candidates[0]
+    acquired = probe.acquire(candidate, timeout_seconds=123.0, cancel=threading.Event())
+    assert captured["build_timeout"] == 123.0
+    assert acquired.environment_id == "env_fake"
 
 
 def test_external_cancellation_stops_active_probe(sample_catalog) -> None:  # type: ignore[no-untyped-def]
@@ -251,3 +378,11 @@ def test_injected_runtime_cannot_weaken_source_build_policy(
     runtime = Runtime(home=tmp_path / "runtime", availability="auto", libraries=())
     with pytest.raises(PolicyError, match="source fallback"):
         Discovery(catalog=sample_catalog, runtime=runtime).discover_and_check("import Mathlib\n")
+
+
+def test_probe_types_are_publicly_importable() -> None:
+    from lean_runtime.discovery import AcquiredCandidate as PublicAcquired
+    from lean_runtime.discovery import CandidateProbe as PublicProbe
+
+    assert PublicAcquired is AcquiredCandidate
+    assert PublicProbe is not None

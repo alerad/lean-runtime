@@ -6,6 +6,7 @@ import threading
 from dataclasses import dataclass
 from typing import Protocol
 
+from ..environments import Environment
 from ..errors import (
     DownloadUnavailable,
     EnvironmentError,
@@ -35,10 +36,28 @@ class ProbeOutcome:
     acquisition: Acquisition = "unknown"
 
 
+@dataclass(frozen=True, slots=True)
+class AcquiredCandidate:
+    """A candidate whose exact environment is ready for compiler probes."""
+
+    candidate: Candidate
+    environment_id: str
+    acquisition: Acquisition = "unknown"
+    handle: object | None = None
+
+
 class CandidateProbe(Protocol):
-    def check(
+    def acquire(
         self,
         candidate: Candidate,
+        *,
+        timeout_seconds: float,
+        cancel: threading.Event,
+    ) -> AcquiredCandidate: ...
+
+    def check(
+        self,
+        acquired: AcquiredCandidate,
         source: str,
         *,
         timeout_seconds: float,
@@ -51,17 +70,20 @@ class LeanRuntimeProbe:
     runtime: Runtime
     events: list[RuntimeEvent] | None = None
 
-    def check(
+    def acquire(
         self,
         candidate: Candidate,
-        source: str,
         *,
         timeout_seconds: float,
         cancel: threading.Event,
-    ) -> ProbeOutcome:
+    ) -> AcquiredCandidate:
         event_offset = len(self.events) if self.events is not None else 0
         try:
-            environment = self.runtime.open_exact(candidate.entry.lock, cancel=cancel)
+            environment = self.runtime.open_exact(
+                candidate.entry.lock,
+                build_timeout=timeout_seconds,
+                cancel=cancel,
+            )
         except MaterializationError as exc:
             if exc.phase in {"lock-validation", "source-validation", "bundle-validation"}:
                 raise ProbeIntegrityFailure(str(exc)) from exc
@@ -86,6 +108,24 @@ class LeanRuntimeProbe:
                 acquisition = "source_built"
             else:
                 acquisition = "local"
+        return AcquiredCandidate(
+            candidate=candidate,
+            environment_id=environment.id,
+            acquisition=acquisition,
+            handle=environment,
+        )
+
+    def check(
+        self,
+        acquired: AcquiredCandidate,
+        source: str,
+        *,
+        timeout_seconds: float,
+        cancel: threading.Event,
+    ) -> ProbeOutcome:
+        environment = acquired.handle
+        if not isinstance(environment, Environment):
+            raise ProbeUnavailable("acquired candidate does not hold an open environment")
         result = environment.check(
             source,
             policy=ExecutionPolicy(timeout_seconds=timeout_seconds),
@@ -94,5 +134,5 @@ class LeanRuntimeProbe:
         return ProbeOutcome(
             environment_id=environment.id,
             execution_result=result,
-            acquisition=acquisition,
+            acquisition=acquired.acquisition,
         )

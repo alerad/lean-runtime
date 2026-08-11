@@ -35,6 +35,7 @@ def _progress(event: RuntimeEvent) -> None:
         "library.lookup": "Looking for a cached environment",
         "library.layer_download_started": "Downloading cached environment",
         "library.layer_download_retry": "Retrying cached-environment download",
+        "toolchain.install_started": "Installing Lean toolchain (a first run can take minutes)",
         "environment.build_started": "Building environment",
         "environment.cache_hit": "Using local environment",
     }
@@ -68,7 +69,20 @@ def parser() -> argparse.ArgumentParser:
         help="allow verified downloads but do not build missing environments",
     )
     root.add_argument("--max-candidates", type=int, default=3)
-    root.add_argument("--discovery-timeout", type=float, default=90.0)
+    root.add_argument(
+        "--search-timeout",
+        "--discovery-timeout",
+        dest="search_timeout",
+        type=float,
+        default=90.0,
+        help="budget for ranking and compiler probes (--discovery-timeout is a deprecated alias)",
+    )
+    root.add_argument(
+        "--acquire-timeout",
+        type=float,
+        default=1800.0,
+        help="budget for downloading, installing, or building one candidate environment",
+    )
     root.add_argument("--home", help="runtime store root")
     root.add_argument("--json", action="store_true")
     root.add_argument("--quiet", action="store_true")
@@ -78,7 +92,14 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument(
         "--timings", action="store_true", help="show preparation and execution timings"
     )
-    root.add_argument("--timeout", type=float, default=120)
+    root.add_argument(
+        "--check-timeout",
+        "--timeout",
+        dest="check_timeout",
+        type=float,
+        default=120,
+        help="budget for one Lean invocation (--timeout is a deprecated alias)",
+    )
     return root
 
 
@@ -89,10 +110,11 @@ def _catalog(path: Path | None) -> Catalog:
 def _discovery_policy(arguments: argparse.Namespace) -> DiscoveryPolicy:
     return DiscoveryPolicy(
         max_candidates=arguments.max_candidates,
-        max_total_seconds=arguments.discovery_timeout,
+        max_total_seconds=arguments.search_timeout,
         allow_download=not arguments.offline,
         allow_source_build=not arguments.offline and not arguments.no_source_build,
-        candidate_timeout_seconds=arguments.timeout,
+        candidate_timeout_seconds=arguments.check_timeout,
+        acquisition_timeout_seconds=arguments.acquire_timeout,
     )
 
 
@@ -142,11 +164,22 @@ def _lock_path(value: str, source: Path, *, embedded: bool) -> Path:
     return path.resolve()
 
 
+def _display_text(text: str, result: ExecutionResult, filename: str, display_path: str) -> str:
+    """Rewrite the exact staged entrypoint path to the path the user passed.
+
+    Only the known staged source path is rewritten; dependency paths and path
+    text embedded inside compiler messages are left untouched.
+    """
+    staged_entry = str(Path(result.cwd) / filename)
+    return text.replace(staged_entry, display_path)
+
+
 def _emit(
     result: ExecutionResult,
     *,
     as_json: bool,
     filename: str,
+    display_path: str | None = None,
     show_timings: bool = False,
 ) -> None:
     if as_json:
@@ -154,13 +187,16 @@ def _emit(
             json.dumps(serialize_execution_v1(result), ensure_ascii=False, indent=2, sort_keys=True)
         )
         return
+    shown = display_path or filename
     if result.stdout:
-        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+        stdout = _display_text(result.stdout, result, filename, shown)
+        print(stdout, end="" if stdout.endswith("\n") else "\n")
     if result.stderr:
-        print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
+        stderr = _display_text(result.stderr, result, filename, shown)
+        print(stderr, end="" if stderr.endswith("\n") else "\n", file=sys.stderr)
     symbol = "✓" if result.ok else "✗"
     status = "accepted" if result.ok else "rejected"
-    print(f"{symbol} {filename} {status} in {result.elapsed_seconds:.2f}s")
+    print(f"{symbol} {shown} {status} in {result.elapsed_seconds:.2f}s")
     if show_timings:
         print(render_timings(result.timings))
 
@@ -255,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
             availability=availability,
             libraries=() if arguments.offline else None,
         )
-        policy = ExecutionPolicy(timeout_seconds=arguments.timeout)
+        policy = ExecutionPolicy(timeout_seconds=arguments.check_timeout)
         if context.lock is not None:
             if arguments.lock_out is not None:
                 raise SpecificationError("--lock-out cannot be combined with an exact lock")
@@ -333,6 +369,7 @@ def main(argv: list[str] | None = None) -> int:
             result,
             as_json=arguments.json,
             filename=source_path.name,
+            display_path=str(arguments.file),
             show_timings=arguments.timings,
         )
         return 0 if result.ok else 1

@@ -75,16 +75,26 @@ result.raise_for_error()
 `setup()` resolves and ensures the environment once. Further checks reuse that
 handle, including batch and asynchronous calls.
 
-The same entry point opens local projects, exact locks, and previously named
-environments:
+The same entry point opens local projects, exact locks, previously named
+environments, and core-only toolchains:
 
 ```python
 project = lean.setup(project="./my-project")
 locked = lean.setup(lock="environment.lock.json")
 existing = lean.setup(environment="research-stack")
+core = lean.setup(toolchain="v4.32.2")
 ```
 
 Exactly one context must be supplied.
+
+Rejected checks expose parsed diagnostics directly, with `file` naming your
+logical input:
+
+```python
+result = environment.check(broken_proof)
+for error in result.errors:
+    print(error.file, error.line, error.message)
+```
 
 ## Lock for CI
 

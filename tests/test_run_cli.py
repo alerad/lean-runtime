@@ -244,3 +244,39 @@ def test_lean_run_explains_bundled_catalog_candidates(tmp_path: Path, capsys) ->
     output = capsys.readouterr().out
     assert "Context: automatic discovery" in output
     assert "mathlib-v4.32.2" in output
+
+
+def test_lean_run_rewrites_staged_paths_to_the_user_path(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    source = tmp_path / "Bad.lean"
+    source.write_text("example : 2 + 2 = 5 := rfl\n")
+    staged = "/store/jobs/execution_ab/instance-cd"
+
+    dependency = f"{staged}/.lake/packages/batteries/Batteries/Data/Nat.lean"
+
+    class RejectingRuntime(FakeRuntime):
+        def check_file(self, path, *, toolchain=None, policy=None) -> ExecutionResult:
+            del path, toolchain, policy
+            return ExecutionResult(
+                ok=False,
+                exit_code=1,
+                toolchain="leanprover/lean4:v4.32.0",
+                command=("lean", f"{staged}/Bad.lean"),
+                cwd=staged,
+                stdout=(
+                    f"{staged}/Bad.lean:1:23: error: Type mismatch\n"
+                    f"{dependency}:4:0: warning: declaration uses 'sorry'\n"
+                ),
+                stderr="",
+                elapsed_seconds=0.01,
+            )
+
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", RejectingRuntime)
+    assert main([str(source), "--quiet", "--toolchain", "v4.32.0"]) == 1
+    captured = capsys.readouterr()
+    assert f"{source}:1:23: error: Type mismatch" in captured.out
+    assert f"{staged}/Bad.lean" not in captured.out
+    assert f"✗ {source} rejected" in captured.out
+    # Only the staged entrypoint is rewritten; dependency paths are untouched.
+    assert f"{dependency}:4:0: warning" in captured.out

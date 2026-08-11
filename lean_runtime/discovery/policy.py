@@ -20,7 +20,14 @@ def _positive_number(value: object, name: str) -> float:
 
 @dataclass(frozen=True, slots=True)
 class DiscoveryPolicy:
-    """Limits and preferences for a discovery search."""
+    """Limits and preferences for a discovery search.
+
+    ``max_total_seconds`` bounds the search itself: ranking plus compiler
+    probes. Acquiring a candidate environment (downloads, toolchain
+    installation, source builds) is bounded separately by
+    ``acquisition_timeout_seconds`` and never consumes the search budget, so a
+    slow first-time download cannot expire an otherwise healthy search.
+    """
 
     max_candidates: int = 3
     max_total_seconds: float = 90.0
@@ -31,6 +38,7 @@ class DiscoveryPolicy:
     allow_source_build: bool = False
     stop_on_success: bool = True
     candidate_timeout_seconds: float | None = None
+    acquisition_timeout_seconds: float = 1800.0
 
     def __post_init__(self) -> None:
         if isinstance(self.max_candidates, bool) or not isinstance(self.max_candidates, int):
@@ -38,6 +46,7 @@ class DiscoveryPolicy:
         if self.max_candidates <= 0:
             raise PolicyError("max_candidates must be a positive integer")
         _positive_number(self.max_total_seconds, "max_total_seconds")
+        _positive_number(self.acquisition_timeout_seconds, "acquisition_timeout_seconds")
         if self.candidate_timeout_seconds is not None:
             _positive_number(self.candidate_timeout_seconds, "candidate_timeout_seconds")
         if not self.channels or any(
@@ -67,4 +76,5 @@ class DiscoveryPolicy:
             "allow_source_build": self.allow_source_build,
             "stop_on_success": self.stop_on_success,
             "candidate_timeout_seconds": self.candidate_timeout_seconds,
+            "acquisition_timeout_seconds": self.acquisition_timeout_seconds,
         }
