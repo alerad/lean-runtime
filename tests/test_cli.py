@@ -36,6 +36,21 @@ def test_removed_v1_commands_are_absent() -> None:
     assert commands.isdisjoint(removed)
 
 
+def test_build_and_publish_accepts_environment_build_timeout() -> None:
+    arguments = parser().parse_args(
+        [
+            "build-and-publish",
+            "environment.lock.json",
+            "--publish-to",
+            "oci://cache",
+            "--timeout",
+            "3600",
+        ]
+    )
+
+    assert arguments.timeout == 3600
+
+
 def test_verbose_materialization_failure_includes_tool_output(capsys) -> None:
     failure = MaterializationError(
         "environment build failed",

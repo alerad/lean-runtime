@@ -170,6 +170,7 @@ class Runtime:
         *,
         name: str | None = None,
         build_profile: str = "release",
+        build_timeout: float = 1800,
         cancel: threading.Event | None = None,
     ) -> Environment:
         environment_id = environment_identity(lock, build_profile)
@@ -203,7 +204,13 @@ class Runtime:
                     "no compatible downloadable environment was found; availability=required "
                     "does not permit a source build." + nearest
                 )
-        return self.environments.ensure(lock, name=name, build_profile=build_profile, cancel=cancel)
+        return self.environments.ensure(
+            lock,
+            name=name,
+            build_profile=build_profile,
+            build_timeout=build_timeout,
+            cancel=cancel,
+        )
 
     def environment(self, identifier: str) -> Environment:
         """Open a published environment without resolution or network access."""

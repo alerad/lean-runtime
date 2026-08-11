@@ -143,6 +143,12 @@ def parser() -> argparse.ArgumentParser:
     push.add_argument("--tag", action="append", default=[])
     push.add_argument("--name")
     push.add_argument(
+        "--timeout",
+        type=float,
+        default=1800,
+        help="maximum seconds for each artifact hydration and the environment build",
+    )
+    push.add_argument(
         "--platform-only",
         action="store_true",
         help="publish blobs and platform manifest without updating the lock index",
@@ -368,7 +374,11 @@ def main(argv: list[str] | None = None) -> int:
             _json(environment.inspect().to_dict())
             return 0
         if args.command == "build-and-publish":
-            environment = runtime.open_exact(EnvironmentLock.load(args.lock), name=args.name)
+            environment = runtime.open_exact(
+                EnvironmentLock.load(args.lock),
+                name=args.name,
+                build_timeout=args.timeout,
+            )
             _json(
                 runtime.publish_environment(
                     environment.id,

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 2.0.9 - 2026-08-10
+
+- Allow callers and `build-and-publish --timeout` to raise the per-step limit
+  for artifact hydration and environment builds on slower platforms.
+
 ## 2.0.8 - 2026-08-10
 
 - Add immutable, content-addressed provenance to ready-to-run program
