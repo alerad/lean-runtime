@@ -15,9 +15,21 @@ environment is compatible. Runtime materializes each bounded candidate and
 Lean authoritatively checks the source before discovery can succeed.
 
 The bundled bootstrap catalog contains core Lean v4.32.2 plus exact Mathlib
-v4.32.2, v4.31.0, and v4.30.0 locks. `--catalog PATH` selects another validated catalog,
-`--max-candidates` and `--discovery-timeout` bound the search, and
-`--no-discover` restores strict explicit-context behavior.
+v4.32.2, v4.31.0, and v4.30.0 locks. `--catalog PATH` selects another validated
+catalog and `--no-discover` restores strict explicit-context behavior.
+
+Three budgets bound the work independently:
+
+- `--max-candidates` and `--search-timeout` bound the search itself: ranking
+  plus compiler probes.
+- `--check-timeout` bounds each Lean invocation.
+- `--acquire-timeout` bounds downloading, installing, or building one
+  candidate environment, including its source build. Acquisition never
+  consumes the search budget, so a slow first-time toolchain download cannot
+  expire an otherwise healthy search.
+
+`--discovery-timeout` and `--timeout` remain as deprecated aliases of
+`--search-timeout` and `--check-timeout`.
 
 ## Frontmatter format
 
@@ -53,11 +65,20 @@ environments only.
 
 ## Output
 
-Human output is concise:
+Human output is concise, and error locations name the file you passed rather
+than an internal staging path:
 
 ```text
 ✓ Main.lean accepted in 0.42s
 ```
+
+```text
+proofs/Bad.lean:1:23: error: Type mismatch
+✗ proofs/Bad.lean rejected in 0.35s
+```
+
+Only the checked file's own path is rewritten; dependency paths in compiler
+output are shown as Lean printed them.
 
 Cold operations report meaningful dependency, cache, and build phases on
 stderr. `--quiet` suppresses progress and `--json` emits the complete structured
