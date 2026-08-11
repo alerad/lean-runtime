@@ -4,17 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
 import threading
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .backends import LocalBackend
 from .errors import ToolchainError
 from .events import EventEmitter
 from .policies import ExecutionPolicy
+from .toolchain_slim import (
+    SLIM_PROFILE,
+    SlimManifest,
+    materialize,
+    verify_capabilities,
+)
 
 ELAN_VERSION = "4.2.3"
 ELAN_INIT_URL = f"https://raw.githubusercontent.com/leanprover/elan/v{ELAN_VERSION}/elan-init.sh"
@@ -150,9 +158,101 @@ class ToolchainManager:
         }
         return name in installed
 
+    @staticmethod
+    def _toolchain_dir_name(name: str) -> str:
+        return name.replace("/", "--").replace(":", "---")
+
+    def _elan_toolchain_dir(self, name: str) -> Path:
+        elan_home = Path(os.environ.get("LEAN_RUNTIME_ELAN_HOME", self.elan_home))
+        return elan_home / "toolchains" / self._toolchain_dir_name(name)
+
+    @property
+    def slim_root(self) -> Path:
+        return self.home / "toolchains" / SLIM_PROFILE
+
+    def slim_path(self, toolchain: str) -> Path:
+        return self.slim_root / self._toolchain_dir_name(normalize_toolchain(toolchain))
+
+    def slim_manifest(self, toolchain: str) -> SlimManifest | None:
+        return SlimManifest.load(self.slim_path(toolchain))
+
+    def has_slim(self, toolchain: str) -> bool:
+        directory = self.slim_path(toolchain)
+        return SlimManifest.load(directory) is not None and (directory / "bin" / "lean").is_file()
+
+    def materialize_slim(self, toolchain: str, *, verify: bool = True) -> SlimManifest:
+        """Materialize and verify a slim check-profile copy of one toolchain.
+
+        The Elan-managed original is never modified; use ``prune_original``
+        afterwards to realize the disk saving.
+        """
+        name = self.ensure(toolchain)
+        source = self._elan_toolchain_dir(name)
+        if not source.is_dir():
+            raise ToolchainError(
+                f"toolchain {name!r} is not present as a full installation; "
+                "a slim copy can only be materialized from one"
+            )
+        self.events.emit(
+            "toolchain.slim_started",
+            f"Materializing slim {SLIM_PROFILE} toolchain {name}",
+            toolchain=name,
+        )
+        created_at = datetime.now(timezone.utc).isoformat()
+        destination = self.slim_path(name)
+        manifest = materialize(source, destination, toolchain=name, created_at=created_at)
+        if verify:
+            results = verify_capabilities(destination, environment=self.environment)
+            failures = [(probe, detail) for probe, ok, detail in results if not ok]
+            if failures:
+                shutil.rmtree(destination)
+                summary = "; ".join(f"{probe}: {detail}" for probe, detail in failures)
+                raise ToolchainError(
+                    f"slim toolchain failed capability verification and was removed: {summary}"
+                )
+        self.events.emit(
+            "toolchain.slim_ready",
+            f"Slim {SLIM_PROFILE} toolchain is ready",
+            toolchain=name,
+            files=manifest.files,
+            bytes=manifest.bytes,
+            excluded_bytes=manifest.excluded_bytes,
+        )
+        return manifest
+
+    def prune_original(self, toolchain: str) -> None:
+        """Uninstall the full Elan toolchain after a verified slim copy exists.
+
+        Checking keeps working through the slim copy. Native compilation and
+        source builds of new environments need the full toolchain again.
+        """
+        name = normalize_toolchain(toolchain)
+        if not self.has_slim(name):
+            raise ToolchainError(
+                f"refusing to prune {name!r}: no verified slim toolchain is present"
+            )
+        process = LocalBackend().execute(
+            [str(self.elan_path()), "toolchain", "uninstall", name],
+            cwd=self.home,
+            environment=self.environment,
+            policy=ExecutionPolicy(timeout_seconds=300, max_output_bytes=1_000_000),
+            cancel=None,
+        )
+        if process.exit_code:
+            raise ToolchainError(
+                f"could not uninstall Lean toolchain {name!r}:\n{process.stdout}{process.stderr}"
+            )
+        self.events.emit(
+            "toolchain.original_pruned",
+            f"Removed full toolchain {name}; the slim copy remains",
+            toolchain=name,
+        )
+
     def ensure(self, toolchain: str, *, cancel: threading.Event | None = None) -> str:
         """Install a toolchain if necessary and return its normalized name."""
         name = normalize_toolchain(toolchain)
+        if self.has_slim(name) and not self._elan_toolchain_dir(name).is_dir():
+            return name
         if self.is_installed(name):
             return name
         self.events.emit(
@@ -176,6 +276,19 @@ class ToolchainManager:
         return name
 
     def command(self, toolchain: str, executable: str, *args: str) -> list[str]:
-        """Construct a command pinned to one toolchain."""
-        name = self.ensure(toolchain)
+        """Construct a command pinned to one toolchain.
+
+        A full Elan installation is preferred; when only a verified slim copy
+        remains, its executables are invoked directly.
+        """
+        name = normalize_toolchain(toolchain)
+        if self.has_slim(name) and not self._elan_toolchain_dir(name).is_dir():
+            binary = self.slim_path(name) / "bin" / executable
+            if not binary.is_file():
+                raise ToolchainError(
+                    f"slim toolchain {name!r} does not provide {executable!r}; "
+                    "reinstall the full toolchain for this operation"
+                )
+            return [str(binary), *args]
+        name = self.ensure(name)
         return [str(self.elan_path()), "run", name, executable, *args]

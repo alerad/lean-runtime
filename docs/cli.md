@@ -84,6 +84,34 @@ identity, package Git trees, computer compatibility, and Lean probe before
 making the environment available. See [Portable copies and environment
 libraries](portable-copies.md) for its trust boundary.
 
+## Slim toolchains
+
+The official Lean toolchain is roughly 2.6 GB installed. Proof checking does
+not need all of it: editor indexes, static libraries, the bundled LLVM/clang,
+and toolchain sources are only used by editors and native compilation.
+
+```bash
+lean-runtime toolchain-slim v4.32.2
+lean-runtime toolchain-slim v4.32.2 --prune-original
+```
+
+`toolchain-slim` materializes a separate check-profile copy by hardlinking the
+kept files (near-zero extra disk), then verifies it against a capability
+corpus — elaboration, core tactics, `decide`, `#eval`, metaprogramming, and
+`Std` imports — using the slim copy's own `lean`. A copy that fails any probe
+is removed and reported.
+
+`--prune-original` uninstalls the full Elan toolchain after verification,
+reducing the v4.32.2 footprint from about 2.6 GB to about 2.1 GB. All checking
+continues through the slim copy. Lean v4.32 loads every `.olean` facet and
+per-module IR during ordinary elaboration, so those artifact classes must
+stay; larger reductions require upstream facet-loading changes.
+
+After pruning, source builds of *new* environments and native compilation
+need the full toolchain again; reinstall it with `lean-runtime install`.
+Downloads are unaffected: first-time installation still transfers the full
+official release before a slim copy can be derived from it.
+
 ## Replay
 
 ```bash

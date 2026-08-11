@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Add `lean-runtime toolchain-slim` and
+  `ToolchainManager.materialize_slim()`: a verified check-profile toolchain
+  copy that drops editor indexes, static libraries, bundled LLVM/clang, and
+  sources (about 2.6 GB → 2.1 GB for v4.32.2 once `--prune-original` removes
+  the full Elan copy). Materialization hardlinks files, verification runs a
+  capability corpus with the slim copy's own `lean`, and checking transparently
+  routes through the slim copy when the full toolchain is absent. Lean v4.32
+  requires all `.olean` facets and per-module IR for ordinary elaboration, so
+  those remain; source builds of new environments still need the full
+  toolchain.
+
 - Exempt environment acquisition (downloads, toolchain installs, source
   builds) from the discovery search budget: a slow first-time download can no
   longer expire an otherwise healthy search. Acquisition is bounded separately

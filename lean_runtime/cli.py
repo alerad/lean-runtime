@@ -271,6 +271,19 @@ def parser() -> argparse.ArgumentParser:
     diff.add_argument("right")
     diff.add_argument("--json", action="store_true")
 
+    toolchain_slim = commands.add_parser(
+        "toolchain-slim",
+        help="materialize a verified slim check-profile copy of a toolchain",
+    )
+    toolchain_slim.add_argument("toolchain", help="Lean toolchain, e.g. v4.32.2")
+    toolchain_slim.add_argument(
+        "--prune-original",
+        action="store_true",
+        help="uninstall the full Elan toolchain after verification; checking keeps "
+        "working through the slim copy, but source builds of new environments and "
+        "native compilation need the full toolchain again",
+    )
+
     profile = commands.add_parser("profile", help="measure repeated checks in one environment")
     profile.add_argument("environment", help="environment name or exact lock path")
     profile.add_argument("file", type=Path)
@@ -518,6 +531,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "storage":
             _json(runtime.store_status().to_dict())
+            return 0
+        if args.command == "toolchain-slim":
+            manifest = runtime.toolchains.materialize_slim(args.toolchain)
+            if args.prune_original:
+                runtime.toolchains.prune_original(args.toolchain)
+            _json(
+                {
+                    **manifest.to_dict(),
+                    "path": str(runtime.toolchains.slim_path(args.toolchain)),
+                    "pruned_original": args.prune_original,
+                }
+            )
             return 0
         if args.command == "doctor":
             doctor_report = runtime.doctor()
