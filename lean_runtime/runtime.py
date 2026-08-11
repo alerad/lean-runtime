@@ -16,7 +16,7 @@ from .backends import Backend, LocalBackend
 from .bundles import EnvironmentBundles, PortableCopyInfo
 from .comparison import ComparisonEntry, EnvironmentComparison, compare_locks
 from .decisions import Decision
-from .diagnostics import error_diagnostic, parse_diagnostics
+from .diagnostics import error_diagnostic, map_diagnostic_paths, parse_diagnostics
 from .environments import Environment, EnvironmentManager, ExecutionCapture
 from .errors import (
     DownloadUnavailable,
@@ -118,10 +118,10 @@ class Runtime:
             raise ValueError(
                 "required publisher verification needs trusted_publisher and trusted_issuer"
             )
-        self.toolchains = toolchains or ToolchainManager(home)
+        self.events = EventEmitter(on_event)
+        self.toolchains = toolchains or ToolchainManager(home, events=self.events)
         self.home = self.toolchains.home
         self.backend = backend or LocalBackend()
-        self.events = EventEmitter(on_event)
         self.store = EnvironmentStore(self.home)
         self.resolver = EnvironmentResolver(self.toolchains, self.store, self.backend, self.events)
         self.environments = EnvironmentManager(
@@ -445,6 +445,16 @@ class Runtime:
                     changes.append(ComparisonEntry(field, "changed", True, before, after))
         return EnvironmentComparison(left_info, right_info, tuple(changes))
 
+    def subject_environment(self, subject: str | os.PathLike[str]) -> Environment:
+        """Resolve a lock path or environment name to an open environment.
+
+        A path that exists on disk always wins over an environment name.
+        """
+        path = Path(subject).expanduser()
+        if path.is_file():
+            return self.open_exact(EnvironmentLock.load(path.resolve()))
+        return self.environment(str(subject))
+
     def profile(
         self,
         environment: str,
@@ -453,10 +463,10 @@ class Runtime:
         warmup: int = 1,
         repeat: int = 5,
     ) -> ProfileReport:
-        """Repeatedly check one file in fresh instances of a published environment."""
+        """Repeatedly check one file in an exact environment named by alias or lock path."""
         path = Path(file).expanduser().resolve()
         return run_profile(
-            self.environment(environment),
+            self.subject_environment(environment),
             path.read_text(encoding="utf-8"),
             filename=path.name,
             warmup=warmup,
@@ -637,6 +647,22 @@ class Runtime:
         """Build or reopen the environment described by package references."""
         return self.open_exact(
             self.prepare_references(packages, toolchain=toolchain, timeout=timeout, cancel=cancel),
+            name=name,
+            cancel=cancel,
+        )
+
+    def open_toolchain(
+        self,
+        toolchain: str,
+        *,
+        name: str | None = None,
+        timeout: float = 900,
+        cancel: threading.Event | None = None,
+    ) -> Environment:
+        """Build or reopen the core-only environment for one Lean toolchain."""
+        spec = EnvironmentSpec(toolchain)
+        return self.open_exact(
+            self.prepare(spec, timeout=timeout, cancel=cancel),
             name=name,
             cancel=cancel,
         )
@@ -866,6 +892,7 @@ class Runtime:
                 toolchain=selected,
                 source_digest=sha256_text(source),
                 policy=policy,
+                path_map={str(source_path): safe_filename},
                 cancel=cancel,
             )
 
@@ -918,6 +945,7 @@ class Runtime:
                 policy=policy,
                 project=provenance,
                 logical_command=("lake", "env", "lean", safe_filename),
+                path_map={relative: safe_filename, str(source_path): safe_filename},
                 cancel=cancel,
             )
 
@@ -951,6 +979,7 @@ class Runtime:
         policy: ExecutionPolicy,
         project: ProjectProvenance | None = None,
         logical_command: Sequence[str] | None = None,
+        path_map: Mapping[str, str] | None = None,
         cancel: threading.Event | None = None,
     ) -> ExecutionResult:
         started_at = datetime.now(timezone.utc).isoformat()
@@ -987,7 +1016,7 @@ class Runtime:
             cancel=cancel,
         )
         output = "\n".join(part for part in (raw.stdout, raw.stderr) if part)
-        diagnostics = parse_diagnostics(output)
+        diagnostics = map_diagnostic_paths(parse_diagnostics(output), path_map)
         if raw.timed_out:
             diagnostics += (error_diagnostic("Lean execution exceeded its time limit"),)
         if raw.cancelled:

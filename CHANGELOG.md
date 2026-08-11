@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Exempt environment acquisition (downloads, toolchain installs, source
+  builds) from the discovery search budget: a slow first-time download can no
+  longer expire an otherwise healthy search. Acquisition is bounded separately
+  by `DiscoveryPolicy.acquisition_timeout_seconds` and `lean-run
+  --acquire-timeout`; `--search-timeout` and `--check-timeout` name the
+  remaining budgets, with `--discovery-timeout` and `--timeout` kept as
+  deprecated aliases.
+- Split the candidate probe into `acquire` and `check` phases and announce
+  first-time toolchain installation through a `toolchain.install_started`
+  event and a `lean-run` progress line.
+- Add `ExecutionResult.errors`, `.warnings`, and `.first_error` severity views,
+  a `Diagnostic.location` property, and compact `repr` output for both types.
+  `to_dict()` payloads are unchanged.
+- Report structured diagnostics against the caller's logical input names
+  (for example `Main.lean`) instead of staged sandbox paths, and rewrite the
+  staged entrypoint path back to the user's file in `lean-run` text output.
+  Raw `stdout`/`stderr` remain authoritative and unmodified in results.
+- Add `lean.setup(toolchain="v4.32.2")` and `Runtime.open_toolchain()` for
+  reusable core-only environments; the empty-`deps` error now teaches the
+  toolchain form.
+- Accept an exact lock path anywhere `lean-runtime profile` previously
+  required an environment name (`Runtime.subject_environment`); a path that
+  exists on disk always wins over an environment name.
+
 ## 2.0.9 - 2026-08-10
 
 - Allow callers and `build-and-publish --timeout` to raise the per-step limit

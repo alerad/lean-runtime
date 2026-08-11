@@ -45,7 +45,7 @@ def setup(
     runtime: Runtime | None = None,
     cancel: threading.Event | None = None,
 ) -> PreparedEnvironment:
-    """Prepare exactly one dependency, lock, named environment, or local-project context."""
+    """Prepare exactly one dependency, lock, named environment, toolchain, or project context."""
     selected = runtime or default_runtime()
     contexts = sum(
         (
@@ -55,14 +55,19 @@ def setup(
             environment is not None,
         )
     )
+    if contexts == 0 and toolchain is not None:
+        return selected.open_toolchain(toolchain, name=name, cancel=cancel)
     if contexts != 1:
         raise SpecificationError(
-            "setup requires exactly one of deps, project, lock, or environment"
+            "setup requires exactly one of deps, project, lock, environment, or toolchain"
         )
     if deps is not None:
         normalized_deps = (deps,) if isinstance(deps, (str, PackageReference)) else tuple(deps)
         if not normalized_deps:
-            raise SpecificationError("setup deps must contain at least one dependency")
+            raise SpecificationError(
+                "setup deps must contain at least one dependency; "
+                'for core Lean, use setup(toolchain="v4.32.2")'
+            )
         return selected.open_references(
             normalized_deps, toolchain=toolchain, name=name, cancel=cancel
         )

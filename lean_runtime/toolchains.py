@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .backends import LocalBackend
 from .errors import ToolchainError
+from .events import EventEmitter
 from .policies import ExecutionPolicy
 
 ELAN_VERSION = "4.2.3"
@@ -61,9 +62,14 @@ class ToolchainManager:
     This is useful in CI and development; ordinary users get a private copy.
     """
 
-    def __init__(self, home: str | os.PathLike[str] | None = None) -> None:
+    def __init__(
+        self,
+        home: str | os.PathLike[str] | None = None,
+        events: EventEmitter | None = None,
+    ) -> None:
         self.home = Path(home).expanduser().resolve() if home else default_runtime_home()
         self.elan_home = self.home / "elan"
+        self.events = events or EventEmitter()
 
     @property
     def environment(self) -> dict[str, str]:
@@ -149,6 +155,11 @@ class ToolchainManager:
         name = normalize_toolchain(toolchain)
         if self.is_installed(name):
             return name
+        self.events.emit(
+            "toolchain.install_started",
+            f"Installing Lean toolchain {name}",
+            toolchain=name,
+        )
         process = LocalBackend().execute(
             [str(self.elan_path()), "toolchain", "install", name],
             cwd=self.home,

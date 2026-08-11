@@ -18,9 +18,14 @@ lean-run Main.lean --offline
 
 Without explicit context or a pinned Lake project, `lean-run` automatically
 searches its bundled exact-environment catalog. Use `--lock-out` to retain the
-successful lock, `--no-discover` to require explicit context,
-`--catalog PATH` to override the catalog, and `--max-candidates` plus
-`--discovery-timeout` to bound search. See
+successful lock, `--no-discover` to require explicit context, and
+`--catalog PATH` to override the catalog. Three budgets bound the work:
+`--search-timeout` covers ranking and compiler probes, `--check-timeout`
+covers each Lean invocation, and `--acquire-timeout` independently bounds
+downloading, installing, or building one candidate environment, so a slow
+first-time download cannot expire the search. `--discovery-timeout` and
+`--timeout` remain as deprecated aliases of `--search-timeout` and
+`--check-timeout`. See
 [Standalone Lean files](standalone-files.md) for routing and policy details.
 
 ## `lean-runtime`

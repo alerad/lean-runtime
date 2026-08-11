@@ -272,7 +272,7 @@ def parser() -> argparse.ArgumentParser:
     diff.add_argument("--json", action="store_true")
 
     profile = commands.add_parser("profile", help="measure repeated checks in one environment")
-    profile.add_argument("environment")
+    profile.add_argument("environment", help="environment name or exact lock path")
     profile.add_argument("file", type=Path)
     profile.add_argument("--warmup", type=int, default=1)
     profile.add_argument("--repeat", type=int, default=5)

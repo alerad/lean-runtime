@@ -22,7 +22,7 @@ from typing import Any, Generic, Literal, TextIO, TypeVar, cast
 from ._git import git_command
 from ._paths import remove_tree
 from .backends import Backend, BackendResult, InteractiveProcess, InteractiveTextReader
-from .diagnostics import error_diagnostic, parse_diagnostics
+from .diagnostics import error_diagnostic, map_diagnostic_paths, parse_diagnostics
 from .errors import EnvironmentError, MaterializationError, PolicyError
 from .events import EventEmitter
 from .lake import ROOT_MODULE
@@ -759,6 +759,7 @@ class Environment:
                 "instance_creation", round((time.monotonic() - instance_started) * 1000)
             )
             preliminary: list[BackendResult] = []
+            path_map = {str(instance / name): name for name in files}
             staging_started = time.monotonic()
             if operation == "check":
                 assert entrypoint is not None
@@ -793,6 +794,7 @@ class Environment:
                             started_at=started_at,
                             policy=policy,
                             timings=(instance_timing, staging_timing),
+                            path_map=path_map,
                         )
                         self._record_execution(
                             result,
@@ -839,6 +841,7 @@ class Environment:
                             started_at=started_at,
                             policy=policy,
                             timings=(instance_timing, staging_timing),
+                            path_map=path_map,
                         )
                         self._record_execution(
                             result,
@@ -893,6 +896,7 @@ class Environment:
                 started_at=started_at,
                 policy=policy,
                 timings=(instance_timing, staging_timing),
+                path_map=path_map,
             )
             self._record_execution(
                 result,
@@ -921,9 +925,10 @@ class Environment:
         started_at: str,
         policy: ExecutionPolicy,
         timings: tuple[PhaseTiming, ...] = (),
+        path_map: Mapping[str, str] | None = None,
     ) -> ExecutionResult:
         combined = "\n".join(part for part in (raw.stdout, raw.stderr) if part)
-        diagnostics = parse_diagnostics(combined)
+        diagnostics = map_diagnostic_paths(parse_diagnostics(combined), path_map)
         if raw.timed_out:
             diagnostics += (error_diagnostic("Lean execution exceeded its time limit"),)
         if raw.cancelled:

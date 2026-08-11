@@ -12,9 +12,13 @@ environment = lean.setup(["mathlib@v4.32.2"])
 project = lean.setup(project="./my-project")
 locked = lean.setup(lock="environment.lock.json")
 existing = lean.setup(environment="research-stack")
+core = lean.setup(toolchain="v4.32.2")
 ```
 
-Exactly one of `deps`, `project`, `lock`, or `environment` is required. The
+Exactly one of `deps`, `project`, `lock`, `environment`, or a bare
+`toolchain` is required. A bare `toolchain` prepares the core-only
+environment for that Lean release; combined with `deps` or `project` it
+remains an override. The
 default `Runtime` is created lazily on the first operation; importing
 `lean_runtime` has no filesystem or network side effects. Supply
 `runtime=Runtime(...)` to any façade function for explicit configuration.
@@ -53,7 +57,24 @@ runs. Planning metadata narrows candidates but never asserts compatibility.
 
 ## Results
 
-Results remain inspectable values. Scripts that prefer exceptions can use:
+Results remain inspectable values. Failed checks expose their parsed
+diagnostics directly:
+
+```python
+result = environment.check(source)
+
+for error in result.errors:
+    print(error.file, error.line, error.message)
+
+if result.first_error is not None:
+    print(result.first_error.location)
+```
+
+`errors` and `warnings` are severity-filtered views of `diagnostics`;
+`first_error` returns the first error or `None`. Diagnostic `file` values name
+the caller's logical input (for example `Main.lean`); raw compiler output
+remains authoritative on `stdout`/`stderr` and may contain physical sandbox
+paths. Scripts that prefer exceptions can use:
 
 ```python
 result.raise_for_error()

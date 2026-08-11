@@ -39,6 +39,11 @@ class FakeRuntime:
         self.calls.append(("deps", (deps, toolchain, name)))
         return Prepared()
 
+    def open_toolchain(self, toolchain, *, name=None, cancel=None):
+        del cancel
+        self.calls.append(("toolchain", (toolchain, name)))
+        return Prepared()
+
     def project(self, path, *, toolchain=None):
         self.calls.append(("project", (path, toolchain)))
         return SimpleNamespace(check=lambda *_args, **_kwargs: _result())
@@ -72,6 +77,18 @@ def test_setup_requires_exactly_one_context() -> None:
         setup(runtime=runtime)  # type: ignore[arg-type]
     with pytest.raises(SpecificationError, match="exactly one"):
         setup(["mathlib@v1"], project=".", runtime=runtime)  # type: ignore[arg-type]
+
+
+def test_setup_toolchain_alone_is_a_core_context() -> None:
+    runtime = FakeRuntime()
+    setup(toolchain="v4.32.2", runtime=runtime)  # type: ignore[arg-type]
+    assert runtime.calls == [("toolchain", ("v4.32.2", None))]
+
+
+def test_setup_empty_deps_error_teaches_the_toolchain_form() -> None:
+    runtime = FakeRuntime()
+    with pytest.raises(SpecificationError, match="for core Lean"):
+        setup([], toolchain="v4.32.2", runtime=runtime)  # type: ignore[arg-type]
 
 
 def test_top_level_check_and_file_delegate_without_global_runtime(tmp_path: Path) -> None:
