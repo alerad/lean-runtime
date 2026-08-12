@@ -77,15 +77,19 @@ jobs:
         run: |
           # Mathlib source builds need hours; the default 1800s build timeout
           # killed every platform job of the maiden run at exactly 30 minutes.
+          # The result file must be uniquely named: finalize downloads every
+          # platform artifact into one directory, and identical filenames
+          # silently overwrite each other (last write wins), collapsing the
+          # published index to a single platform.
           lean-runtime --availability local build-and-publish environment.lock.json \
             --publish-to ghcr.io/alerad/lean-runtime-cache \
             --timeout 18000 \
             --accelerate \
-            --platform-only --attest > platform-result.json
+            --platform-only --attest > "platform-result-${{ matrix.name }}.json"
       - uses: actions/upload-artifact@v4
         with:
           name: platform-${{ matrix.name }}
-          path: platform-result.json
+          path: platform-result-${{ matrix.name }}.json
 
   finalize:
     needs: [resolve, platform]
