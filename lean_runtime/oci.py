@@ -32,7 +32,7 @@ _BEARER_PARAMETER = re.compile(r'([a-zA-Z]+)="([^"]*)"')
 _DIGEST = re.compile(r"sha256:([0-9a-f]{64})")
 _ACCEPT = ", ".join((INDEX_MEDIA_TYPE, MANIFEST_MEDIA_TYPE))
 DEFAULT_ENVIRONMENT_LIBRARIES = ("oci://ghcr.io/alerad/lean-runtime-cache",)
-_BLOB_INTEGRITY_ATTEMPTS = 2
+_BLOB_INTEGRITY_ATTEMPTS = 4
 
 
 class SignatureVerifier(Protocol):
@@ -263,18 +263,30 @@ class OCIRegistryClient:
                     if written == size and observed_digest == digest:
                         temporary.replace(destination)
                         break
-                    temporary.unlink(missing_ok=True)
+                    # A short read is a truncated transfer (registry or proxy
+                    # closed the connection early): keep the partial so the
+                    # next attempt resumes with a Range request instead of
+                    # restarting a multi-gigabyte download from zero. Only a
+                    # complete-but-mismatched blob is real corruption.
+                    truncated = written < size
+                    if not truncated:
+                        temporary.unlink(missing_ok=True)
                     if attempt == _BLOB_INTEGRITY_ATTEMPTS:
+                        temporary.unlink(missing_ok=True)
+                        reason = "was truncated" if truncated else "failed digest verification"
                         raise EnvironmentError(
-                            "downloaded OCI blob failed digest verification "
+                            f"downloaded OCI blob {reason} "
                             f"after {attempt} attempts (expected {digest}, got "
                             f"{observed_digest}, bytes {written}/{size})"
                         )
                     events.emit(
                         "library.layer_download_retry",
-                        "Retrying OCI blob after integrity verification failed",
+                        "Resuming truncated OCI blob"
+                        if truncated
+                        else "Retrying OCI blob after integrity verification failed",
                         digest=digest,
                         attempt=attempt + 1,
+                        truncated=truncated,
                         observed_digest=observed_digest,
                         downloaded_bytes=written,
                         expected_bytes=size,
@@ -282,7 +294,17 @@ class OCIRegistryClient:
                 except urllib.error.HTTPError as exc:
                     raise DownloadUnavailable(f"OCI blob download failed: HTTP {exc.code}") from exc
                 except OSError as exc:
-                    raise DownloadUnavailable(f"OCI blob download failed: {exc}") from exc
+                    # Connection resets and read timeouts mid-transfer are
+                    # retryable; the kept partial resumes on the next attempt.
+                    if attempt == _BLOB_INTEGRITY_ATTEMPTS:
+                        raise DownloadUnavailable(f"OCI blob download failed: {exc}") from exc
+                    events.emit(
+                        "library.layer_download_retry",
+                        "Retrying OCI blob after a transport error",
+                        digest=digest,
+                        attempt=attempt + 1,
+                        error=str(exc),
+                    )
         return destination
 
     def blob_exists(self, digest: str) -> bool:
