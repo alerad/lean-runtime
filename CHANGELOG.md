@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.1 - 2026-08-12
 
 - The discovery search budget now gates starting additional candidates and
   no longer kills an in-flight authoritative check, which is bounded by its
