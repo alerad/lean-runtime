@@ -31,7 +31,10 @@ jobs:
           python -m pip install --no-cache-dir \
             "lean-runtime${{ inputs.version && format('=={0}', inputs.version) || '' }}"
       - name: Registry preflight (anonymous)
-        run: python scripts/registry_preflight.py
+        # core-v4.32.2 has no packages, so the publish workflow cannot build
+        # it from a package reference; a local core build takes ~2 minutes and
+        # is acceptable until toolchain-only publication exists.
+        run: python scripts/registry_preflight.py --skip core-v4.32.2
 
   gate:
     needs: preflight
