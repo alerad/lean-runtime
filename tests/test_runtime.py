@@ -7,7 +7,18 @@ from pathlib import Path
 
 import pytest
 
-from lean_runtime import EnvironmentSpec, ExecutionJob, ResolutionError, Runtime, ToolchainError
+from lean_runtime import (
+    EnvironmentLock,
+    EnvironmentSpec,
+    ExecutionJob,
+    ResolutionError,
+    Runtime,
+    ToolchainError,
+)
+from lean_runtime.backends import LocalBackend
+from lean_runtime.environments import Environment, EnvironmentManager
+from lean_runtime.runtime import _bundled_lock_for_references
+from lean_runtime.store import EnvironmentStore
 
 
 class FakeToolchains:
@@ -33,6 +44,54 @@ class FakeToolchains:
             )
             return [sys.executable, "-c", script, source]
         return [sys.executable, "-c", "raise SystemExit(0)"]
+
+
+def test_exact_mathlib_reference_matches_bundled_catalog_lock() -> None:
+    lock = _bundled_lock_for_references(["mathlib@v4.32.2"], None)
+    assert lock is not None
+    assert lock.toolchain == "leanprover/lean4:v4.32.2"
+    assert any(package.name == "mathlib" for package in lock.packages)
+
+
+def test_catalog_reference_match_respects_context_and_toolchain() -> None:
+    assert _bundled_lock_for_references(["mathlib@main"], None) is None
+    assert _bundled_lock_for_references(["mathlib@v4.32.2", "leancert@main"], None) is None
+    assert _bundled_lock_for_references(["mathlib@v4.32.2"], "v4.31.0") is None
+
+
+def test_environment_check_does_not_clone_published_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = EnvironmentStore(tmp_path / "runtime")
+    environment_id = "env_" + "a" * 64
+    root = store.environment_path(environment_id)
+    (root / "workspace" / ".lake" / "build" / "lib" / "lean").mkdir(parents=True)
+    lock = EnvironmentLock(
+        toolchain="leanprover/lean4:v4.32.0",
+        spec_digest="spec_" + "b" * 64,
+        root_lakefile='name = "test"\n',
+        root_module="",
+        manifest={"packages": []},
+        packages=(),
+    )
+    manager = EnvironmentManager(
+        store,
+        FakeToolchains(tmp_path / "runtime"),  # type: ignore[arg-type]
+        LocalBackend(),
+    )
+    environment = Environment(
+        manager,
+        environment_id,
+        lock,
+        root,
+        {"platform": {}, "build_profile": "release", "created_at": "2026-08-12T00:00:00Z"},
+    )
+
+    def unexpected_clone(_source: Path, _destination: Path) -> None:
+        raise AssertionError("checks must not clone a published workspace")
+
+    monkeypatch.setattr("lean_runtime.environments.clone_tree", unexpected_clone)
+    assert environment.check("example : True := by trivial").ok
 
 
 def test_check_accepts_source(tmp_path: Path) -> None:

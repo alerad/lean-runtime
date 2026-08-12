@@ -42,7 +42,7 @@ from .profiling import ProfileReport, run_profile
 from .programs import ProgramInfo, ProgramLibrary, ProgramManager, ReadyProgram
 from .projects import ProjectContext, ProjectEnvironment, discover_project
 from .publisher_verification import CosignVerifier
-from .references import PackageReference, discover_package, normalize_references
+from .references import PACKAGE_ALIASES, PackageReference, discover_package, normalize_references
 from .resolver import EnvironmentResolver
 from .serialization import sha256_id, sha256_text
 from .specs import EnvironmentSpec, GitPackage
@@ -64,6 +64,38 @@ from .verification import (
 )
 
 EnvironmentReference = Environment | EnvironmentSpec | EnvironmentLock | str
+
+
+def _bundled_lock_for_references(
+    packages: Sequence[str | PackageReference], toolchain: str | None
+) -> EnvironmentLock | None:
+    """Match a single exact alias tag to its bundled, downloadable catalog lock."""
+    references = normalize_references(packages)
+    if len(references) != 1:
+        return None
+    reference = references[0]
+    if reference.revision_kind != "tag":
+        return None
+    alias = next(
+        (
+            name
+            for name, (owner, repository, _command) in PACKAGE_ALIASES.items()
+            if reference.url == f"https://github.com/{owner}/{repository}.git"
+        ),
+        None,
+    )
+    if alias is None:
+        return None
+    entry_id = f"{alias}-{reference.revision}"
+    # Imported lazily: discovery's probe layer also imports Runtime.
+    from .discovery.defaults import default_catalog
+
+    entry = next((item for item in default_catalog().entries if item.id == entry_id), None)
+    if entry is None:
+        return None
+    if toolchain is not None and normalize_toolchain(toolchain) != entry.toolchain:
+        return None
+    return entry.lock
 
 
 def _download_reason(error: Exception) -> str:
@@ -631,6 +663,14 @@ class Runtime:
         cancel: threading.Event | None = None,
     ) -> EnvironmentLock:
         """Discover package references and resolve their exact Lake graph."""
+        catalog_lock = _bundled_lock_for_references(packages, toolchain)
+        if catalog_lock is not None:
+            self.events.emit(
+                "catalog.reference_matched",
+                "Using bundled exact environment for package reference",
+                lock_id=catalog_lock.lock_id,
+            )
+            return catalog_lock
         return self.prepare(
             self.spec_from_references(packages, toolchain=toolchain),
             timeout=timeout,

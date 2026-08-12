@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Make published-environment checks invoke Lean directly with the immutable
+  compiled module roots instead of cloning the multi-gigabyte workspace and
+  asking Lake to rescan its full build graph on every proof. Multi-file checks
+  compile support modules into the disposable scratch tree; build and execute
+  operations keep their existing isolated workspace clones.
+- Resolve exact bundled references such as `mathlib@v4.32.2` to the catalog's
+  downloadable lock before Git/Lake resolution. The Python setup API,
+  `lean-run --with`, frontmatter, and `--lock-out` now share the same lock and
+  reuse the same environment rather than creating a duplicate cache entry.
+
 ## 2.1.2 - 2026-08-12
 
 - Raise `lean-run`'s default `--check-timeout` from 120 to 300 seconds: a
