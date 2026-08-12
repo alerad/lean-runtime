@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Raise `lean-run`'s default `--check-timeout` from 120 to 300 seconds: a
+  first Mathlib check legitimately takes 2-5 minutes on slower machines
+  today (instance staging plus Lake's full trace scan), and the old default
+  timed out authoritative checks that would have succeeded.
+
 ## 2.1.1 - 2026-08-12
 
 - The discovery search budget now gates starting additional candidates and

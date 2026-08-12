@@ -106,7 +106,7 @@ def parser() -> argparse.ArgumentParser:
         "--timeout",
         dest="check_timeout",
         type=float,
-        default=120,
+        default=300,
         help="budget for one Lean invocation (--timeout is a deprecated alias)",
     )
     return root
