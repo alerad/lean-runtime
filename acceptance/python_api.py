@@ -6,8 +6,8 @@ import time
 import lean_runtime as lean
 
 env = lean.setup(lock=sys.argv[1])
-proofs = [f"example : {i} + 0 = {i} := by norm_num" for i in range(4)] + [
-    "example : (1 : Nat) = 2 := by norm_num"
+proofs = [f"import Mathlib\nexample : {i} + 0 = {i} := by norm_num" for i in range(4)] + [
+    "import Mathlib\nexample : (1 : Nat) = 2 := by norm_num"
 ]
 started = time.time()
 results = env.check_many(proofs, concurrency=4)

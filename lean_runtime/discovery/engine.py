@@ -223,10 +223,11 @@ def discover(
                     else attempt.diagnostics,
                 )
         remaining = deadline - time.monotonic()
-        timeout = min(
-            remaining,
-            plan.policy.candidate_timeout_seconds or remaining,
-        )
+        # The search budget gates STARTING candidates (checked at the top of
+        # the loop); it must not kill an in-flight authoritative check, which
+        # is bounded by its own per-candidate timeout. A slow machine's first
+        # check may legitimately outlive the remaining search budget.
+        timeout = plan.policy.candidate_timeout_seconds or remaining
         with _AttemptCancellation(timeout, cancel) as attempt_cancel:
             try:
                 outcome = probe.check(

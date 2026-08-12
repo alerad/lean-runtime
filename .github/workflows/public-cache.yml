@@ -75,13 +75,21 @@ jobs:
           LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
           LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Mathlib source builds need hours; the default 1800s build timeout
+          # killed every platform job of the maiden run at exactly 30 minutes.
+          # The result file must be uniquely named: finalize downloads every
+          # platform artifact into one directory, and identical filenames
+          # silently overwrite each other (last write wins), collapsing the
+          # published index to a single platform.
           lean-runtime --availability local build-and-publish environment.lock.json \
             --publish-to ghcr.io/alerad/lean-runtime-cache \
-            --platform-only --attest > platform-result.json
+            --timeout 18000 \
+            --accelerate \
+            --platform-only --attest > "platform-result-${{ matrix.name }}.json"
       - uses: actions/upload-artifact@v4
         with:
           name: platform-${{ matrix.name }}
-          path: platform-result.json
+          path: platform-result-${{ matrix.name }}.json
 
   finalize:
     needs: [resolve, platform]
@@ -121,5 +129,9 @@ jobs:
             --library ghcr.io/alerad/lean-runtime-cache \
             --availability required download environment.lock.json --name acceptance
           lean-runtime --home "$acceptance_home" verify acceptance --offline
-          printf 'import RuntimeEnvironment\n' > Main.lean
+          # Derive the generated root module name from the code so this smoke
+          # test cannot silently drift when the module is renamed.
+          python -c "from lean_runtime.lake import ROOT_MODULE; print(f'import {ROOT_MODULE}')" > Main.lean
           lean-runtime --home "$acceptance_home" check acceptance Main.lean
+          printf 'import Mathlib\nexample : 2 + 2 = 4 := by norm_num\n' > UserMain.lean
+          lean-runtime --home "$acceptance_home" check acceptance UserMain.lean

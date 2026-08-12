@@ -35,6 +35,7 @@ from .models import (
     PhaseTiming,
 )
 from .policies import ExecutionPolicy
+from .references import artifact_accelerators
 from .serialization import sha256_id, write_json_atomic
 from .store import (
     EnvironmentStore,
@@ -1011,6 +1012,7 @@ class EnvironmentManager:
         name: str | None = None,
         build_profile: str = "release",
         build_timeout: float = 1800,
+        accelerate: bool = False,
         cancel: threading.Event | None = None,
     ) -> Environment:
         self.store.publish_lock(lock)
@@ -1030,6 +1032,7 @@ class EnvironmentManager:
                     destination,
                     build_profile,
                     build_timeout=build_timeout,
+                    accelerate=accelerate,
                     cancel=cancel,
                 )
             else:
@@ -1075,6 +1078,7 @@ class EnvironmentManager:
         build_profile: str,
         *,
         build_timeout: float,
+        accelerate: bool = False,
         cancel: threading.Event | None,
     ) -> None:
         stage = self.store.environments / f".staging-{os.getpid()}-{uuid.uuid4().hex}"
@@ -1105,15 +1109,20 @@ class EnvironmentManager:
                 max_output_bytes=10_000_000,
             )
             hydration: list[dict[str, Any]] = []
+            accelerators = artifact_accelerators() if accelerate else {}
             for package in lock.packages:
-                if not package.artifact_command:
+                requested_command = package.artifact_command or accelerators.get(package.url, ())
+                if not requested_command:
                     continue
+                accelerated = not package.artifact_command
                 self.events.emit(
                     "artifact.hydration_started",
-                    f"Hydrating artifacts for {package.name}",
+                    f"Hydrating artifacts for {package.name}"
+                    + (" (accelerated)" if accelerated else ""),
                     package=package.name,
+                    accelerated=accelerated,
                 )
-                command = list(package.artifact_command)
+                command = list(requested_command)
                 if command[0] in {"lake", "lean"}:
                     command = self.toolchains.command(lock.toolchain, command[0], *command[1:])
                 result = self.backend.execute(
@@ -1127,6 +1136,7 @@ class EnvironmentManager:
                     {
                         "package": package.name,
                         "command": command,
+                        "accelerated": accelerated,
                         "exit_code": result.exit_code,
                         "output": result.stdout + result.stderr,
                     }
