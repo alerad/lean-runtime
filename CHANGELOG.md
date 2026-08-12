@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.2 - 2026-08-12
 
 - Raise `lean-run`'s default `--check-timeout` from 120 to 300 seconds: a
   first Mathlib check legitimately takes 2-5 minutes on slower machines
