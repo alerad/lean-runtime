@@ -10,9 +10,7 @@ proofs = [f"import Mathlib\nexample : {i} + 0 = {i} := by norm_num" for i in ran
     "import Mathlib\nexample : (1 : Nat) = 2 := by norm_num"
 ]
 started = time.time()
-results = env.check_many(
-    proofs, concurrency=2, policy=lean.ExecutionPolicy(timeout_seconds=600)
-)
+results = env.check_many(proofs, concurrency=2, policy=lean.ExecutionPolicy(timeout_seconds=600))
 ok = sum(r.ok for r in results)
 assert ok == 4, f"expected 4/5 accepted, got {ok}/5"
 bad = results[-1]
