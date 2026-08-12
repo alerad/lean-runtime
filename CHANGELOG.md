@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The discovery search budget now gates starting additional candidates and
+  no longer kills an in-flight authoritative check, which is bounded by its
+  own per-candidate timeout. A slow machine's first Mathlib check can outlive
+  the remaining search budget legitimately.
+- OCI blob downloads keep partials on truncated transfers and resume with a
+  Range request, retry transport errors mid-stream, and attempt four times.
 - Add `build-and-publish --accelerate`: hydrate artifacts from known package
   caches (Mathlib's `lake exe cache get`) for locked packages that carry no
   artifact command of their own. Acceleration is keyed by exact canonical

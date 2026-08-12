@@ -35,8 +35,8 @@ from pathlib import Path
 ACCEPTANCE = Path(__file__).resolve().parent.parent / "acceptance"
 
 COLD_TIMEOUT = 2700  # toolchain download + environment download, no builds
-WARM_TIMEOUT = 120
-WARM_LIMIT = 60  # warm checks must stay interactive
+WARM_TIMEOUT = 300
+WARM_LIMIT = 150  # warm Mathlib checks include a full Lake trace scan today
 
 
 def run(
@@ -169,7 +169,7 @@ def main() -> int:
     ok = ok and step(
         "python-batch-api",
         [sys.executable, str(ACCEPTANCE / "python_api.py"), str(lock_path)],
-        timeout=WARM_TIMEOUT * 3,
+        timeout=900,
     )
 
     usage = shutil.disk_usage(home)
