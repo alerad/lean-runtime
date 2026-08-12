@@ -35,8 +35,10 @@ from pathlib import Path
 ACCEPTANCE = Path(__file__).resolve().parent.parent / "acceptance"
 
 COLD_TIMEOUT = 2700  # toolchain download + environment download, no builds
-WARM_TIMEOUT = 300
-WARM_LIMIT = 240  # warm Mathlib checks include a full Lake trace scan today
+WARM_TIMEOUT = 600
+WARM_LIMIT = 400  # hang detector, not a perf bar: GitHub macOS runners take ~4x
+# longer than real hardware for the warm Lake trace scan (238s observed vs 38s
+# on an M-series laptop)
 
 
 def run(
