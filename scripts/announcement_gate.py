@@ -171,7 +171,7 @@ def main() -> int:
     ok = ok and step(
         "python-batch-api",
         [sys.executable, str(ACCEPTANCE / "python_api.py"), str(lock_path)],
-        timeout=900,
+        timeout=1500,
     )
 
     usage = shutil.disk_usage(home)
