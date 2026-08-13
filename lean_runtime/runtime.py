@@ -40,7 +40,13 @@ from .oci import (
 from .policies import ExecutionPolicy
 from .profiling import ProfileReport, run_profile
 from .programs import ProgramInfo, ProgramLibrary, ProgramManager, ReadyProgram
-from .projects import ProjectContext, ProjectEnvironment, discover_project
+from .projects import (
+    ProjectContext,
+    ProjectEnvironment,
+    ProjectPublicationPlan,
+    discover_project,
+    inspect_project_publication,
+)
 from .publisher_verification import CosignVerifier
 from .references import PACKAGE_ALIASES, PackageReference, discover_package, normalize_references
 from .resolver import EnvironmentResolver
@@ -383,12 +389,22 @@ class Runtime:
                 publisher.repository, result.publication_id
             )
         if attest:
+            self.events.emit(
+                "library.attestation_started",
+                "Verifying and attesting the published environment",
+                environment_id=environment.id,
+            )
             report = self.verify(environment.id)
             report.raise_for_error()
             CosignVerifier(executable=self.verification_executable).attest(
                 publisher.repository,
                 result.publication_id or result.computer_copy_id,
                 report.to_dict(),
+            )
+            self.events.emit(
+                "library.attestation_published",
+                "Published the signed environment attestation",
+                digest=result.publication_id or result.computer_copy_id,
             )
         return result
 
@@ -579,12 +595,28 @@ class Runtime:
         computer_records: Sequence[dict[str, Any]],
         *,
         tags: Sequence[str] = (),
+        sign: bool = False,
     ) -> str:
         """Finalize a deterministic publication for multiple computer types."""
         publisher = OCIEnvironmentPublisher(
             OCIRepository.parse(library), self.store, self.bundles, self.events
         )
-        return publisher.publish_index(lock_id, list(computer_records), tags=tuple(tags))
+        publication_id = publisher.publish_index(lock_id, list(computer_records), tags=tuple(tags))
+        if sign:
+            self.events.emit(
+                "library.index_signing_started",
+                "Signing the finalized environment index",
+                digest=publication_id,
+            )
+            CosignVerifier(executable=self.verification_executable).sign(
+                publisher.repository, publication_id
+            )
+            self.events.emit(
+                "library.index_signed",
+                "Signed the finalized environment index",
+                digest=publication_id,
+            )
+        return publication_id
 
     def create_environment(
         self,
@@ -831,6 +863,64 @@ class Runtime:
         if toolchain is not None:
             context = replace(context, toolchain=normalize_toolchain(toolchain))
         return ProjectEnvironment(self, context)
+
+    def inspect_project_publication(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        module: str | None = None,
+        check_remote: bool = False,
+    ) -> ProjectPublicationPlan:
+        """Assess a local project without building or mutating it."""
+        return inspect_project_publication(self, path, module=module, check_remote=check_remote)
+
+    def prepare_project(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        module: str | None = None,
+        timeout: float = 900,
+        cancel: threading.Event | None = None,
+    ) -> EnvironmentLock:
+        """Freeze a clean, remotely available GitHub project into an exact lock."""
+        plan = self.inspect_project_publication(
+            path, module=module, check_remote=True
+        ).require_ready()
+        assert plan.repository is not None
+        assert plan.revision is not None
+        assert plan.selected_module is not None
+        spec = EnvironmentSpec(
+            plan.toolchain,
+            (
+                GitPackage.git(
+                    plan.package,
+                    plan.repository,
+                    plan.revision,
+                    root_module=plan.selected_module,
+                ),
+            ),
+        )
+        return self.prepare(spec, timeout=timeout, cancel=cancel)
+
+    def export_project(
+        self,
+        path: str | os.PathLike[str],
+        output: str | os.PathLike[str],
+        *,
+        module: str | None = None,
+        timeout: float = 1800,
+        accelerate: bool = True,
+        cancel: threading.Event | None = None,
+    ) -> PortableCopyInfo:
+        """Build and export the current platform for one immutable project commit."""
+        lock = self.prepare_project(path, module=module, timeout=timeout, cancel=cancel)
+        environment = self.open_exact(
+            lock,
+            build_timeout=timeout,
+            accelerate=accelerate,
+            cancel=cancel,
+        )
+        return self.save_portable_copy(environment.id, output)
 
     def clean(
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000

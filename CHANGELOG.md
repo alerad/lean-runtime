@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased
+
+- Extend the bundled catalog through Mathlib v4.33.0 and add exact LeanCert
+  environments for the supported Lean 4.30, 4.31, 4.32, and 4.33 lines.
+  Otherwise-equivalent discovery candidates now prefer the smallest exact
+  dependency closure, so LeanCert support does not enlarge ordinary Mathlib
+  checks.
+- Make the public-cache post-publication consumer genuinely anonymous by
+  withholding registry credentials during its clean download and import probe.
+- Verify imported immutable environments through their compiled module paths,
+  avoiding Lake dependency resolution that could attempt network clones after
+  a successful offline OCI import.
+- Add a strict existing-project publication journey: `lean-runtime project
+  inspect`, `project lock`, `project export`, and `project init-publish` turn a
+  clean, pushed root GitHub Lean project into an exact managed environment.
+- Add a public reusable GitHub workflow that builds Linux AMD64, macOS AMD64,
+  and macOS ARM64 environments, signs and attests their artifacts, finalizes
+  the OCI index atomically, and runs clean anonymous import checks on every
+  platform.
+- Validate registry configuration inside the CLI error boundary so malformed
+  libraries produce concise invocation errors instead of Python tracebacks.
+- Report total, uploaded, and remotely reused OCI blob bytes (plus the reuse
+  percentage) in every environment publication result. Reusable workflows can
+  set `minimum-reuse-percent` to make regressions fail the publication job.
+- Emit visible progress for bundle export, blob upload/reuse, platform
+  manifests, attestations, and final index signing during long publications.
+- Publish from the verified OCI layout directly, avoiding the redundant outer
+  gzip archive and immediate re-extraction previously performed before upload.
+- Compress deterministic OCI layers at gzip level 6 instead of Python's
+  level-9 default; a representative Mathlib subtree encoded about eight times
+  faster for roughly two percent more bytes.
+- Exclude clone-specific Git administration data from package layers and carry
+  a verified deterministic source-tree inventory instead. Identical dependency
+  trees now produce identical blobs across clean builders, so OCI reuse works
+  across project revisions rather than only within one local environment.
+- Omit Lake's path-sensitive `.trace`, `.setup.json`, and response-file metadata from
+  check-profile layers. Lean checks use the retained compiled artifacts, while
+  clean builders no longer invalidate multi-gigabyte blobs solely because their
+  temporary workspace paths differ.
+
 ## 2.2.0 - 2026-08-12
 
 - Make published-environment checks invoke Lean directly with the immutable

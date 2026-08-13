@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .backends import Backend
 from .bundles import _packages_directory, _verify_package, _verify_workspace_lock
 from .environments import Environment, EnvironmentManager
 from .errors import EnvironmentError
@@ -17,7 +16,6 @@ from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock
 from .policies import ExecutionPolicy
 from .store import EnvironmentStore, environment_identity, platform_compatibility
-from .toolchains import ToolchainManager
 
 VERIFY_SCHEMA = "lean-runtime.verify/v1"
 
@@ -67,17 +65,18 @@ def _verify_sources(environment: Environment) -> None:
         _verify_package(packages / package.name, package)
 
 
-def _probe(environment: Environment, toolchains: ToolchainManager, backend: Backend) -> None:
-    command = toolchains.command(
-        environment.lock.toolchain, "lake", "env", "lean", f"{ROOT_MODULE}.lean"
-    )
-    result = backend.execute(
-        command,
-        cwd=environment.root / "workspace",
-        environment=toolchains.environment,
+def _probe(environment: Environment) -> None:
+    """Probe the immutable compiled environment without asking Lake to resolve it."""
+
+    result = environment.check(
+        f"import {ROOT_MODULE}\n",
+        # The generated environment module itself is named ROOT_MODULE.  Giving
+        # the probe that filename would make Lean see `import X` inside X and
+        # correctly reject it as an import cycle.
+        filename="LeanRuntimeVerification.lean",
         policy=ExecutionPolicy(timeout_seconds=300, max_output_bytes=2_000_000),
     )
-    if result.exit_code:
+    if not result.ok:
         raise EnvironmentError(
             "environment verification probe failed: " + (result.stdout + result.stderr)[-2000:]
         )
@@ -95,7 +94,7 @@ def _rebuild_inventory(runtime: Any, environment: Environment) -> tuple[str, str
         manager = EnvironmentManager(store, runtime.toolchains, runtime.backend, runtime.events)
         rebuilt = manager.ensure(environment.lock)
         _verify_sources(rebuilt)
-        _probe(rebuilt, runtime.toolchains, runtime.backend)
+        _probe(rebuilt)
         rebuilt_inventory = _artifact_inventory(rebuilt.root / "workspace")
     return original.digest, rebuilt_inventory.digest
 
@@ -213,7 +212,7 @@ def verify_environment(
             raise EnvironmentError(
                 "offline verification requires the locked toolchain to be installed"
             )
-        _probe(environment, runtime.toolchains, runtime.backend)
+        _probe(environment)
         probe = VerificationCheck("lean_probe_passed", True)
     except EnvironmentError as exc:
         probe = VerificationCheck("probe_failed", False, details={"message": str(exc)})

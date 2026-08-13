@@ -35,6 +35,7 @@ nav:
       - Environments: environments.md
       - Local Lake projects: local-projects.md
       - Portable copies and libraries: portable-copies.md
+      - Publishing a Lean project: project-publishing.md
       - Ready-to-run programs: ready-programs.md
       - Python API: python-api.md
       - CLI: cli.md

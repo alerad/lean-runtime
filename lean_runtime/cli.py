@@ -16,6 +16,7 @@ from .lockfiles import EnvironmentLock
 from .matrix import load_matrix
 from .models import ExecutionResult, PhaseTiming
 from .policies import ExecutionPolicy
+from .projects import discover_project, project_publication_workflow
 from .runtime import Runtime
 from .specs import EnvironmentSpec
 from .timings import render_timings
@@ -172,6 +173,7 @@ def parser() -> argparse.ArgumentParser:
     publish_index.add_argument("platform_results", nargs="+", type=Path)
     publish_index.add_argument("--library", required=True)
     publish_index.add_argument("--tag", action="append", default=[])
+    publish_index.add_argument("--sign", action="store_true")
 
     export = commands.add_parser("save-copy", help="save a verified portable environment copy")
     export.add_argument("environment")
@@ -333,23 +335,118 @@ def parser() -> argparse.ArgumentParser:
 
     install = commands.add_parser("install", help="install a Lean toolchain")
     install.add_argument("toolchain")
+
+    project = commands.add_parser(
+        "project", help="inspect, freeze, or export a pinned GitHub Lean project"
+    )
+    project_commands = project.add_subparsers(dest="project_command", required=True)
+    project_inspect = project_commands.add_parser(
+        "inspect", help="report whether a project is ready for immutable publication"
+    )
+    project_inspect.add_argument("path", type=Path, nargs="?", default=Path("."))
+    project_inspect.add_argument("--module")
+    project_inspect.add_argument("--check-remote", action="store_true")
+    project_inspect.add_argument("--json", action="store_true")
+    project_lock = project_commands.add_parser(
+        "lock", help="freeze a clean, pushed project into an exact environment lock"
+    )
+    project_lock.add_argument("path", type=Path, nargs="?", default=Path("."))
+    project_lock.add_argument("--module")
+    project_lock.add_argument("--output", type=Path)
+    project_lock.add_argument("--timeout", type=float, default=900)
+    project_export = project_commands.add_parser(
+        "export", help="build and export this computer's immutable project environment"
+    )
+    project_export.add_argument("path", type=Path, nargs="?", default=Path("."))
+    project_export.add_argument("--module")
+    project_export.add_argument("--output", type=Path, required=True)
+    project_export.add_argument("--timeout", type=float, default=1800)
+    project_export.add_argument("--no-accelerate", action="store_true")
+    project_init = project_commands.add_parser(
+        "init-publish", help="generate a caller for the multi-platform publication workflow"
+    )
+    project_init.add_argument("path", type=Path, nargs="?", default=Path("."))
+    project_init.add_argument("--module", required=True)
+    project_init.add_argument("--library", required=True)
+    project_init.add_argument(
+        "--output",
+        type=Path,
+    )
+    project_init.add_argument("--force", action="store_true")
     return root
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     operation_started = time.monotonic()
-    runtime = Runtime(
-        home=args.home,
-        on_event=None if args.quiet else _progress,
-        availability=args.availability,
-        libraries=args.libraries,
-        publisher_verification=args.publisher_verification,
-        trusted_publisher=args.trusted_publisher,
-        trusted_issuer=args.trusted_issuer,
-        verification_tool=args.verification_tool,
-    )
     try:
+        runtime = Runtime(
+            home=args.home,
+            on_event=None if args.quiet else _progress,
+            availability=args.availability,
+            libraries=args.libraries,
+            publisher_verification=args.publisher_verification,
+            trusted_publisher=args.trusted_publisher,
+            trusted_issuer=args.trusted_issuer,
+            verification_tool=args.verification_tool,
+        )
+        if args.command == "project":
+            if args.project_command == "inspect":
+                plan = runtime.inspect_project_publication(
+                    args.path, module=args.module, check_remote=args.check_remote
+                )
+                if args.json:
+                    _json(plan.to_dict())
+                else:
+                    print(f"Project: {plan.package}")
+                    print(f"Root: {plan.root}")
+                    print(f"Toolchain: {plan.toolchain}")
+                    print(f"Repository: {plan.repository or 'unavailable'}")
+                    print(f"Revision: {plan.revision or 'unavailable'}")
+                    print(f"Import roots: {', '.join(plan.modules)}")
+                    print(f"Selected: {plan.selected_module or 'none'}")
+                    print(f"Ready to publish: {'yes' if plan.ready else 'no'}")
+                    for blocker in plan.blockers:
+                        print(f"  - {blocker}")
+                return 0 if plan.ready else 1
+            if args.project_command == "lock":
+                lock = runtime.prepare_project(args.path, module=args.module, timeout=args.timeout)
+                output = args.output or discover_project(args.path).root / "environment.lock.json"
+                lock.write(output)
+                _json(
+                    {
+                        "lock_id": lock.lock_id,
+                        "toolchain": lock.toolchain,
+                        "output": str(output),
+                    }
+                )
+                return 0
+            if args.project_command == "export":
+                info = runtime.export_project(
+                    args.path,
+                    args.output,
+                    module=args.module,
+                    timeout=args.timeout,
+                    accelerate=not args.no_accelerate,
+                )
+                _json(info.to_dict())
+                return 0
+            plan = runtime.inspect_project_publication(args.path, module=args.module)
+            invalid = [
+                blocker for blocker in plan.blockers if not blocker.startswith("checkout is dirty")
+            ]
+            if invalid:
+                raise ValueError("cannot generate publication workflow:\n- " + "\n- ".join(invalid))
+            output = args.output or plan.root / ".github/workflows/publish-lean-environment.yml"
+            if output.exists() and not args.force:
+                raise ValueError(f"workflow already exists: {output}; pass --force to replace")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                project_publication_workflow(library=args.library, module=args.module),
+                encoding="utf-8",
+            )
+            print(f"Created {output}")
+            return 0
         if args.command == "install":
             print(runtime.toolchains.ensure(args.toolchain))
             return 0
@@ -419,9 +516,14 @@ def main(argv: list[str] | None = None) -> int:
                 if not isinstance(descriptor, dict):
                     raise ValueError(f"invalid platform result: {path}")
                 descriptors.append(descriptor)
-            digest = runtime.finalize_publication(
-                args.library, args.lock_id, descriptors, tags=args.tag
-            )
+            if args.sign:
+                digest = runtime.finalize_publication(
+                    args.library, args.lock_id, descriptors, tags=args.tag, sign=True
+                )
+            else:
+                digest = runtime.finalize_publication(
+                    args.library, args.lock_id, descriptors, tags=args.tag
+                )
             _json({"exact_environment_id": args.lock_id, "publication_id": digest})
             return 0
         if args.command == "save-copy":

@@ -119,10 +119,7 @@ jobs:
             --library ghcr.io/alerad/lean-runtime-cache)
           if [[ -n "$ALIAS_TAG" ]]; then args+=(--tag "$ALIAS_TAG"); fi
           lean-runtime "${args[@]}"
-      - name: Verify a clean public-cache client
-        env:
-          LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
-          LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify an anonymous clean public-cache client
         run: |
           acceptance_home="$RUNNER_TEMP/lean-runtime-cache-acceptance"
           lean-runtime --home "$acceptance_home" \

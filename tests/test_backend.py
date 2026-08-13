@@ -59,7 +59,7 @@ def test_caller_interrupt_stops_child_before_propagating(tmp_path: Path) -> None
 
     class Interrupt:
         def is_set(self) -> bool:
-            if pid_path.exists():
+            if pid_path.exists() and pid_path.read_text():
                 raise KeyboardInterrupt
             return False
 

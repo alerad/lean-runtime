@@ -156,6 +156,21 @@ controls whether ready-to-use environments are downloaded or built locally.
 `LEAN_RUNTIME_LIBRARIES` accepts a comma-separated equivalent and
 `LEAN_RUNTIME_AVAILABILITY` sets the default policy.
 
+## Publish an existing project
+
+```bash
+lean-runtime project inspect . --module MyProject --check-remote
+lean-runtime project lock . --module MyProject
+lean-runtime project export . --module MyProject --output MyProject.lean-environment
+lean-runtime project init-publish . --module MyProject \
+  --library ghcr.io/owner/my-project-environments
+```
+
+`inspect` is read-only. The other commands require a clean root GitHub project
+whose exact HEAD commit is available from `origin`. `init-publish` creates a
+small caller for the maintained multi-platform publication and clean-consumer
+workflow. See [Publishing a Lean project](project-publishing.md).
+
 Use global `--publisher_verification required --trusted-publisher ID --trusted-issuer ISSUER`
 to require a verified publisher. `build-and-publish --sign` records the trusted
 publisher using the configured Cosign identity.

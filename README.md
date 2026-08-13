@@ -49,16 +49,17 @@ lean-run Main.lean --lock-out environment.lock.json
 lean-run Main.lean --lock environment.lock.json
 ```
 
-The initial catalog covers core Lean v4.32.2 plus Mathlib v4.32.2, v4.31.0, and
-v4.30.0. Runtime first tries its local store and downloadable environment libraries,
-then builds the exact source environment when necessary. Use `--no-source-build` to
-forbid that potentially large fallback or `--offline` to use retained environments only.
+The bundled catalog covers Mathlib v4.30.0 through v4.33.0 and matching LeanCert
+releases, plus core Lean v4.32.2. Runtime first tries its local store and downloadable
+environment libraries, then builds the exact source environment when necessary. Use
+`--no-source-build` to forbid that potentially large fallback or `--offline` to use
+retained environments only.
 
 Explicit frontmatter remains available when the desired context is already known:
 
 ```lean
 -- /// lean-runtime
--- requires = ["mathlib@v4.32.2"]
+-- requires = ["mathlib@v4.33.0"]
 -- ///
 
 import Mathlib
@@ -67,13 +68,13 @@ import Mathlib
 The same context can be supplied from the command line:
 
 ```bash
-lean-run Main.lean --with mathlib@v4.32.2
+lean-run Main.lean --with mathlib@v4.33.0
 ```
 
 Create an exact lock from an explicit dependency for CI without changing the file:
 
 ```bash
-lean-run Main.lean --with mathlib@v4.32.2 \
+lean-run Main.lean --with mathlib@v4.33.0 \
   --lock-out environment.lock.json
 lean-run Main.lean --lock environment.lock.json
 ```
@@ -85,7 +86,7 @@ Configure an environment once, then use it repeatedly:
 ```python
 import lean_runtime as lean
 
-env = lean.setup(["mathlib@v4.32.2"])
+env = lean.setup(["mathlib@v4.33.0"])
 
 result = env.check(
     """
@@ -132,7 +133,7 @@ result = project.check_file("./my-project/MyProject/Main.lean")
 One-shot helpers are available when setup reuse is unnecessary:
 
 ```python
-result = lean.check(source, deps=["mathlib@v4.32.2"])
+result = lean.check(source, deps=["mathlib@v4.33.0"])
 result = lean.check_file("./my-project/MyProject/Main.lean")
 ```
 
@@ -170,6 +171,20 @@ lean-runtime build-and-publish environment.lock.json \
   --publish-to ghcr.io/owner/lean-environments
 ```
 
+To publish an existing clean, pushed GitHub Lean project, inspect it and
+generate the maintained multi-platform workflow:
+
+```bash
+lean-runtime project inspect . --module MyProject
+lean-runtime project init-publish . \
+  --module MyProject \
+  --library ghcr.io/owner/my-project-environments
+```
+
+The workflow builds and verifies Linux and macOS environments, finalizes the
+index atomically, then checks clean consumers. See
+[Publishing a Lean project](https://alerad.github.io/lean-runtime/project-publishing/).
+
 For an already-built executable, Lean Runtime can also create a verified
 **ready-to-run program**. It opens without rebuilding the project, can be saved
 as a portable copy, and can be shared through a public or private program
@@ -191,6 +206,7 @@ architecture documentation.
 - [`lean-run` and operations CLI](https://github.com/alerad/lean-runtime/blob/main/docs/cli.md)
 - [Managed environments](https://github.com/alerad/lean-runtime/blob/main/docs/environments.md)
 - [Local Lake projects](https://github.com/alerad/lean-runtime/blob/main/docs/local-projects.md)
+- [Publishing a Lean project](https://github.com/alerad/lean-runtime/blob/main/docs/project-publishing.md)
 - [Portable copies and environment libraries](https://github.com/alerad/lean-runtime/blob/main/docs/portable-copies.md)
 - [Ready-to-run programs](https://github.com/alerad/lean-runtime/blob/main/docs/ready-programs.md)
 - [Architecture](https://github.com/alerad/lean-runtime/blob/main/docs/architecture.md)

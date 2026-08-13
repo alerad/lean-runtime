@@ -13,7 +13,7 @@ import subprocess
 import tarfile
 import tempfile
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -44,6 +44,7 @@ MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 MAX_BUNDLE_BYTES = 20 * 1024**3
 MAX_FILES = 2_000_000
+SOURCE_TREE_INVENTORY = ".lean-runtime-source-tree.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,20 +98,54 @@ def _normalized_info(name: str, *, mode: int, kind: bytes = tarfile.REGTYPE) -> 
     return info
 
 
-def _tree_entries(root: Path, excluded: Path | None = None) -> Iterable[tuple[Path, str]]:
+def _tree_entries(
+    root: Path,
+    excluded: Path | None = None,
+    *,
+    excluded_names: frozenset[str] = frozenset(),
+    omit_volatile_build_metadata: bool = False,
+) -> Iterable[tuple[Path, str]]:
     for path in sorted(root.rglob("*"), key=lambda value: value.relative_to(root).as_posix()):
         if excluded is not None and (path == excluded or excluded in path.parents):
             continue
-        yield path, path.relative_to(root).as_posix()
+        relative = path.relative_to(root)
+        if relative.parts and relative.parts[0] in excluded_names:
+            continue
+        if (
+            omit_volatile_build_metadata
+            and ".lake" in relative.parts
+            and (
+                relative.name.endswith(".trace")
+                or relative.name.endswith(".setup.json")
+                or relative.name.endswith(".rsp")
+            )
+        ):
+            continue
+        yield path, relative.as_posix()
 
 
-def _write_tar_gzip(root: Path, output: Path, *, excluded: Path | None = None) -> None:
+def _write_tar_gzip(
+    root: Path,
+    output: Path,
+    *,
+    excluded: Path | None = None,
+    excluded_names: frozenset[str] = frozenset(),
+    extra_files: Mapping[str, bytes] | None = None,
+    omit_volatile_build_metadata: bool = False,
+) -> None:
     with (
         output.open("wb") as raw_output,
-        gzip.GzipFile(filename="", mode="wb", fileobj=raw_output, mtime=0) as compressed,
+        gzip.GzipFile(
+            filename="", mode="wb", fileobj=raw_output, compresslevel=6, mtime=0
+        ) as compressed,
         tarfile.open(fileobj=compressed, mode="w|", format=tarfile.PAX_FORMAT) as archive,
     ):
-        for path, name in _tree_entries(root, excluded):
+        for path, name in _tree_entries(
+            root,
+            excluded,
+            excluded_names=excluded_names,
+            omit_volatile_build_metadata=omit_volatile_build_metadata,
+        ):
             stat = path.lstat()
             mode = stat.st_mode & 0o777
             if path.is_symlink():
@@ -128,6 +163,11 @@ def _write_tar_gzip(root: Path, output: Path, *, excluded: Path | None = None) -
                     archive.addfile(info, handle)
             else:
                 raise EnvironmentError(f"bundle contains unsupported filesystem entry: {path}")
+        for name, data in sorted((extra_files or {}).items()):
+            _safe_name(name)
+            info = _normalized_info(name, mode=0o644)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
 
 
 def _tar_gzip(root: Path, *, excluded: Path | None = None) -> bytes:
@@ -146,7 +186,9 @@ def _oci_archive(entries: dict[str, bytes]) -> bytes:
             info.size = len(data)
             archive.addfile(info, io.BytesIO(data))
     output = io.BytesIO()
-    with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as compressed:
+    with gzip.GzipFile(
+        filename="", mode="wb", fileobj=output, compresslevel=6, mtime=0
+    ) as compressed:
         compressed.write(raw.getvalue())
     return output.getvalue()
 
@@ -154,7 +196,9 @@ def _oci_archive(entries: dict[str, bytes]) -> bytes:
 def _write_oci_archive(entries: dict[str, Path], output: Path) -> None:
     with (
         output.open("wb") as raw_output,
-        gzip.GzipFile(filename="", mode="wb", fileobj=raw_output, mtime=0) as compressed,
+        gzip.GzipFile(
+            filename="", mode="wb", fileobj=raw_output, compresslevel=6, mtime=0
+        ) as compressed,
         tarfile.open(fileobj=compressed, mode="w|", format=tarfile.PAX_FORMAT) as archive,
     ):
         for name, path in sorted(entries.items()):
@@ -261,6 +305,22 @@ def _packages_directory(lock: EnvironmentLock) -> PurePosixPath:
     return path
 
 
+def _bundle_lean_paths(workspace: Path, lock: EnvironmentLock) -> tuple[Path, ...]:
+    packages = workspace.joinpath(*_packages_directory(lock).parts)
+    roots: list[Path] = []
+    for package in lock.packages:
+        root = packages / package.name
+        if package.subdir:
+            root = root.joinpath(*PurePosixPath(package.subdir).parts)
+        compiled = root / ".lake" / "build" / "lib" / "lean"
+        if compiled.is_dir():
+            roots.append(compiled)
+    workspace_root = workspace / ".lake" / "build" / "lib" / "lean"
+    if workspace_root.is_dir():
+        roots.append(workspace_root)
+    return tuple(roots)
+
+
 def _extract_layer(data: bytes | Path, destination: Path) -> None:
     total = 0
     count = 0
@@ -307,6 +367,133 @@ def _extract_layer(data: bytes | Path, destination: Path) -> None:
                 raise EnvironmentError(f"unsupported bundle member: {member.name!r}")
 
 
+def _git_object_id(kind: str, data: bytes) -> str:
+    framed = f"{kind} {len(data)}\0".encode() + data
+    return hashlib.sha1(framed, usedforsecurity=False).hexdigest()  # noqa: S324
+
+
+def _source_tree_inventory(root: Path, package: LockedPackage) -> bytes:
+    process = subprocess.run(
+        git_command("-C", str(root), "ls-tree", "-rz", "--full-tree", "HEAD"),
+        capture_output=True,
+        check=False,
+    )
+    if process.returncode:
+        raise EnvironmentError(f"could not inventory package source: {package.name}")
+    entries: list[dict[str, str]] = []
+    for record in process.stdout.split(b"\0"):
+        if not record:
+            continue
+        try:
+            header, raw_path = record.split(b"\t", 1)
+            mode, kind, object_id = header.decode("ascii").split(" ")
+            path = raw_path.decode("utf-8")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise EnvironmentError(f"package has an unsupported Git tree: {package.name}") from exc
+        _safe_name(path)
+        if path == SOURCE_TREE_INVENTORY:
+            raise EnvironmentError(
+                f"package uses reserved runtime path {SOURCE_TREE_INVENTORY!r}: {package.name}"
+            )
+        supported = (kind == "blob" and mode in {"100644", "100755", "120000"}) or (
+            kind == "commit" and mode == "160000"
+        )
+        if not supported:
+            raise EnvironmentError(
+                f"package has an unsupported Git tree entry {path!r}: {package.name}"
+            )
+        entries.append({"path": path, "mode": mode, "object_id": object_id})
+    return canonical_json_bytes(
+        {
+            "schema": "lean-runtime-source-tree/1",
+            "revision": package.revision,
+            "tree_hash": package.tree_hash,
+            "entries": entries,
+        }
+    )
+
+
+def _inventory_tree_id(entries: list[dict[str, str]]) -> str:
+    root: dict[str, Any] = {}
+    for entry in entries:
+        parts = PurePosixPath(entry["path"]).parts
+        node = root
+        for part in parts[:-1]:
+            existing = node.setdefault(part, {})
+            if not isinstance(existing, dict):
+                raise EnvironmentError("source tree inventory has conflicting paths")
+            node = existing
+        if parts[-1] in node:
+            raise EnvironmentError("source tree inventory has duplicate paths")
+        node[parts[-1]] = (entry["mode"], entry["object_id"])
+
+    def tree_id(node: dict[str, Any]) -> str:
+        records: list[tuple[bytes, bytes]] = []
+        for name, value in node.items():
+            raw_name = name.encode("utf-8")
+            if isinstance(value, dict):
+                mode = "40000"
+                object_id = tree_id(value)
+                sort_key = raw_name + b"/"
+            else:
+                mode, object_id = value
+                sort_key = raw_name + b"\0"
+            record = mode.encode("ascii") + b" " + raw_name + b"\0" + bytes.fromhex(object_id)
+            records.append((sort_key, record))
+        return _git_object_id("tree", b"".join(record for _, record in sorted(records)))
+
+    return tree_id(root)
+
+
+def _verify_source_tree_inventory(root: Path, package: LockedPackage, path: Path) -> None:
+    value = _json_object(path.read_bytes(), f"package {package.name} source tree inventory")
+    if (
+        value.get("schema") != "lean-runtime-source-tree/1"
+        or value.get("revision") != package.revision
+        or value.get("tree_hash") != package.tree_hash
+        or not isinstance(value.get("entries"), list)
+    ):
+        raise EnvironmentError(f"bundled package source inventory mismatch: {package.name}")
+    entries: list[dict[str, str]] = []
+    for raw in value["entries"]:
+        if not isinstance(raw, dict) or set(raw) != {"path", "mode", "object_id"}:
+            raise EnvironmentError(f"bundled package source inventory is invalid: {package.name}")
+        entry = {key: raw[key] for key in ("path", "mode", "object_id")}
+        if not all(isinstance(item, str) for item in entry.values()):
+            raise EnvironmentError(f"bundled package source inventory is invalid: {package.name}")
+        source_name = entry["path"]
+        _safe_name(source_name)
+        mode = entry["mode"]
+        object_id = entry["object_id"]
+        if (
+            mode not in {"100644", "100755", "120000", "160000"}
+            or re.fullmatch(r"[0-9a-f]{40}", object_id) is None
+        ):
+            raise EnvironmentError(f"bundled package source inventory is invalid: {package.name}")
+        source = root.joinpath(*PurePosixPath(source_name).parts)
+        if mode == "160000":
+            if not source.is_dir():
+                raise EnvironmentError(f"bundled package Git link mismatch: {package.name}")
+            entries.append(entry)
+            continue
+        if mode == "120000":
+            if not source.is_symlink():
+                raise EnvironmentError(f"bundled package source mismatch: {package.name}")
+            data = os.readlink(source).encode("utf-8")
+        else:
+            if not source.is_file() or source.is_symlink():
+                raise EnvironmentError(f"bundled package source mismatch: {package.name}")
+            executable = bool(source.stat().st_mode & 0o111)
+            if executable != (mode == "100755"):
+                raise EnvironmentError(f"bundled package source mode mismatch: {package.name}")
+            data = source.read_bytes()
+        if _git_object_id("blob", data) != object_id:
+            raise EnvironmentError(f"bundled package source mismatch: {package.name}")
+        entries.append(entry)
+    if _inventory_tree_id(entries) != package.tree_hash:
+        raise EnvironmentError(f"bundled package source tree mismatch: {package.name}")
+
+
 def _verify_package(root: Path, package: LockedPackage) -> None:
     marker = root / ".lean-runtime-source.json"
     if not marker.is_file():
@@ -326,6 +513,10 @@ def _verify_package(root: Path, package: LockedPackage) -> None:
         or re.fullmatch(r"sha256:[0-9a-f]{64}", content_hash) is None
     ):
         raise EnvironmentError(f"bundled package source marker mismatch: {package.name}")
+    inventory = root / SOURCE_TREE_INVENTORY
+    if inventory.is_file() and not (root / ".git").exists():
+        _verify_source_tree_inventory(root, package, inventory)
+        return
     observed: list[str] = []
     for revision in ("HEAD", "HEAD^{tree}"):
         result = subprocess.run(
@@ -396,7 +587,8 @@ class EnvironmentBundles:
         self.backend = backend
         self.events = events
 
-    def export(self, environment_id: str, output: Path) -> PortableCopyInfo:
+    def export_layout(self, environment_id: str, output: Path) -> PortableCopyInfo:
+        """Write verified OCI layout files without wrapping them in a second archive."""
         root = self.store.environment_path(environment_id)
         metadata = _json_object((root / "metadata.json").read_bytes(), "metadata")
         lock = self.store.load_lock(str(metadata["lock_id"]))
@@ -413,8 +605,11 @@ class EnvironmentBundles:
                 raise EnvironmentError(f"environment package is missing: {package.name}")
             _verify_package(package_root, package)
             package_roots.append((package, package_root))
-        output.parent.mkdir(parents=True, exist_ok=True)
-        temporary = output.with_name(f".{output.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        if output.is_symlink() or (output.exists() and not output.is_dir()):
+            raise EnvironmentError(f"OCI layout destination is not a directory: {output}")
+        if output.exists() and any(output.iterdir()):
+            raise EnvironmentError(f"OCI layout destination is not empty: {output}")
+        output.mkdir(parents=True, exist_ok=True)
         try:
             with tempfile.TemporaryDirectory(prefix="lean-runtime-export-") as temporary_dir:
                 staging = Path(temporary_dir)
@@ -422,7 +617,12 @@ class EnvironmentBundles:
                 layers: list[dict[str, Any]] = []
 
                 root_layer = staging / "root.tar.gz"
-                _write_tar_gzip(workspace, root_layer, excluded=packages_dir)
+                _write_tar_gzip(
+                    workspace,
+                    root_layer,
+                    excluded=packages_dir,
+                    omit_volatile_build_metadata=True,
+                )
                 layers.append(
                     _blob_descriptor_path(
                         root_layer,
@@ -435,7 +635,14 @@ class EnvironmentBundles:
                 )
                 for index, (package, package_root) in enumerate(package_roots):
                     layer = staging / f"package-{index}.tar.gz"
-                    _write_tar_gzip(package_root, layer)
+                    inventory = _source_tree_inventory(package_root, package)
+                    _write_tar_gzip(
+                        package_root,
+                        layer,
+                        excluded_names=frozenset({".git", SOURCE_TREE_INVENTORY}),
+                        extra_files={SOURCE_TREE_INVENTORY: inventory},
+                        omit_volatile_build_metadata=True,
+                    )
                     descriptor = _blob_descriptor_path(
                         layer,
                         LAYER_MEDIA_TYPE,
@@ -517,6 +724,36 @@ class EnvironmentBundles:
                 layout_path.write_bytes(b'{"imageLayoutVersion":"1.0.0"}')
                 entries["index.json"] = index_path
                 entries["oci-layout"] = layout_path
+                for name, path in entries.items():
+                    destination = output.joinpath(*PurePosixPath(name).parts)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if path != destination:
+                        path.replace(destination)
+        except BaseException:
+            remove_tree(output)
+            raise
+        self.events.emit(
+            "bundle.layout_exported",
+            "Exported deterministic environment OCI layout",
+            path=str(output),
+        )
+        return PortableCopyInfo(
+            environment_id, lock.lock_id, manifest_descriptor["digest"], str(output)
+        )
+
+    def export(self, environment_id: str, output: Path) -> PortableCopyInfo:
+        """Write a deterministic portable archive from a verified direct OCI layout."""
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_name(f".{output.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            with tempfile.TemporaryDirectory(prefix="lean-runtime-layout-") as raw:
+                layout = Path(raw)
+                info = self.export_layout(environment_id, layout)
+                entries = {
+                    path.relative_to(layout).as_posix(): path
+                    for path in layout.rglob("*")
+                    if path.is_file()
+                }
                 _write_oci_archive(entries, temporary)
             temporary.replace(output)
         finally:
@@ -525,7 +762,10 @@ class EnvironmentBundles:
             "bundle.exported", "Exported deterministic environment bundle", path=str(output)
         )
         return PortableCopyInfo(
-            environment_id, lock.lock_id, manifest_descriptor["digest"], str(output)
+            info.environment_id,
+            info.exact_environment_id,
+            info.copy_id,
+            str(output),
         )
 
     def import_bundle(
@@ -676,12 +916,16 @@ class EnvironmentBundles:
                         _verify_package(package_root, package)
                     if probe:
                         command = self.toolchains.command(
-                            lock.toolchain, "lake", "env", "lean", f"{ROOT_MODULE}.lean"
+                            lock.toolchain, "lean", f"{ROOT_MODULE}.lean"
+                        )
+                        probe_environment = self.toolchains.environment
+                        probe_environment["LEAN_PATH"] = os.pathsep.join(
+                            str(path) for path in _bundle_lean_paths(workspace, lock)
                         )
                         result = self.backend.execute(
                             command,
                             cwd=workspace,
-                            environment=self.toolchains.environment,
+                            environment=probe_environment,
                             policy=ExecutionPolicy(timeout_seconds=300, max_output_bytes=2_000_000),
                         )
                         if result.exit_code:

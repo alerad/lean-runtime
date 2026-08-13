@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from lean_runtime import EnvironmentError, EnvironmentLock, LockedPackage, Runtime
-from lean_runtime.bundles import _extract_layer, _oci_archive
+from lean_runtime.bundles import SOURCE_TREE_INVENTORY, _extract_layer, _oci_archive
 from lean_runtime.environments import ENVIRONMENT_SCHEMA
 from lean_runtime.events import EventEmitter
 from lean_runtime.oci import OCIEnvironmentPublisher, OCIRegistryClient, OCIRepository
@@ -181,7 +181,27 @@ def test_bundle_export_is_deterministic_and_imports_into_fresh_store(tmp_path: P
     producer, environment_id, lock = _published_runtime(tmp_path / "producer")
     first = tmp_path / "first.oci.tar.gz"
     second = tmp_path / "second.oci.tar.gz"
+    package = (
+        producer.store.environment_path(environment_id)
+        / "workspace"
+        / ".lake"
+        / "packages"
+        / "sample"
+    )
+    (package / ".lake" / "build" / "lib" / "lean" / "Sample.trace").write_text("/tmp/build-one\n")
+    (package / ".lake" / "build" / "ir").mkdir(parents=True, exist_ok=True)
+    (package / ".lake" / "build" / "ir" / "Sample.setup.json").write_text(
+        '{"workspace":"/tmp/build-one"}\n'
+    )
+    (package / ".lake" / "build" / "bin").mkdir(parents=True, exist_ok=True)
+    (package / ".lake" / "build" / "bin" / "sample.rsp").write_text("/tmp/build-one\n")
     info = producer.save_portable_copy(environment_id, first)
+    (package / ".git" / "logs" / "nondeterministic-export-state").write_text("changed\n")
+    (package / ".lake" / "build" / "lib" / "lean" / "Sample.trace").write_text("/tmp/build-two\n")
+    (package / ".lake" / "build" / "ir" / "Sample.setup.json").write_text(
+        '{"workspace":"/tmp/build-two"}\n'
+    )
+    (package / ".lake" / "build" / "bin" / "sample.rsp").write_text("/tmp/build-two\n")
     producer.save_portable_copy(environment_id, second)
 
     assert first.read_bytes() == second.read_bytes()
@@ -198,6 +218,8 @@ def test_bundle_export_is_deterministic_and_imports_into_fresh_store(tmp_path: P
     assert metadata["origin"]["kind"] == "portable_copy"
     bundled_package = imported.workspace / ".lake" / "packages" / "sample"
     assert (bundled_package / ".lake" / "build" / "lib" / "lean" / "Sample.olean").is_file()
+    assert (bundled_package / SOURCE_TREE_INVENTORY).is_file()
+    assert not (bundled_package / ".git").exists()
 
 
 def test_bundle_import_rejects_a_corrupted_blob(tmp_path: Path) -> None:
@@ -487,7 +509,40 @@ def test_oci_publisher_uploads_blobs_before_manifests(tmp_path: Path) -> None:
     assert all(kind in {"exists", "blob"} for kind in kinds[:first_manifest])
     assert result.exact_environment_id == lock.lock_id
     assert result.uploaded_files == 3
+    assert result.uploaded_bytes == result.total_blob_bytes
+    assert result.reused_bytes == 0
+    assert result.reuse_percent == 0
     assert operations[-2:] == [("manifest", lock.lock_id), ("manifest", "v1")]
+
+
+def test_oci_publisher_reports_remote_blob_reuse(tmp_path: Path) -> None:
+    producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
+    publisher = OCIEnvironmentPublisher(
+        OCIRepository.parse("oci://registry.example/owner/cache"),
+        producer.store,
+        producer.bundles,
+        producer.events,
+    )
+
+    class ReusingClient:
+        def manifest_exists(self, _digest: str) -> bool:
+            return True
+
+        def blob_exists(self, _digest: str) -> bool:
+            return True
+
+        def upload_blob(self, _path: Path, _digest: str) -> None:
+            pass
+
+        def publish_manifest(self, _reference: str, data: bytes, _media_type: str) -> str:
+            return "sha256:" + hashlib.sha256(data).hexdigest()
+
+    publisher.client = ReusingClient()  # type: ignore[assignment]
+    result = publisher.publish(environment_id)
+    assert result.uploaded_files == 0
+    assert result.uploaded_bytes == 0
+    assert result.reused_bytes == result.total_blob_bytes
+    assert result.reuse_percent == 100
 
 
 def test_oci_truncated_blob_download_resumes_with_range(tmp_path: Path) -> None:

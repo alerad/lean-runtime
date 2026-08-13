@@ -53,6 +53,24 @@ def test_exact_mathlib_reference_matches_bundled_catalog_lock() -> None:
     assert any(package.name == "mathlib" for package in lock.packages)
 
 
+@pytest.mark.parametrize(
+    ("reference", "toolchain"),
+    [
+        ("leancert@v4.30.0.5", "leanprover/lean4:v4.30.0"),
+        ("leancert@v4.31.0", "leanprover/lean4:v4.31.0"),
+        ("leancert@v4.32.2.4", "leanprover/lean4:v4.32.2"),
+        ("leancert@v4.33.0", "leanprover/lean4:v4.33.0"),
+    ],
+)
+def test_exact_leancert_reference_matches_bundled_catalog_lock(
+    reference: str, toolchain: str
+) -> None:
+    lock = _bundled_lock_for_references([reference], None)
+    assert lock is not None
+    assert lock.toolchain == toolchain
+    assert {package.name for package in lock.packages} >= {"LeanCert", "mathlib"}
+
+
 def test_catalog_reference_match_respects_context_and_toolchain() -> None:
     assert _bundled_lock_for_references(["mathlib@main"], None) is None
     assert _bundled_lock_for_references(["mathlib@v4.32.2", "leancert@main"], None) is None

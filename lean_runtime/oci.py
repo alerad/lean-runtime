@@ -556,7 +556,16 @@ class PublicationInfo:
     computer_copy_id: str
     publication_id: str | None
     uploaded_files: int
+    total_blob_bytes: int
+    uploaded_bytes: int
+    reused_bytes: int
     computer_record: dict[str, Any]
+
+    @property
+    def reuse_percent(self) -> float:
+        if self.total_blob_bytes == 0:
+            return 100.0
+        return 100.0 * self.reused_bytes / self.total_blob_bytes
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -566,6 +575,10 @@ class PublicationInfo:
             "computer_copy_id": self.computer_copy_id,
             "publication_id": self.publication_id,
             "uploaded_files": self.uploaded_files,
+            "total_blob_bytes": self.total_blob_bytes,
+            "uploaded_bytes": self.uploaded_bytes,
+            "reused_bytes": self.reused_bytes,
+            "reuse_percent": self.reuse_percent,
             "computer_record": self.computer_record,
         }
 
@@ -593,10 +606,27 @@ class OCIEnvironmentPublisher:
     ) -> PublicationInfo:
         with tempfile.TemporaryDirectory(prefix="lean-runtime-publish-") as temporary:
             temporary_root = Path(temporary)
-            bundle_path = temporary_root / "environment.oci.tar.gz"
-            bundle_info = self.bundles.export(environment_id, bundle_path)
             layout_root = temporary_root / "layout"
-            entries = self.bundles._extract_oci_archive(bundle_path, layout_root)
+            self.events.emit(
+                "library.bundle_export_started",
+                "Exporting and verifying the environment OCI layout",
+                environment_id=environment_id,
+                registry=self.repository.display,
+            )
+            bundle_info = self.bundles.export_layout(environment_id, layout_root)
+            self.events.emit(
+                "library.bundle_ready",
+                "Environment OCI layout is ready for publication",
+                environment_id=environment_id,
+                blob_bytes=sum(
+                    path.stat().st_size for path in layout_root.rglob("*") if path.is_file()
+                ),
+            )
+            entries = {
+                path.relative_to(layout_root).as_posix(): path
+                for path in layout_root.rglob("*")
+                if path.is_file()
+            }
             index_path = entries.get("index.json")
             if index_path is None:
                 raise EnvironmentError("exported OCI layout has no index")
@@ -620,20 +650,45 @@ class OCIEnvironmentPublisher:
             if not all(isinstance(item, dict) for item in descriptors):
                 raise EnvironmentError("exported OCI platform manifest is incomplete")
             uploaded = 0
+            total_blob_bytes = 0
+            uploaded_bytes = 0
             for descriptor in descriptors:
                 assert isinstance(descriptor, dict)
                 digest = str(descriptor.get("digest", ""))
                 blob = entries.get("blobs/sha256/" + digest.removeprefix("sha256:"))
                 if blob is None:
                     raise EnvironmentError("exported OCI blob is missing")
+                size = descriptor.get("size")
+                if not isinstance(size, int) or size < 0 or blob.stat().st_size != size:
+                    raise EnvironmentError("exported OCI blob descriptor has an invalid size")
+                total_blob_bytes += size
                 existed = self.client.blob_exists(digest)
+                self.events.emit(
+                    "library.layer_reused" if existed else "library.layer_upload_started",
+                    "Reusing remote OCI blob" if existed else "Uploading OCI blob",
+                    digest=digest,
+                    size=size,
+                )
                 self.client.upload_blob(blob, digest)
                 uploaded += int(not existed)
+                uploaded_bytes += 0 if existed else size
+                if not existed:
+                    self.events.emit(
+                        "library.layer_uploaded",
+                        "Uploaded OCI blob",
+                        digest=digest,
+                        size=size,
+                    )
             manifest_digest = self.client.publish_manifest(
                 str(manifest_descriptor["digest"]), manifest_data, MANIFEST_MEDIA_TYPE
             )
             if manifest_digest != manifest_descriptor["digest"]:
                 raise EnvironmentError("published platform manifest digest changed")
+            self.events.emit(
+                "library.platform_manifest_published",
+                "Published the computer-specific OCI manifest",
+                digest=manifest_digest,
+            )
             if tags and not finalize:
                 raise ValueError("tags can only be published while finalizing an OCI index")
             index_digest = (
@@ -658,6 +713,9 @@ class OCIEnvironmentPublisher:
                 manifest_digest,
                 index_digest,
                 uploaded,
+                total_blob_bytes,
+                uploaded_bytes,
+                total_blob_bytes - uploaded_bytes,
                 manifest_descriptor,
             )
 

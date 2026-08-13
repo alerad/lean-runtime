@@ -115,6 +115,53 @@ created_at = "2026-08-01T00:00:00Z"
     }
 
 
+def test_missing_lock_resolves_without_consulting_bundled_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, lock = _lock(tmp_path)
+    manifest = tmp_path / "environments.toml"
+    manifest.write_text(
+        """schema = "lean-runtime.discovery.catalog-source/v1"
+generated_at = "2026-08-08T00:00:00Z"
+
+[[environment]]
+id = "fixture"
+channel = "stable"
+lock = "locks/fixture.lock.json"
+references = ["github:example/fixture@v1"]
+inventory_packages = ["fixture"]
+created_at = "2026-08-01T00:00:00Z"
+""",
+        encoding="utf-8",
+    )
+    sentinel = object()
+    observed: dict[str, object] = {}
+
+    def spec_from_references(_self: Runtime, references: object) -> object:
+        observed["references"] = references
+        return sentinel
+
+    def prepare(_self: Runtime, spec: object) -> EnvironmentLock:
+        observed["spec"] = spec
+        return lock
+
+    def unexpected_prepare_references(_self: Runtime, _references: object) -> EnvironmentLock:
+        raise AssertionError("catalog generation must bypass bundled-reference lookup")
+
+    monkeypatch.setattr(Runtime, "spec_from_references", spec_from_references)
+    monkeypatch.setattr(Runtime, "prepare", prepare)
+    monkeypatch.setattr(Runtime, "prepare_references", unexpected_prepare_references)
+
+    catalog = build_catalog_file(manifest, tmp_path / "catalog.json", runtime=runtime)
+
+    assert observed == {
+        "references": ("github:example/fixture@v1",),
+        "spec": sentinel,
+    }
+    assert catalog.entries[0].lock == lock
+    assert (tmp_path / "locks/fixture.lock.json").is_file()
+
+
 def test_manifest_rejects_unknown_fields(tmp_path: Path) -> None:
     manifest = tmp_path / "environments.toml"
     manifest.write_text(
