@@ -13,7 +13,7 @@ import subprocess
 import tarfile
 import tempfile
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -44,6 +44,7 @@ MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 MAX_BUNDLE_BYTES = 20 * 1024**3
 MAX_FILES = 2_000_000
+SOURCE_TREE_INVENTORY = ".lean-runtime-source-tree.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,14 +98,29 @@ def _normalized_info(name: str, *, mode: int, kind: bytes = tarfile.REGTYPE) -> 
     return info
 
 
-def _tree_entries(root: Path, excluded: Path | None = None) -> Iterable[tuple[Path, str]]:
+def _tree_entries(
+    root: Path,
+    excluded: Path | None = None,
+    *,
+    excluded_names: frozenset[str] = frozenset(),
+) -> Iterable[tuple[Path, str]]:
     for path in sorted(root.rglob("*"), key=lambda value: value.relative_to(root).as_posix()):
         if excluded is not None and (path == excluded or excluded in path.parents):
             continue
-        yield path, path.relative_to(root).as_posix()
+        relative = path.relative_to(root)
+        if relative.parts and relative.parts[0] in excluded_names:
+            continue
+        yield path, relative.as_posix()
 
 
-def _write_tar_gzip(root: Path, output: Path, *, excluded: Path | None = None) -> None:
+def _write_tar_gzip(
+    root: Path,
+    output: Path,
+    *,
+    excluded: Path | None = None,
+    excluded_names: frozenset[str] = frozenset(),
+    extra_files: Mapping[str, bytes] | None = None,
+) -> None:
     with (
         output.open("wb") as raw_output,
         gzip.GzipFile(
@@ -112,7 +128,7 @@ def _write_tar_gzip(root: Path, output: Path, *, excluded: Path | None = None) -
         ) as compressed,
         tarfile.open(fileobj=compressed, mode="w|", format=tarfile.PAX_FORMAT) as archive,
     ):
-        for path, name in _tree_entries(root, excluded):
+        for path, name in _tree_entries(root, excluded, excluded_names=excluded_names):
             stat = path.lstat()
             mode = stat.st_mode & 0o777
             if path.is_symlink():
@@ -130,6 +146,11 @@ def _write_tar_gzip(root: Path, output: Path, *, excluded: Path | None = None) -
                     archive.addfile(info, handle)
             else:
                 raise EnvironmentError(f"bundle contains unsupported filesystem entry: {path}")
+        for name, data in sorted((extra_files or {}).items()):
+            _safe_name(name)
+            info = _normalized_info(name, mode=0o644)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
 
 
 def _tar_gzip(root: Path, *, excluded: Path | None = None) -> bytes:
@@ -313,6 +334,125 @@ def _extract_layer(data: bytes | Path, destination: Path) -> None:
                 raise EnvironmentError(f"unsupported bundle member: {member.name!r}")
 
 
+def _git_object_id(kind: str, data: bytes) -> str:
+    framed = f"{kind} {len(data)}\0".encode() + data
+    return hashlib.sha1(framed, usedforsecurity=False).hexdigest()  # noqa: S324
+
+
+def _source_tree_inventory(root: Path, package: LockedPackage) -> bytes:
+    process = subprocess.run(
+        git_command("-C", str(root), "ls-tree", "-rz", "--full-tree", "HEAD"),
+        capture_output=True,
+        check=False,
+    )
+    if process.returncode:
+        raise EnvironmentError(f"could not inventory package source: {package.name}")
+    entries: list[dict[str, str]] = []
+    for record in process.stdout.split(b"\0"):
+        if not record:
+            continue
+        try:
+            header, raw_path = record.split(b"\t", 1)
+            mode, kind, object_id = header.decode("ascii").split(" ")
+            path = raw_path.decode("utf-8")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise EnvironmentError(f"package has an unsupported Git tree: {package.name}") from exc
+        _safe_name(path)
+        if path == SOURCE_TREE_INVENTORY:
+            raise EnvironmentError(
+                f"package uses reserved runtime path {SOURCE_TREE_INVENTORY!r}: {package.name}"
+            )
+        if kind != "blob" or mode not in {"100644", "100755", "120000"}:
+            raise EnvironmentError(
+                f"package has an unsupported Git tree entry {path!r}: {package.name}"
+            )
+        entries.append({"path": path, "mode": mode, "object_id": object_id})
+    return canonical_json_bytes(
+        {
+            "schema": "lean-runtime-source-tree/1",
+            "revision": package.revision,
+            "tree_hash": package.tree_hash,
+            "entries": entries,
+        }
+    )
+
+
+def _inventory_tree_id(entries: list[dict[str, str]]) -> str:
+    root: dict[str, Any] = {}
+    for entry in entries:
+        parts = PurePosixPath(entry["path"]).parts
+        node = root
+        for part in parts[:-1]:
+            existing = node.setdefault(part, {})
+            if not isinstance(existing, dict):
+                raise EnvironmentError("source tree inventory has conflicting paths")
+            node = existing
+        if parts[-1] in node:
+            raise EnvironmentError("source tree inventory has duplicate paths")
+        node[parts[-1]] = (entry["mode"], entry["object_id"])
+
+    def tree_id(node: dict[str, Any]) -> str:
+        records: list[tuple[bytes, bytes]] = []
+        for name, value in node.items():
+            raw_name = name.encode("utf-8")
+            if isinstance(value, dict):
+                mode = "40000"
+                object_id = tree_id(value)
+                sort_key = raw_name + b"/"
+            else:
+                mode, object_id = value
+                sort_key = raw_name + b"\0"
+            record = mode.encode("ascii") + b" " + raw_name + b"\0" + bytes.fromhex(object_id)
+            records.append((sort_key, record))
+        return _git_object_id("tree", b"".join(record for _, record in sorted(records)))
+
+    return tree_id(root)
+
+
+def _verify_source_tree_inventory(root: Path, package: LockedPackage, path: Path) -> None:
+    value = _json_object(path.read_bytes(), f"package {package.name} source tree inventory")
+    if (
+        value.get("schema") != "lean-runtime-source-tree/1"
+        or value.get("revision") != package.revision
+        or value.get("tree_hash") != package.tree_hash
+        or not isinstance(value.get("entries"), list)
+    ):
+        raise EnvironmentError(f"bundled package source inventory mismatch: {package.name}")
+    entries: list[dict[str, str]] = []
+    for raw in value["entries"]:
+        if not isinstance(raw, dict) or set(raw) != {"path", "mode", "object_id"}:
+            raise EnvironmentError(f"bundled package source inventory is invalid: {package.name}")
+        entry = {key: raw[key] for key in ("path", "mode", "object_id")}
+        if not all(isinstance(item, str) for item in entry.values()):
+            raise EnvironmentError(f"bundled package source inventory is invalid: {package.name}")
+        source_name = entry["path"]
+        _safe_name(source_name)
+        mode = entry["mode"]
+        object_id = entry["object_id"]
+        if (
+            mode not in {"100644", "100755", "120000"}
+            or re.fullmatch(r"[0-9a-f]{40}", object_id) is None
+        ):
+            raise EnvironmentError(f"bundled package source inventory is invalid: {package.name}")
+        source = root.joinpath(*PurePosixPath(source_name).parts)
+        if mode == "120000":
+            if not source.is_symlink():
+                raise EnvironmentError(f"bundled package source mismatch: {package.name}")
+            data = os.readlink(source).encode("utf-8")
+        else:
+            if not source.is_file() or source.is_symlink():
+                raise EnvironmentError(f"bundled package source mismatch: {package.name}")
+            executable = bool(source.stat().st_mode & 0o111)
+            if executable != (mode == "100755"):
+                raise EnvironmentError(f"bundled package source mode mismatch: {package.name}")
+            data = source.read_bytes()
+        if _git_object_id("blob", data) != object_id:
+            raise EnvironmentError(f"bundled package source mismatch: {package.name}")
+        entries.append(entry)
+    if _inventory_tree_id(entries) != package.tree_hash:
+        raise EnvironmentError(f"bundled package source tree mismatch: {package.name}")
+
+
 def _verify_package(root: Path, package: LockedPackage) -> None:
     marker = root / ".lean-runtime-source.json"
     if not marker.is_file():
@@ -332,6 +472,10 @@ def _verify_package(root: Path, package: LockedPackage) -> None:
         or re.fullmatch(r"sha256:[0-9a-f]{64}", content_hash) is None
     ):
         raise EnvironmentError(f"bundled package source marker mismatch: {package.name}")
+    inventory = root / SOURCE_TREE_INVENTORY
+    if inventory.is_file() and not (root / ".git").exists():
+        _verify_source_tree_inventory(root, package, inventory)
+        return
     observed: list[str] = []
     for revision in ("HEAD", "HEAD^{tree}"):
         result = subprocess.run(
@@ -445,7 +589,13 @@ class EnvironmentBundles:
                 )
                 for index, (package, package_root) in enumerate(package_roots):
                     layer = staging / f"package-{index}.tar.gz"
-                    _write_tar_gzip(package_root, layer)
+                    inventory = _source_tree_inventory(package_root, package)
+                    _write_tar_gzip(
+                        package_root,
+                        layer,
+                        excluded_names=frozenset({".git", SOURCE_TREE_INVENTORY}),
+                        extra_files={SOURCE_TREE_INVENTORY: inventory},
+                    )
                     descriptor = _blob_descriptor_path(
                         layer,
                         LAYER_MEDIA_TYPE,

@@ -20,6 +20,10 @@
 - Compress deterministic OCI layers at gzip level 6 instead of Python's
   level-9 default; a representative Mathlib subtree encoded about eight times
   faster for roughly two percent more bytes.
+- Exclude clone-specific Git administration data from package layers and carry
+  a verified deterministic source-tree inventory instead. Identical dependency
+  trees now produce identical blobs across clean builders, so OCI reuse works
+  across project revisions rather than only within one local environment.
 
 ## 2.2.0 - 2026-08-12
 

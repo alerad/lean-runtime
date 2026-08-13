@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from lean_runtime import EnvironmentError, EnvironmentLock, LockedPackage, Runtime
-from lean_runtime.bundles import _extract_layer, _oci_archive
+from lean_runtime.bundles import SOURCE_TREE_INVENTORY, _extract_layer, _oci_archive
 from lean_runtime.environments import ENVIRONMENT_SCHEMA
 from lean_runtime.events import EventEmitter
 from lean_runtime.oci import OCIEnvironmentPublisher, OCIRegistryClient, OCIRepository
@@ -182,6 +182,14 @@ def test_bundle_export_is_deterministic_and_imports_into_fresh_store(tmp_path: P
     first = tmp_path / "first.oci.tar.gz"
     second = tmp_path / "second.oci.tar.gz"
     info = producer.save_portable_copy(environment_id, first)
+    package = (
+        producer.store.environment_path(environment_id)
+        / "workspace"
+        / ".lake"
+        / "packages"
+        / "sample"
+    )
+    (package / ".git" / "logs" / "nondeterministic-export-state").write_text("changed\n")
     producer.save_portable_copy(environment_id, second)
 
     assert first.read_bytes() == second.read_bytes()
@@ -198,6 +206,8 @@ def test_bundle_export_is_deterministic_and_imports_into_fresh_store(tmp_path: P
     assert metadata["origin"]["kind"] == "portable_copy"
     bundled_package = imported.workspace / ".lake" / "packages" / "sample"
     assert (bundled_package / ".lake" / "build" / "lib" / "lean" / "Sample.olean").is_file()
+    assert (bundled_package / SOURCE_TREE_INVENTORY).is_file()
+    assert not (bundled_package / ".git").exists()
 
 
 def test_bundle_import_rejects_a_corrupted_blob(tmp_path: Path) -> None:
