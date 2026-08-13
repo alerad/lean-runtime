@@ -9,6 +9,9 @@
   checks.
 - Make the public-cache post-publication consumer genuinely anonymous by
   withholding registry credentials during its clean download and import probe.
+- Verify imported immutable environments through their compiled module paths,
+  avoiding Lake dependency resolution that could attempt network clones after
+  a successful offline OCI import.
 - Add a strict existing-project publication journey: `lean-runtime project
   inspect`, `project lock`, `project export`, and `project init-publish` turn a
   clean, pushed root GitHub Lean project into an exact managed environment.

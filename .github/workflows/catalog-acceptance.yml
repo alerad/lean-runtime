@@ -1,0 +1,62 @@
+name: Verify bundled catalog consumers
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  registry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install .
+      - name: Verify anonymous multi-platform catalog artifacts
+        run: python scripts/registry_preflight.py --skip core-v4.32.2
+
+  consumer:
+    needs: registry
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: mathlib-v4.33.0
+            module: Mathlib
+          - id: leancert-v4.30.0.5
+            module: LeanCert
+          - id: leancert-v4.31.0
+            module: LeanCert
+          - id: leancert-v4.32.2.4
+            module: LeanCert
+          - id: leancert-v4.33.0
+            module: LeanCert
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install .
+      - name: Download and check as an anonymous clean consumer
+        env:
+          CATALOG_ID: ${{ matrix.id }}
+          ROOT_MODULE: ${{ matrix.module }}
+        run: |
+          acceptance_home="$RUNNER_TEMP/lean-runtime-catalog-$CATALOG_ID"
+          lock="catalog/locks/$CATALOG_ID.lock.json"
+          lean-runtime --home "$acceptance_home" \
+            --library ghcr.io/alerad/lean-runtime-cache \
+            --availability required download "$lock" --name acceptance
+          lean-runtime --home "$acceptance_home" verify acceptance --offline
+          printf 'import %s\n' "$ROOT_MODULE" > UserMain.lean
+          if [[ "$ROOT_MODULE" == "Mathlib" ]]; then
+            printf 'example : 2 + 2 = 4 := by norm_num\n' >> UserMain.lean
+          fi
+          lean-runtime --home "$acceptance_home" check acceptance UserMain.lean
