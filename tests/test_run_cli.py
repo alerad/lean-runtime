@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from lean_runtime import ProjectError
+from lean_runtime.events import RuntimeEvent
 from lean_runtime.models import Diagnostic, ExecutionResult
 from lean_runtime.run_cli import main
 
@@ -41,13 +42,23 @@ class Lock:
 class FakeRuntime:
     instance: "FakeRuntime"
 
-    def __init__(self, **_kwargs) -> None:
+    def __init__(self, **kwargs) -> None:
         self.calls: list[tuple[str, object]] = []
         self.lock = Lock()
+        self.kwargs = kwargs
         FakeRuntime.instance = self
 
     def prepare_references(self, requires, *, toolchain=None) -> Lock:
         self.calls.append(("resolve", (requires, toolchain)))
+        emit = self.kwargs.get("on_event")
+        if emit is not None:
+            emit(
+                RuntimeEvent(
+                    kind="package_reference.started",
+                    message=f"Discovering {requires[0]}",
+                    data={"reference": requires[0]},
+                )
+            )
         return self.lock
 
     def open_exact(self, lock) -> Environment:
@@ -280,3 +291,39 @@ def test_lean_run_rewrites_staged_paths_to_the_user_path(
     assert f"✗ {source} rejected" in captured.out
     # Only the staged entrypoint is rewritten; dependency paths are untouched.
     assert f"{dependency}:4:0: warning" in captured.out
+
+
+def test_lean_run_renders_progress_events_to_stderr(monkeypatch, tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text(
+        '-- /// lean-runtime\n-- requires = ["mathlib@v4.32.2"]\n-- ///\nimport Mathlib\n'
+    )
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
+    assert main([str(source)]) == 0
+    captured = capsys.readouterr()
+    assert "Resolving mathlib@v4.32.2" in captured.err
+    assert f"✓ {source} accepted" in captured.out
+
+
+def test_lean_run_quiet_suppresses_progress(monkeypatch, tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text(
+        '-- /// lean-runtime\n-- requires = ["mathlib@v4.32.2"]\n-- ///\nimport Mathlib\n'
+    )
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
+    assert main([str(source), "--quiet"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_lean_run_streams_json_events(monkeypatch, tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text(
+        '-- /// lean-runtime\n-- requires = ["mathlib@v4.32.2"]\n-- ///\nimport Mathlib\n'
+    )
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
+    assert main([str(source), "--json", "--json-events"]) == 0
+    captured = capsys.readouterr()
+    events = [json.loads(line) for line in captured.err.splitlines() if line]
+    assert {event["kind"] for event in events} == {"package_reference.started"}
+    assert events[0]["data"] == {"reference": "mathlib@v4.32.2"}
+    assert json.loads(captured.out)["ok"] is True

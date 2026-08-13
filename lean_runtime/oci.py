@@ -8,6 +8,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,6 +25,7 @@ from .errors import DownloadUnavailable, EnvironmentError
 from .events import EventEmitter
 from .lockfiles import EnvironmentLock
 from .locking import FileLock
+from .policies import format_byte_size
 from .serialization import canonical_json_bytes
 from .store import EnvironmentStore, platform_compatibility
 
@@ -212,7 +214,9 @@ class OCIRegistryClient:
         with FileLock(store.lock_dir / f"oci-{match.group(1)}.lock", timeout=1800):
             if destination.is_file() and destination.stat().st_size == size:
                 if _digest_path(destination) == digest:
-                    events.emit("library.layer_cached", "Reusing cached OCI blob", digest=digest)
+                    events.emit(
+                        "library.layer_cached", "Reusing cached OCI blob", digest=digest, size=size
+                    )
                     return destination
                 destination.unlink()
             temporary = destination.with_name(f".{destination.name}.partial")
@@ -252,6 +256,7 @@ class OCIRegistryClient:
                             temporary.unlink(missing_ok=True)
                             raise EnvironmentError("OCI registry returned an invalid byte range")
                     mode = "ab" if offset else "wb"
+                    last_progress = 0.0
                     with response, temporary.open(mode) as output:
                         while chunk := response.read(1024 * 1024):
                             written += len(chunk)
@@ -259,6 +264,17 @@ class OCIRegistryClient:
                                 raise EnvironmentError("OCI blob exceeds its declared size")
                             observed.update(chunk)
                             output.write(chunk)
+                            now = time.monotonic()
+                            if written == size or now - last_progress >= 0.2:
+                                last_progress = now
+                                events.emit(
+                                    "library.layer_progress",
+                                    "Downloading OCI blob",
+                                    phase="download",
+                                    current_bytes=written,
+                                    total_bytes=size,
+                                    digest=digest,
+                                )
                     observed_digest = "sha256:" + observed.hexdigest()
                     if written == size and observed_digest == digest:
                         temporary.replace(destination)
@@ -498,6 +514,19 @@ class OCIEnvironmentCache:
         descriptors = [manifest.get("config"), *manifest.get("layers", [])]
         if not all(isinstance(item, dict) for item in descriptors):
             raise EnvironmentError("OCI platform manifest is incomplete")
+        total_bytes, cached_bytes = self._acquisition_sizes(descriptors)
+        download_bytes = total_bytes - cached_bytes
+        self.events.emit(
+            "acquisition.planned",
+            f"Environment download planned: {format_byte_size(download_bytes)}",
+            phase="plan",
+            current_bytes=cached_bytes,
+            total_bytes=total_bytes,
+            registry=self.repository.display,
+            lock_id=lock.lock_id,
+            download_bytes=download_bytes,
+            cached_bytes=cached_bytes,
+        )
         lease_digests = [
             str(manifest_descriptor["digest"]),
             *(str(descriptor["digest"]) for descriptor in descriptors),
@@ -530,6 +559,23 @@ class OCIEnvironmentCache:
             registry=self.repository.display,
         )
         return info.environment_id
+
+    def _acquisition_sizes(self, descriptors: list[Any]) -> tuple[int, int]:
+        """Return (total, locally cached) bytes for a manifest's blobs."""
+        total = 0
+        cached = 0
+        for descriptor in descriptors:
+            assert isinstance(descriptor, dict)
+            size = descriptor.get("size")
+            digest = str(descriptor.get("digest", ""))
+            match = _DIGEST.fullmatch(digest)
+            if match is None or not isinstance(size, int) or size < 0:
+                raise EnvironmentError("OCI manifest contains an invalid blob descriptor")
+            total += size
+            blob = self.store.oci_blobs / match.group(1)
+            if blob.is_file() and blob.stat().st_size == size:
+                cached += size
+        return total, cached
 
     def _cache_manifest(self, descriptor: dict[str, Any], data: bytes) -> Path:
         digest = descriptor.get("digest")

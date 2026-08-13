@@ -78,6 +78,14 @@ class LeanRuntimeProbe:
         cancel: threading.Event,
     ) -> AcquiredCandidate:
         event_offset = len(self.events) if self.events is not None else 0
+        emitter = getattr(self.runtime, "events", None)
+        if emitter is not None:
+            emitter.emit(
+                "discovery.candidate_started",
+                f"Trying {candidate.entry.id}",
+                candidate=candidate.entry.id,
+                toolchain=candidate.entry.toolchain,
+            )
         try:
             environment = self.runtime.open_exact(
                 candidate.entry.lock,
