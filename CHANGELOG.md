@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Add a strict existing-project publication journey: `lean-runtime project
+  inspect`, `project lock`, `project export`, and `project init-publish` turn a
+  clean, pushed root GitHub Lean project into an exact managed environment.
+- Add a public reusable GitHub workflow that builds Linux AMD64, macOS AMD64,
+  and macOS ARM64 environments, signs and attests their artifacts, finalizes
+  the OCI index atomically, and runs clean anonymous import checks on every
+  platform.
+- Validate registry configuration inside the CLI error boundary so malformed
+  libraries produce concise invocation errors instead of Python tracebacks.
+- Report total, uploaded, and remotely reused OCI blob bytes (plus the reuse
+  percentage) in every environment publication result.
+
 ## 2.2.0 - 2026-08-12
 
 - Make published-environment checks invoke Lean directly with the immutable

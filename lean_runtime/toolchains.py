@@ -180,6 +180,12 @@ class ToolchainManager:
         directory = self.slim_path(toolchain)
         return SlimManifest.load(directory) is not None and (directory / "bin" / "lean").is_file()
 
+    def is_available_locally(self, toolchain: str) -> bool:
+        """Check for a usable local toolchain without bootstrapping or network access."""
+        name = normalize_toolchain(toolchain)
+        full = self._elan_toolchain_dir(name)
+        return self.has_slim(name) or (full / "bin" / "lean").is_file()
+
     def materialize_slim(self, toolchain: str, *, verify: bool = True) -> SlimManifest:
         """Materialize and verify a slim check-profile copy of one toolchain.
 

@@ -1,0 +1,297 @@
+name: Publish Lean project environment
+
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: Project path relative to the repository root
+        required: false
+        default: .
+        type: string
+      library:
+        description: GHCR environment library
+        required: true
+        type: string
+      module:
+        description: Public Lean module to build and probe
+        required: true
+        type: string
+      tag:
+        description: Optional human-readable OCI tag
+        required: false
+        default: ""
+        type: string
+      public:
+        description: Require an anonymous clean-consumer check
+        required: false
+        default: true
+        type: boolean
+      runtime-ref:
+        description: lean-runtime Git ref used by the workflow
+        required: false
+        default: v2
+        type: string
+      build-timeout:
+        description: Maximum build/hydration seconds per platform
+        required: false
+        default: 18000
+        type: number
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      lock-id: ${{ steps.lock.outputs.lock_id }}
+      revision: ${{ steps.lock.outputs.revision }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: project-source
+          fetch-depth: 1
+      - uses: actions/checkout@v4
+        with:
+          repository: alerad/lean-runtime
+          ref: ${{ inputs.runtime-ref }}
+          path: runtime-source
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install ./runtime-source
+      - id: lock
+        working-directory: project-source
+        env:
+          PROJECT_PATH: ${{ inputs.project }}
+          PROJECT_MODULE: ${{ inputs.module }}
+        run: |
+          lean-runtime project inspect "$PROJECT_PATH" --module "$PROJECT_MODULE" --check-remote
+          lean-runtime project lock "$PROJECT_PATH" --module "$PROJECT_MODULE" \
+            --output ../environment.lock.json
+          python - <<'PY'
+          import json, os, subprocess
+          lock = json.load(open("../environment.lock.json", encoding="utf-8"))
+          revision = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], text=True
+          ).strip()
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"lock_id={lock['lock_id']}\n")
+              output.write(f"revision={revision}\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: environment-lock
+          path: environment.lock.json
+          if-no-files-found: error
+
+  platform:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-amd64
+          - os: macos-15-intel
+            platform: macos-amd64
+          - os: macos-15
+            platform: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: alerad/lean-runtime
+          ref: ${{ inputs.runtime-ref }}
+          path: runtime-source
+      - uses: actions/download-artifact@v4
+        with:
+          name: environment-lock
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install ./runtime-source
+      - uses: sigstore/cosign-installer@v4.1.2
+      - name: Build, verify, and publish platform
+        env:
+          LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
+          LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ github.token }}
+          LIBRARY: ${{ inputs.library }}
+          BUILD_TIMEOUT: ${{ inputs.build-timeout }}
+          RESULT: platform-result-${{ matrix.platform }}.json
+        run: |
+          started=$SECONDS
+          lean-runtime --availability local build-and-publish environment.lock.json \
+            --publish-to "$LIBRARY" --timeout "$BUILD_TIMEOUT" --accelerate \
+            --platform-only --attest > "$RESULT"
+          elapsed=$((SECONDS - started))
+          python - "$RESULT" "$elapsed" <<'PY'
+          import json, os, sys
+          path, elapsed = sys.argv[1], int(sys.argv[2])
+          value = json.load(open(path, encoding="utf-8"))
+          value["workflow_metrics"] = {
+              "elapsed_seconds": elapsed,
+              "platform": os.environ["RUNNER_OS"] + "/" + os.environ["RUNNER_ARCH"],
+          }
+          with open(path, "w", encoding="utf-8") as output:
+              json.dump(value, output, sort_keys=True)
+              output.write("\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: platform-${{ matrix.platform }}
+          path: platform-result-${{ matrix.platform }}.json
+          if-no-files-found: error
+
+  finalize:
+    needs: [resolve, platform]
+    runs-on: ubuntu-latest
+    outputs:
+      publication-id: ${{ steps.finalize.outputs.publication_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: alerad/lean-runtime
+          ref: ${{ inputs.runtime-ref }}
+          path: runtime-source
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: platform-*
+          path: results
+          merge-multiple: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install ./runtime-source
+      - uses: sigstore/cosign-installer@v4.1.2
+      - id: finalize
+        env:
+          LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
+          LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ github.token }}
+          LIBRARY: ${{ inputs.library }}
+          LOCK_ID: ${{ needs.resolve.outputs.lock-id }}
+          ALIAS_TAG: ${{ inputs.tag }}
+        run: |
+          args=(finalize-publication "$LOCK_ID" results/*.json --library "$LIBRARY" --sign)
+          if [[ -n "$ALIAS_TAG" ]]; then args+=(--tag "$ALIAS_TAG"); fi
+          lean-runtime "${args[@]}" > publication.json
+          cat publication.json
+          python - <<'PY'
+          import json, os
+          value = json.load(open("publication.json", encoding="utf-8"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"publication_id={value['publication_id']}\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: publication-report
+          path: publication.json
+
+  accept:
+    needs: [resolve, finalize]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-amd64
+          - os: macos-15-intel
+            platform: macos-amd64
+          - os: macos-15
+            platform: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: alerad/lean-runtime
+          ref: ${{ inputs.runtime-ref }}
+          path: runtime-source
+      - uses: actions/download-artifact@v4
+        with:
+          name: environment-lock
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install ./runtime-source
+      - name: Clean consumer download and import probe
+        env:
+          LEAN_RUNTIME_HOME: ${{ runner.temp }}/lean-runtime-clean-consumer
+          LIBRARY: ${{ inputs.library }}
+          PROJECT_MODULE: ${{ inputs.module }}
+          REQUIRE_PUBLIC: ${{ inputs.public }}
+          AUTH_USERNAME: ${{ github.actor }}
+          AUTH_PASSWORD: ${{ github.token }}
+          ACCEPTANCE_RESULT: acceptance-${{ matrix.platform }}.json
+        run: |
+          if [[ "$REQUIRE_PUBLIC" == "true" ]]; then
+            unset LEAN_RUNTIME_REGISTRY_USERNAME LEAN_RUNTIME_REGISTRY_PASSWORD
+          else
+            export LEAN_RUNTIME_REGISTRY_USERNAME="$AUTH_USERNAME"
+            export LEAN_RUNTIME_REGISTRY_PASSWORD="$AUTH_PASSWORD"
+          fi
+          download_started=$SECONDS
+          if ! lean-runtime --library "$LIBRARY" --availability required \
+            download environment.lock.json --name acceptance; then
+            if [[ "$REQUIRE_PUBLIC" == "true" ]]; then
+              echo "::error::Anonymous download failed. After the first GHCR publication, make the package public in GitHub package settings and rerun this workflow."
+            fi
+            exit 1
+          fi
+          export DOWNLOAD_SECONDS=$((SECONDS - download_started))
+          python - <<'PY'
+          import json, os, statistics, time
+          from lean_runtime import Runtime
+
+          runtime = Runtime(
+              home=os.environ["LEAN_RUNTIME_HOME"],
+              libraries=[os.environ["LIBRARY"]],
+              availability="required",
+          )
+          setup_samples = []
+          for _ in range(5):
+              started = time.perf_counter()
+              environment = runtime.environment("acceptance")
+              setup_samples.append(time.perf_counter() - started)
+          source = f"import {os.environ['PROJECT_MODULE']}\nexample : True := by trivial\n"
+          started = time.perf_counter()
+          result = environment.check(source, filename="Acceptance.lean")
+          check_seconds = time.perf_counter() - started
+          result.raise_for_error()
+          setup_median = statistics.median(setup_samples)
+          scratch_empty = not any(runtime.store.jobs.iterdir())
+          report = {
+              "schema": "lean-runtime.project-acceptance/v1",
+              "anonymous": os.environ["REQUIRE_PUBLIC"] == "true",
+              "lock_id": environment.lock.lock_id,
+              "download_seconds": int(os.environ["DOWNLOAD_SECONDS"]),
+              "warm_setup_median_seconds": setup_median,
+              "check_seconds": check_seconds,
+              "scratch_empty": scratch_empty,
+              "platform": os.environ["RUNNER_OS"] + "/" + os.environ["RUNNER_ARCH"],
+          }
+          with open(os.environ["ACCEPTANCE_RESULT"], "w", encoding="utf-8") as output:
+              json.dump(report, output, sort_keys=True)
+              output.write("\n")
+          print(json.dumps(report, sort_keys=True))
+          failures = []
+          if setup_median >= 0.25:
+              failures.append(f"warm setup median {setup_median:.3f}s is not below 0.25s")
+          if check_seconds >= 10:
+              failures.append(f"clean import check {check_seconds:.3f}s is not below 10s")
+          if not scratch_empty:
+              failures.append("execution scratch directory was not empty after the check")
+          if failures:
+              raise SystemExit("performance acceptance failed: " + "; ".join(failures))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acceptance-${{ matrix.platform }}
+          path: acceptance-${{ matrix.platform }}.json
+          if-no-files-found: warn

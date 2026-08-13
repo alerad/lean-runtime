@@ -487,6 +487,9 @@ def test_oci_publisher_uploads_blobs_before_manifests(tmp_path: Path) -> None:
     assert all(kind in {"exists", "blob"} for kind in kinds[:first_manifest])
     assert result.exact_environment_id == lock.lock_id
     assert result.uploaded_files == 3
+    assert result.uploaded_bytes == result.total_blob_bytes
+    assert result.reused_bytes == 0
+    assert result.reuse_percent == 0
     assert operations[-2:] == [("manifest", lock.lock_id), ("manifest", "v1")]
 
 

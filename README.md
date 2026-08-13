@@ -170,6 +170,20 @@ lean-runtime build-and-publish environment.lock.json \
   --publish-to ghcr.io/owner/lean-environments
 ```
 
+To publish an existing clean, pushed GitHub Lean project, inspect it and
+generate the maintained multi-platform workflow:
+
+```bash
+lean-runtime project inspect . --module MyProject
+lean-runtime project init-publish . \
+  --module MyProject \
+  --library ghcr.io/owner/my-project-environments
+```
+
+The workflow builds and verifies Linux and macOS environments, finalizes the
+index atomically, then checks clean consumers. See
+[Publishing a Lean project](https://alerad.github.io/lean-runtime/project-publishing/).
+
 For an already-built executable, Lean Runtime can also create a verified
 **ready-to-run program**. It opens without rebuilding the project, can be saved
 as a portable copy, and can be shared through a public or private program
@@ -191,6 +205,7 @@ architecture documentation.
 - [`lean-run` and operations CLI](https://github.com/alerad/lean-runtime/blob/main/docs/cli.md)
 - [Managed environments](https://github.com/alerad/lean-runtime/blob/main/docs/environments.md)
 - [Local Lake projects](https://github.com/alerad/lean-runtime/blob/main/docs/local-projects.md)
+- [Publishing a Lean project](https://github.com/alerad/lean-runtime/blob/main/docs/project-publishing.md)
 - [Portable copies and environment libraries](https://github.com/alerad/lean-runtime/blob/main/docs/portable-copies.md)
 - [Ready-to-run programs](https://github.com/alerad/lean-runtime/blob/main/docs/ready-programs.md)
 - [Architecture](https://github.com/alerad/lean-runtime/blob/main/docs/architecture.md)

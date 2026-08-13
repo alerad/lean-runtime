@@ -52,7 +52,13 @@ from .oci import DEFAULT_ENVIRONMENT_LIBRARIES, PublicationInfo
 from .policies import ExecutionPolicy
 from .profiling import ProfileReport
 from .programs import ProgramDescription, ProgramInfo, ReadyProgram
-from .projects import ProjectContext, ProjectEnvironment, discover_project
+from .projects import (
+    ProjectContext,
+    ProjectEnvironment,
+    ProjectPublicationPlan,
+    discover_project,
+    project_publication_workflow,
+)
 from .references import PACKAGE_ALIASES, DiscoveredPackage, PackageReference
 from .runtime import Runtime, project_toolchain
 from .schema_resources import SCHEMA_NAMES, schema_path
@@ -104,6 +110,8 @@ __all__ = [
     "PhaseTiming",
     "ProjectContext",
     "ProjectEnvironment",
+    "ProjectPublicationPlan",
+    "project_publication_workflow",
     "ProjectProvenance",
     "ProfileReport",
     "ProgramDescription",

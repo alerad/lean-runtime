@@ -1,0 +1,141 @@
+# Publishing a Lean project
+
+Lean Runtime can freeze a clean, pushed GitHub Lean project into an exact lock,
+build it on each supported computer type, and publish verified ready-to-use
+environments through an OCI-compatible library. Consumers import the project's
+public module without cloning or building the project.
+
+This is distinct from ordinary project CI. [`leanprover/lean-action`](https://github.com/leanprover/lean-action)
+builds and tests a checkout; Lean Runtime distributes an immutable environment
+to other machines. Projects can use both.
+
+## Local preflight
+
+Inspecting is read-only and performs no build:
+
+```bash
+lean-runtime project inspect . --module MyProject
+```
+
+Add `--check-remote` to prove that the exact HEAD commit is available from
+`origin`. Publication deliberately requires:
+
+- a pinned `lean-toolchain`;
+- a root `lakefile.toml` or `lakefile.lean` with an importable Lean library;
+- the Lake project at the Git repository root;
+- a clean checkout;
+- a GitHub `origin`; and
+- a HEAD commit available from that remote.
+
+If `lakefile.lean` must be translated, its pinned toolchain must already be
+installed. Preflight never installs it implicitly.
+
+Freeze the project explicitly when a lock is useful on its own:
+
+```bash
+lean-runtime project lock . --module MyProject
+```
+
+The default output is `environment.lock.json` in the project root. The lock
+contains the exact project commit, complete Lake dependency graph, toolchain,
+and selected public module.
+
+## Export this computer
+
+A portable copy is useful for transferring the current computer's environment:
+
+```bash
+lean-runtime project export . --module MyProject \
+  --output MyProject.lean-environment
+
+lean-runtime open-copy MyProject.lean-environment --name MyProject
+```
+
+Portable copies are computer-type-specific. Use the reusable workflow for a
+public multi-platform environment.
+
+## Generate the publication workflow
+
+```bash
+lean-runtime project init-publish . \
+  --module MyProject \
+  --library ghcr.io/OWNER/my-project-environments
+```
+
+This creates `.github/workflows/publish-lean-environment.yml`:
+
+```yaml
+name: Publish Lean environment
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  publish:
+    uses: alerad/lean-runtime/.github/workflows/publish-project.yml@v2
+    with:
+      project: .
+      library: ghcr.io/OWNER/my-project-environments
+      module: MyProject
+      public: true
+    secrets: inherit
+```
+
+The maintained workflow validates and locks the checkout once; builds Linux
+AMD64, macOS AMD64, and macOS ARM64; verifies source identity and a Lean import
+probe; streams and deduplicates OCI blobs; signs and attests each publication;
+publishes the index only after every platform succeeds; then downloads it into
+clean stores on all three platforms and checks `import MyProject`.
+
+The final acceptance is anonymous when `public: true`. GHCR package visibility
+is controlled by GitHub: after the first publication, make the package public
+in its package settings. Until then, acceptance intentionally fails rather
+than claiming that public consumption works. An incomplete matrix never
+replaces the last complete lock index.
+
+## Consumer
+
+The exact lock is the portable consumer contract:
+
+```bash
+lean-runtime --library ghcr.io/OWNER/my-project-environments \
+  --availability required download environment.lock.json --name MyProject
+```
+
+For standalone source, configure the library and use the exact GitHub reference:
+
+```bash
+export LEAN_RUNTIME_LIBRARIES=ghcr.io/OWNER/my-project-environments
+
+lean-run Main.lean \
+  --with github:OWNER/REPOSITORY@FULL_COMMIT \
+  --no-source-build
+```
+
+The project must be rooted at the repository root for friendly-reference
+discovery. `--no-source-build` makes absence, incompatibility, or registry
+visibility a clear failure instead of a local build.
+
+## Performance contract
+
+The release gate tracks phases separately, and publication JSON includes
+`total_blob_bytes`, `uploaded_bytes`, `reused_bytes`, and `reuse_percent`:
+
+- local TOML preflight completes in under two seconds and never builds;
+- the repeat-publication fixture must reuse at least 99% of remote blob bytes;
+- registry selection produces visible progress within two seconds;
+- verification time is reported separately from download time;
+- warm setup remains below 250 ms;
+- the clean import proof remains below ten seconds after acquisition; and
+- execution scratch space is empty after the check.
+
+Publication reports total, uploaded, and reused bytes. Clean acceptance reports
+acquisition seconds, warm setup, and check time separately; acquisition has no
+universal wall-clock threshold because it is bandwidth-dominated.
