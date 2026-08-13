@@ -137,7 +137,8 @@ The release gate tracks phases separately, and publication JSON includes
 `total_blob_bytes`, `uploaded_bytes`, `reused_bytes`, and `reuse_percent`:
 
 - local TOML preflight completes in under two seconds and never builds;
-- the repeat-publication fixture must reuse at least 99% of remote blob bytes;
+- the repeat-publication fixture sets `minimum-reuse-percent: 99`, so CI fails
+  unless at least 99% of remote blob bytes are reused;
 - registry selection produces visible progress within two seconds;
 - verification time is reported separately from download time;
 - warm setup remains below 250 ms;

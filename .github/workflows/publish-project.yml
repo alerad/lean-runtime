@@ -46,6 +46,11 @@ on:
         required: false
         default: 300
         type: number
+      minimum-reuse-percent:
+        description: Fail when an existing library reuses less than this percentage of blob bytes
+        required: false
+        default: 0
+        type: number
 
 permissions:
   contents: read
@@ -138,6 +143,7 @@ jobs:
           LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ github.token }}
           LIBRARY: ${{ inputs.library }}
           BUILD_TIMEOUT: ${{ inputs.build-timeout }}
+          MINIMUM_REUSE_PERCENT: ${{ inputs.minimum-reuse-percent }}
           RESULT: platform-result-${{ matrix.platform }}.json
         run: |
           started=$SECONDS
@@ -164,6 +170,12 @@ jobs:
                   f"- Uploaded: {value['uploaded_bytes']:,} bytes\n"
                   f"- Reused: {value['reused_bytes']:,} bytes "
                   f"({value['reuse_percent']:.2f}%)\n"
+              )
+          minimum_reuse = float(os.environ["MINIMUM_REUSE_PERCENT"])
+          if value["reuse_percent"] < minimum_reuse:
+              raise SystemExit(
+                  f"OCI reuse {value['reuse_percent']:.2f}% is below the required "
+                  f"{minimum_reuse:.2f}%"
               )
           PY
       - uses: actions/upload-artifact@v7

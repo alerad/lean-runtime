@@ -12,7 +12,8 @@
 - Validate registry configuration inside the CLI error boundary so malformed
   libraries produce concise invocation errors instead of Python tracebacks.
 - Report total, uploaded, and remotely reused OCI blob bytes (plus the reuse
-  percentage) in every environment publication result.
+  percentage) in every environment publication result. Reusable workflows can
+  set `minimum-reuse-percent` to make regressions fail the publication job.
 - Emit visible progress for bundle export, blob upload/reuse, platform
   manifests, attestations, and final index signing during long publications.
 - Publish from the verified OCI layout directly, avoiding the redundant outer
