@@ -9,7 +9,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from .console import ConsoleRenderer
+from .console import ConsoleRenderer, styler_for
 from .discovery import (
     Catalog,
     Discovery,
@@ -187,9 +187,11 @@ def _emit(
     if result.stderr:
         stderr = _display_text(result.stderr, result, filename, shown)
         print(stderr, end="" if stderr.endswith("\n") else "\n", file=sys.stderr)
-    symbol = "✓" if result.ok else "✗"
-    status = "accepted" if result.ok else "rejected"
-    print(f"{symbol} {shown} {status} in {result.elapsed_seconds:.2f}s")
+    style = styler_for(sys.stdout)
+    symbol = style.green("✓") if result.ok else style.red("✗")
+    status = style.green("accepted") if result.ok else style.red("rejected")
+    timing = style.dim(f"in {result.elapsed_seconds:.2f}s")
+    print(f"{symbol} {shown} {status} {timing}")
     if show_timings:
         print(render_timings(result.timings))
 

@@ -277,3 +277,57 @@ def test_verify_cli_is_concise_and_json_is_versioned(monkeypatch, capsys) -> Non
     assert capsys.readouterr().out == "✓ demo verified\n"
     assert main(["--quiet", "verify", "demo", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["schema"] == "lean-runtime.verify/v1"
+
+
+def test_storage_renders_human_summary_and_json(tmp_path: Path, capsys) -> None:
+    from lean_runtime.store import EnvironmentStore
+
+    store = EnvironmentStore(tmp_path)
+    environment = store.environment_path("env_" + "a" * 64)
+    environment.mkdir()
+    (environment / "payload.bin").write_bytes(b"x" * 4096)
+    store.set_alias("research", environment.name)
+
+    assert main(["--home", str(tmp_path), "storage"]) == 0
+    output = capsys.readouterr().out
+    assert "Store" in output and str(tmp_path) in output
+    assert "Environments" in output and "Total" in output
+    assert "4 KiB" in output
+    assert "research" in output
+    assert "lean-runtime clean" in output
+
+    assert main(["--home", str(tmp_path), "storage", "--json"]) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["environments"] == 1
+    assert document["environments_bytes"] >= 4096
+    assert document["environment_usage"][0]["aliases"] == ["research"]
+
+
+def test_clean_previews_then_reclaims_with_human_output(tmp_path: Path, capsys) -> None:
+    import os as _os
+
+    from lean_runtime.store import EnvironmentStore
+
+    store = EnvironmentStore(tmp_path)
+    candidate = store.environment_path("env_" + "b" * 64)
+    candidate.mkdir()
+    (candidate / "payload.bin").write_bytes(b"x" * 4096)
+    _os.utime(candidate, (1_000_000_000, 1_000_000_000))
+
+    assert main(["--home", str(tmp_path), "clean", "--minimum-age-hours", "0"]) == 0
+    preview = capsys.readouterr().out
+    assert "Would remove 1 unused environment(s)" in preview
+    assert "4 KiB" in preview
+    assert "--execute" in preview
+    assert candidate.is_dir()
+
+    assert main(["--home", str(tmp_path), "clean", "--minimum-age-hours", "0", "--execute"]) == 0
+    applied = capsys.readouterr().out
+    assert "Removed 1 environment(s)" in applied
+    assert "reclaimed" in applied and "4 KiB" in applied
+    assert not candidate.exists()
+
+    assert main(["--home", str(tmp_path), "clean", "--json"]) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["schema"] == "lean-runtime.cleanup/v1"
+    assert document["data"]["environments"]["candidates"] == []

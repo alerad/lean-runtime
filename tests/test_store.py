@@ -227,3 +227,49 @@ def test_source_snapshot_preserves_git_error_when_cleanup_also_fails(
 
     with pytest.raises(EnvironmentError, match="Filename too long"):
         store.publish_source(checkout, source_id, metadata)
+
+
+def test_status_reports_per_category_bytes_and_environment_usage(tmp_path: Path) -> None:
+    store = EnvironmentStore(tmp_path)
+    environment = store.environment_path(RETAINED)
+    environment.mkdir()
+    (environment / "payload.bin").write_bytes(b"x" * 2048)
+    (environment / "metadata.json").write_text(
+        json.dumps({"toolchain": "leanprover/lean4:v4.32.0"})
+    )
+    store.set_alias("research", environment.name)
+    (store.oci_blobs / ("0" * 64)).write_bytes(b"y" * 512)
+    source = store.sources / ("source_" + "f" * 64)
+    source.mkdir(parents=True)
+    (source / "Sample.lean").write_bytes(b"z" * 256)
+
+    status = store.status()
+    assert status.environments == 1
+    assert status.environments_bytes >= 2048
+    assert status.oci_blobs_bytes == 512
+    assert status.sources_bytes == 256
+    assert status.bytes_used >= 2048 + 512 + 256
+    usage = status.environment_usage[0]
+    assert usage.environment_id == environment.name
+    assert usage.aliases == ("research",)
+    assert usage.toolchain == "leanprover/lean4:v4.32.0"
+    assert usage.bytes_used >= 2048
+    assert usage.last_used_at is not None
+    assert status.to_dict()["environment_usage"][0]["aliases"] == ["research"]
+
+
+def test_clean_reports_candidate_and_reclaimed_bytes(tmp_path: Path) -> None:
+    store = EnvironmentStore(tmp_path)
+    candidate = store.environment_path(CANDIDATE)
+    candidate.mkdir()
+    (candidate / "payload.bin").write_bytes(b"x" * 4096)
+    old = 1_000_000_000
+    os.utime(candidate, (old, old))
+
+    dry = store.clean(dry_run=True, minimum_age_seconds=0)
+    assert dry.candidate_bytes >= 4096
+    assert dry.reclaimed_bytes == 0
+
+    applied = store.clean(dry_run=False, minimum_age_seconds=0)
+    assert applied.removed == (candidate.name,)
+    assert applied.reclaimed_bytes >= 4096

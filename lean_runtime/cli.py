@@ -6,19 +6,22 @@ import argparse
 import json
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .console import styler_for
 from .environments import ExecutionCapture
 from .errors import LeanRuntimeError, MaterializationError, ResolutionError
 from .events import RuntimeEvent
 from .lockfiles import EnvironmentLock
 from .matrix import load_matrix
 from .models import ExecutionResult, PhaseTiming
-from .policies import ExecutionPolicy
+from .policies import ExecutionPolicy, format_byte_size
 from .projects import discover_project, project_publication_workflow
 from .runtime import Runtime
 from .specs import EnvironmentSpec
+from .store import CleanupReport, DownloadCleanupReport, StoreStatus
 from .timings import render_timings
 from .wire import (
     envelope,
@@ -44,6 +47,105 @@ def _schema_for(command: str) -> str:
 
 def _json(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _relative_age(timestamp: str | None) -> str:
+    if not timestamp:
+        return "unknown"
+    try:
+        moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return "unknown"
+    seconds = max(0.0, time.time() - moment.timestamp())
+    for unit_seconds, label in ((31_536_000, "y"), (2_592_000, "mo"), (86_400, "d"), (3_600, "h")):
+        if seconds >= unit_seconds:
+            return f"{int(seconds // unit_seconds)}{label} ago"
+    return "recent"
+
+
+def _render_storage(status: StoreStatus) -> None:
+    style = styler_for(sys.stdout)
+    print(f"{style.bold('Store')}  {status.home}")
+    print()
+    rows = (
+        ("Environments", status.environments, status.environments_bytes),
+        ("Sources", status.sources, status.sources_bytes),
+        ("Download cache", status.oci_blobs, status.oci_blobs_bytes),
+        ("Toolchains", None, status.toolchains_bytes),
+        ("Executions", status.executions, status.executions_bytes),
+    )
+    for label, count, bytes_used in rows:
+        counted = f"{count:>5}" if count is not None else "     "
+        size_column = style.cyan(f"{format_byte_size(bytes_used):>10}")
+        print(f"  {label:<15}{counted}  {size_column}")
+    total_label = style.bold(f"{'Total':<15}")
+    total_size = style.bold(f"{format_byte_size(status.bytes_used):>10}")
+    free_note = style.dim(f"({format_byte_size(status.bytes_free)} free on disk)")
+    print(f"  {total_label}       {total_size}  {free_note}")
+    if status.environment_usage:
+        print()
+        print(style.bold("Largest environments"))
+        for usage in status.environment_usage[:5]:
+            name = ", ".join(usage.aliases) if usage.aliases else usage.environment_id[:16] + "…"
+            details = " · ".join(
+                part
+                for part in (usage.toolchain, f"last used {_relative_age(usage.last_used_at)}")
+                if part
+            )
+            size_column = style.cyan(f"{format_byte_size(usage.bytes_used):>10}")
+            print(f"  {size_column}  {name}  {style.dim(details)}")
+    print()
+    print(style.dim("Reclaim space: lean-runtime clean            (preview, keeps recent/named)"))
+    print(style.dim("               lean-runtime clean --execute --include-downloads"))
+
+
+def _render_cleanup(environments: CleanupReport, downloads: DownloadCleanupReport | None) -> None:
+    style = styler_for(sys.stdout)
+    retained_note = style.dim(
+        f"Retained {len(environments.retained)} environment(s) (named, recent, or in use)."
+    )
+    if environments.dry_run:
+        anything = False
+        if environments.candidates:
+            anything = True
+            print(
+                style.bold(
+                    f"Would remove {len(environments.candidates)} unused environment(s) · "
+                    f"{format_byte_size(environments.candidate_bytes)}"
+                )
+            )
+            for name in environments.candidates:
+                print(f"  {style.dim(name)}")
+        else:
+            print("No unused environments to remove.")
+        if downloads is not None:
+            if downloads.candidates:
+                anything = True
+                print(
+                    style.bold(
+                        f"Would remove {len(downloads.candidates)} cached download(s) · "
+                        f"{format_byte_size(downloads.candidate_bytes)}"
+                    )
+                )
+            else:
+                print("No unreferenced cached downloads to remove.")
+        print(retained_note)
+        if anything:
+            print()
+            print("This was a preview. Re-run with --execute to delete.")
+        return
+    reclaimed = environments.reclaimed_bytes + (downloads.reclaimed_bytes if downloads else 0)
+    removed = len(environments.removed) + (len(downloads.removed) if downloads else 0)
+    if removed:
+        parts = [f"{len(environments.removed)} environment(s)"]
+        if downloads is not None:
+            parts.append(f"{len(downloads.removed)} cached download(s)")
+        print(
+            style.green(f"Removed {' and '.join(parts)} · reclaimed {format_byte_size(reclaimed)}")
+        )
+    else:
+        print("Nothing needed cleaning.")
+    print(retained_note)
 
 
 def _progress(event: RuntimeEvent) -> None:
@@ -266,7 +368,8 @@ def parser() -> argparse.ArgumentParser:
     inspect.add_argument("--explain", action="store_true", help="explain identity and reuse")
 
     commands.add_parser("environments", help="list ready environments")
-    commands.add_parser("storage", help="show downloaded and built storage usage")
+    storage = commands.add_parser("storage", help="show downloaded and built storage usage")
+    storage.add_argument("--json", action="store_true")
     commands.add_parser("doctor", help="check local prerequisites and environment storage")
 
     verify = commands.add_parser("verify", help="verify a lock or published environment")
@@ -316,6 +419,7 @@ def parser() -> argparse.ArgumentParser:
     gc.add_argument(
         "--include-downloads", action="store_true", help="also clean unused downloaded files"
     )
+    gc.add_argument("--json", action="store_true")
 
     raw = commands.add_parser(
         "check-file", help="check a file, discovering its local Lake project when possible"
@@ -640,7 +744,11 @@ def main(argv: list[str] | None = None) -> int:
             _json(list(runtime.list_environments()))
             return 0
         if args.command == "storage":
-            _json(runtime.store_status().to_dict())
+            status = runtime.store_status()
+            if args.json:
+                _json(status.to_dict())
+            else:
+                _render_storage(status)
             return 0
         if args.command == "toolchain-slim":
             manifest = runtime.toolchains.materialize_slim(args.toolchain)
@@ -734,22 +842,28 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=not args.execute,
                 minimum_age_seconds=args.minimum_age_hours * 3600,
             )
-            gc_payload: dict[str, Any] = {
-                "environments": gc_report.to_dict(),
-                "downloaded_files": None,
-            }
-            if args.include_downloads:
-                gc_payload["downloaded_files"] = runtime.clean_downloads(
+            gc_downloads = (
+                runtime.clean_downloads(
                     dry_run=not args.execute,
                     minimum_age_seconds=args.minimum_age_hours * 3600,
-                ).to_dict()
-            _json(
-                envelope(
-                    "lean-runtime.cleanup/v1",
-                    ok=True,
-                    data=gc_payload,
                 )
+                if args.include_downloads
+                else None
             )
+            if args.json:
+                gc_payload: dict[str, Any] = {
+                    "environments": gc_report.to_dict(),
+                    "downloaded_files": gc_downloads.to_dict() if gc_downloads else None,
+                }
+                _json(
+                    envelope(
+                        "lean-runtime.cleanup/v1",
+                        ok=True,
+                        data=gc_payload,
+                    )
+                )
+            else:
+                _render_cleanup(gc_report, gc_downloads)
             return 0
         if args.command == "check":
             if args.package_refs:
