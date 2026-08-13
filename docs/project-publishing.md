@@ -95,7 +95,7 @@ publishes the index only after every platform succeeds; then downloads it into
 clean stores on all three platforms and checks `import MyProject`.
 
 The clean-consumer import has configurable `check-budget-seconds` and
-`warm-check-budget-seconds` inputs (300 and 10 seconds by default). These are
+`warm-check-budget-seconds` inputs (300 and 60 seconds by default). These are
 both real execution timeouts and regression gates. The first check deliberately
 measures a cold filesystem cache immediately after acquisition; the second
 measures steady-state use. A project with an intentionally heavier public import
