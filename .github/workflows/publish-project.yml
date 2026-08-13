@@ -82,7 +82,7 @@ jobs:
               output.write(f"lock_id={lock['lock_id']}\n")
               output.write(f"revision={revision}\n")
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: environment-lock
           path: environment.lock.json
@@ -107,7 +107,7 @@ jobs:
           repository: alerad/lean-runtime
           ref: ${{ inputs.runtime-ref }}
           path: runtime-source
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: environment-lock
       - uses: actions/setup-python@v6
@@ -141,7 +141,7 @@ jobs:
               json.dump(value, output, sort_keys=True)
               output.write("\n")
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: platform-${{ matrix.platform }}
           path: platform-result-${{ matrix.platform }}.json
@@ -158,7 +158,7 @@ jobs:
           repository: alerad/lean-runtime
           ref: ${{ inputs.runtime-ref }}
           path: runtime-source
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: platform-*
           path: results
@@ -187,7 +187,7 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"publication_id={value['publication_id']}\n")
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: publication-report
           path: publication.json
@@ -211,7 +211,7 @@ jobs:
           repository: alerad/lean-runtime
           ref: ${{ inputs.runtime-ref }}
           path: runtime-source
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: environment-lock
       - uses: actions/setup-python@v6
@@ -289,7 +289,7 @@ jobs:
           if failures:
               raise SystemExit("performance acceptance failed: " + "; ".join(failures))
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: acceptance-${{ matrix.platform }}
