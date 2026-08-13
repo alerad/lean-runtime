@@ -147,6 +147,32 @@ def _package_import_targets(files: Mapping[str, str], lock: EnvironmentLock) -> 
     return tuple(sorted(targets))
 
 
+def _check_lean_paths(workspace: Path, scratch: Path, lock: EnvironmentLock) -> tuple[Path, ...]:
+    """Return the compiled module roots for a check without asking Lake to scan them."""
+    roots = [scratch / ".lake" / "build" / "lib" / "lean"]
+    workspace_root = workspace / ".lake" / "build" / "lib" / "lean"
+
+    raw_packages_dir = lock.manifest.get("packagesDir", ".lake/packages")
+    if not isinstance(raw_packages_dir, str):
+        raise EnvironmentError("lock packagesDir must be a relative string")
+    packages_dir = PurePosixPath(raw_packages_dir)
+    if packages_dir.is_absolute() or ".." in packages_dir.parts:
+        raise EnvironmentError("lock packagesDir must be a safe relative path")
+    package_root = workspace.joinpath(*packages_dir.parts)
+    for package in lock.packages:
+        root = package_root / package.name
+        if package.subdir:
+            root = root.joinpath(*PurePosixPath(package.subdir).parts)
+        compiled = root / ".lake" / "build" / "lib" / "lean"
+        if compiled.is_dir():
+            roots.append(compiled)
+    # Lake places dependencies before the root package. Keep that precedence;
+    # the scratch root remains first so submitted support modules win.
+    if workspace_root.is_dir():
+        roots.append(workspace_root)
+    return tuple(roots)
+
+
 @dataclass(frozen=True, slots=True)
 class EnvironmentInfo:
     environment_id: str
@@ -755,125 +781,96 @@ class Environment:
         try:
             instance_started = time.monotonic()
             with self.manager.store.execution_lease(self.id):
-                clone_tree(self.workspace, instance)
-            instance_timing = PhaseTiming(
-                "instance_creation", round((time.monotonic() - instance_started) * 1000)
-            )
-            preliminary: list[BackendResult] = []
-            path_map = {str(instance / name): name for name in files}
-            staging_started = time.monotonic()
-            if operation == "check":
-                assert entrypoint is not None
-                for name, source in files.items():
-                    source_path = instance / name
-                    source_path.parent.mkdir(parents=True, exist_ok=True)
-                    source_path.write_text(source, encoding="utf-8")
-                staging_timing = PhaseTiming(
-                    "input_staging", round((time.monotonic() - staging_started) * 1000)
+                if operation == "check":
+                    instance.mkdir()
+                else:
+                    clone_tree(self.workspace, instance)
+                instance_timing = PhaseTiming(
+                    "instance_creation", round((time.monotonic() - instance_started) * 1000)
                 )
-                import_targets = _package_import_targets(files, self.lock)
-                if import_targets:
-                    import_command = self.manager.toolchains.command(
-                        self.lock.toolchain, "lake", "build", *import_targets
+                preliminary: list[BackendResult] = []
+                path_map = {str(instance / name): name for name in files}
+                staging_started = time.monotonic()
+                execution_environment = self.manager.toolchains.environment
+                if operation == "check":
+                    assert entrypoint is not None
+                    for name, source in files.items():
+                        source_path = instance / name
+                        source_path.parent.mkdir(parents=True, exist_ok=True)
+                        source_path.write_text(source, encoding="utf-8")
+                    staging_timing = PhaseTiming(
+                        "input_staging", round((time.monotonic() - staging_started) * 1000)
                     )
-                    import_result = self.manager.backend.execute(
-                        import_command,
-                        cwd=instance,
-                        environment=self.manager.toolchains.environment,
-                        policy=policy,
-                        cancel=cancel,
+                    lean_paths = _check_lean_paths(self.workspace, instance, self.lock)
+                    execution_environment["LEAN_PATH"] = os.pathsep.join(
+                        str(path) for path in lean_paths
                     )
-                    preliminary.append(import_result)
-                    if import_result.exit_code:
-                        result = self._result(
-                            import_result,
-                            command=import_command,
+                    for support in _support_order(files, entrypoint):
+                        support_path = instance / support
+                        output_path = (
+                            instance / ".lake" / "build" / "lib" / "lean" / support
+                        ).with_suffix(".olean")
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                        support_command = self.manager.toolchains.command(
+                            self.lock.toolchain,
+                            "lean",
+                            "-R",
+                            str(instance),
+                            "-o",
+                            str(output_path),
+                            str(support_path),
+                        )
+                        support_result = self.manager.backend.execute(
+                            support_command,
                             cwd=instance,
-                            execution_id=execution_id,
-                            request_digest=request_digest,
-                            source_digest=source_digest,
-                            started_at=started_at,
+                            environment=execution_environment,
                             policy=policy,
-                            timings=(instance_timing, staging_timing),
-                            path_map=path_map,
+                            cancel=cancel,
                         )
-                        self._record_execution(
-                            result,
-                            operation,
-                            targets,
-                            entrypoint,
-                            tuple(files),
-                            requested_command,
-                        )
-                        return result
-                for support in _support_order(files, entrypoint):
-                    support_path = instance / support
-                    output_path = (
-                        instance / ".lake" / "build" / "lib" / "lean" / support
-                    ).with_suffix(".olean")
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                    support_command = self.manager.toolchains.command(
-                        self.lock.toolchain,
-                        "lake",
-                        "env",
-                        "lean",
-                        "-R",
-                        str(instance),
-                        "-o",
-                        str(output_path),
-                        str(support_path),
+                        preliminary.append(support_result)
+                        if support_result.exit_code:
+                            result = self._result(
+                                support_result,
+                                command=support_command,
+                                cwd=instance,
+                                execution_id=execution_id,
+                                request_digest=request_digest,
+                                source_digest=source_digest,
+                                started_at=started_at,
+                                policy=policy,
+                                timings=(instance_timing, staging_timing),
+                                path_map=path_map,
+                            )
+                            self._record_execution(
+                                result,
+                                operation,
+                                targets,
+                                entrypoint,
+                                tuple(files),
+                                requested_command,
+                            )
+                            return result
+                    source_path = instance / entrypoint
+                    command = self.manager.toolchains.command(
+                        self.lock.toolchain, "lean", "-R", str(instance), str(source_path)
                     )
-                    support_result = self.manager.backend.execute(
-                        support_command,
-                        cwd=instance,
-                        environment=self.manager.toolchains.environment,
-                        policy=policy,
-                        cancel=cancel,
+                elif operation == "build":
+                    staging_timing = PhaseTiming("input_staging", 0, performed=False)
+                    command = self.manager.toolchains.command(
+                        self.lock.toolchain, "lake", "build", *targets
                     )
-                    preliminary.append(support_result)
-                    if support_result.exit_code:
-                        result = self._result(
-                            support_result,
-                            command=support_command,
-                            cwd=instance,
-                            execution_id=execution_id,
-                            request_digest=request_digest,
-                            source_digest=source_digest,
-                            started_at=started_at,
-                            policy=policy,
-                            timings=(instance_timing, staging_timing),
-                            path_map=path_map,
-                        )
-                        self._record_execution(
-                            result,
-                            operation,
-                            targets,
-                            entrypoint,
-                            tuple(files),
-                            requested_command,
-                        )
-                        return result
-                source_path = instance / entrypoint
-                command = self.manager.toolchains.command(
-                    self.lock.toolchain, "lake", "env", "lean", str(source_path)
+                else:
+                    staging_timing = PhaseTiming("input_staging", 0, performed=False)
+                    command = self.manager.toolchains.command(
+                        self.lock.toolchain, requested_command[0], *requested_command[1:]
+                    )
+                raw = self.manager.backend.execute(
+                    command,
+                    cwd=instance,
+                    environment=execution_environment,
+                    policy=policy,
+                    cancel=cancel,
                 )
-            elif operation == "build":
-                staging_timing = PhaseTiming("input_staging", 0, performed=False)
-                command = self.manager.toolchains.command(
-                    self.lock.toolchain, "lake", "build", *targets
-                )
-            else:
-                staging_timing = PhaseTiming("input_staging", 0, performed=False)
-                command = self.manager.toolchains.command(
-                    self.lock.toolchain, requested_command[0], *requested_command[1:]
-                )
-            raw = self.manager.backend.execute(
-                command,
-                cwd=instance,
-                environment=self.manager.toolchains.environment,
-                policy=policy,
-                cancel=cancel,
-            )
             if operation == "check" and preliminary:
                 raw = BackendResult(
                     exit_code=raw.exit_code,
