@@ -14,9 +14,11 @@ rank curated exact catalog entries; they are never treated as proof that an
 environment is compatible. Runtime materializes each bounded candidate and
 Lean authoritatively checks the source before discovery can succeed.
 
-The bundled bootstrap catalog contains core Lean v4.32.2 plus exact Mathlib
-v4.32.2, v4.31.0, and v4.30.0 locks. `--catalog PATH` selects another validated
-catalog and `--no-discover` restores strict explicit-context behavior.
+The bundled bootstrap catalog contains core Lean v4.32.2, exact Mathlib v4.30.0
+through v4.33.0 locks, and matching LeanCert releases. `--catalog PATH` selects
+another validated catalog and `--no-discover` restores strict explicit-context
+behavior. Otherwise-equivalent candidates prefer the smallest dependency closure,
+so ordinary Mathlib files do not select the larger LeanCert environment.
 
 Three budgets bound the work independently:
 
@@ -37,8 +39,8 @@ The block must appear before Lean source and uses TOML encoded in Lean comments:
 
 ```lean
 -- /// lean-runtime
--- requires = ["mathlib@v4.32.2", "leancert@v4.32.2.4"]
--- toolchain = "leanprover/lean4:v4.32.0"
+-- requires = ["leancert@v4.33.0"]
+-- toolchain = "leanprover/lean4:v4.33.0"
 -- ///
 ```
 

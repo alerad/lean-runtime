@@ -41,7 +41,7 @@ Strict TOML frontmatter remains available when the context is already known:
 
 ```lean
 -- /// lean-runtime
--- requires = ["mathlib@v4.32.2"]
+-- requires = ["mathlib@v4.33.0"]
 -- ///
 
 import Mathlib
@@ -50,13 +50,13 @@ import Mathlib
 Dependencies may instead be supplied without editing the file:
 
 ```bash
-lean-run Main.lean --with mathlib@v4.32.2
+lean-run Main.lean --with mathlib@v4.33.0
 ```
 
 Friendly references require a revision and compile to exact Git identities:
 
-- `mathlib@v4.32.2`
-- `leancert@v4.32.2.4`
+- `mathlib@v4.33.0`
+- `leancert@v4.33.0`
 - `owner/repository@tag-or-commit`
 - `github:owner/repository@tag-or-commit`
 
@@ -67,7 +67,7 @@ Bare floating aliases are rejected.
 ```python
 import lean_runtime as lean
 
-environment = lean.setup(["mathlib@v4.32.2"])
+environment = lean.setup(["mathlib@v4.33.0"])
 result = environment.check("import Mathlib\nexample : 2 + 2 = 4 := by norm_num")
 result.raise_for_error()
 ```
