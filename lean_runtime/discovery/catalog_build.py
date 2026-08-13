@@ -13,6 +13,16 @@ from .errors import CatalogError
 from .module_inventory import SourceInventoryUnavailable, modules_for_lock
 
 
+def _resolve_references(entry: CatalogSourceEntry, runtime: Runtime) -> EnvironmentLock:
+    """Resolve catalog sources without consulting the catalog being rebuilt."""
+
+    try:
+        spec = runtime.spec_from_references(entry.references)
+        return runtime.prepare(spec)
+    except LeanRuntimeError as exc:
+        raise CatalogError(f"could not resolve entry {entry.id!r}: {exc}") from exc
+
+
 def _lock(entry: CatalogSourceEntry, runtime: Runtime) -> EnvironmentLock:
     if entry.lock_path.is_file():
         return EnvironmentLock.load(entry.lock_path)
@@ -20,10 +30,7 @@ def _lock(entry: CatalogSourceEntry, runtime: Runtime) -> EnvironmentLock:
         raise CatalogError(
             f"entry {entry.id!r} lock does not exist and no references were supplied"
         )
-    try:
-        lock = runtime.prepare_references(entry.references)
-    except LeanRuntimeError as exc:
-        raise CatalogError(f"could not resolve entry {entry.id!r}: {exc}") from exc
+    lock = _resolve_references(entry, runtime)
     entry.lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock.write(entry.lock_path)
     return lock
@@ -42,12 +49,7 @@ def build_catalog(manifest: CatalogSourceManifest, *, runtime: Runtime) -> Catal
             except SourceInventoryUnavailable:
                 if not source.references:
                     raise
-                try:
-                    resolved = runtime.prepare_references(source.references)
-                except LeanRuntimeError as exc:
-                    raise CatalogError(
-                        f"could not reacquire exact sources for entry {source.id!r}: {exc}"
-                    ) from exc
+                resolved = _resolve_references(source, runtime)
                 if resolved.lock_id != lock.lock_id:
                     raise CatalogError(
                         f"entry {source.id!r} references no longer resolve to its frozen lock; "
