@@ -79,6 +79,12 @@ jobs:
           RESULT_SUFFIX: ${{ matrix.platform.name }}
         run: |
           runtime_home="$RUNNER_TEMP/lean-runtime-$ENTRY_ID"
+          toolchain=$(python -c \
+            'from lean_runtime import EnvironmentLock; import sys; print(EnvironmentLock.load(sys.argv[1]).toolchain)' \
+            "$LOCK_PATH")
+          # Publication needs the full toolchain both to inventory/probe the
+          # capsule and to derive its independently verified slim successor.
+          lean-runtime --home "$runtime_home" install "$toolchain"
           if [[ "$ENTRY_ID" == core-* ]]; then
             lean-runtime --home "$runtime_home" --availability auto \
               --library "$LIBRARY" open "$LOCK_PATH" --name publisher
@@ -89,9 +95,6 @@ jobs:
           lean-runtime --home "$runtime_home" --availability local \
             build-and-publish "$LOCK_PATH" --publish-to "$LIBRARY" \
             --platform-only --attest > "environment-$RESULT_SUFFIX.json"
-          toolchain=$(python -c \
-            'from lean_runtime import EnvironmentLock; import sys; print(EnvironmentLock.load(sys.argv[1]).toolchain)' \
-            "$LOCK_PATH")
           lean-runtime --home "$runtime_home" toolchain-publish "$toolchain" \
             --library "$LIBRARY" > "toolchain-$RESULT_SUFFIX.json"
       - uses: actions/upload-artifact@v7
