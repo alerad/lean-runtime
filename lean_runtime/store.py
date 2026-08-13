@@ -214,6 +214,7 @@ class StoreStatus:
     locks: int
     sources: int
     oci_blobs: int
+    cas_artifacts: int
     executions: int
     aliases: int
     bytes_used: int
@@ -221,6 +222,7 @@ class StoreStatus:
     environments_bytes: int = 0
     sources_bytes: int = 0
     oci_blobs_bytes: int = 0
+    cas_artifacts_bytes: int = 0
     toolchains_bytes: int = 0
     executions_bytes: int = 0
     environment_usage: tuple[EnvironmentUsage, ...] = ()
@@ -232,6 +234,7 @@ class StoreStatus:
             "locks": self.locks,
             "sources": self.sources,
             "oci_blobs": self.oci_blobs,
+            "cas_artifacts": self.cas_artifacts,
             "executions": self.executions,
             "aliases": self.aliases,
             "bytes_used": self.bytes_used,
@@ -239,6 +242,7 @@ class StoreStatus:
             "environments_bytes": self.environments_bytes,
             "sources_bytes": self.sources_bytes,
             "oci_blobs_bytes": self.oci_blobs_bytes,
+            "cas_artifacts_bytes": self.cas_artifacts_bytes,
             "toolchains_bytes": self.toolchains_bytes,
             "executions_bytes": self.executions_bytes,
             "environment_usage": [usage.to_dict() for usage in self.environment_usage],
@@ -260,6 +264,7 @@ class EnvironmentStore:
         self.usage = home / "usage"
         self.leases = home / "leases"
         self.oci_blobs = home / "oci" / "blobs" / "sha256"
+        self.cas_artifacts = home / "cas" / "artifacts" / "sha256"
         self.lock_dir = home / ".locks"
         for path in (
             self.sources,
@@ -272,6 +277,7 @@ class EnvironmentStore:
             self.usage,
             self.leases,
             self.oci_blobs,
+            self.cas_artifacts,
             self.lock_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
@@ -480,6 +486,43 @@ class EnvironmentStore:
         name = digest.removeprefix("sha256:")
         return any((self.leases / "oci" / name).glob("*.json"))
 
+    @contextmanager
+    def cas_artifact_lease(self, digests: Iterable[str]) -> Iterator[None]:
+        """Prevent sparse CAS collection while artifacts are unpacked and projected."""
+        names = sorted(
+            {
+                digest.removeprefix("sha256:")
+                for digest in digests
+                if _OCI_BLOB.fullmatch(digest.removeprefix("sha256:")) is not None
+            }
+        )
+        lease_id = f"{os.getpid()}-{uuid.uuid4().hex}.json"
+        created: list[Path] = []
+        for digest in names:
+            directory = self.leases / "cas" / digest
+            directory.mkdir(parents=True, exist_ok=True)
+            lease = directory / lease_id
+            write_json_atomic(
+                lease,
+                {
+                    "digest": f"sha256:{digest}",
+                    "pid": os.getpid(),
+                    "created_at": time.time(),
+                },
+            )
+            created.append(lease)
+        try:
+            yield None
+        finally:
+            for lease in created:
+                lease.unlink(missing_ok=True)
+                with suppress(OSError):
+                    lease.parent.rmdir()
+
+    def has_cas_artifact_leases(self, digest: str) -> bool:
+        name = digest.removeprefix("sha256:")
+        return any((self.leases / "cas" / name).glob("*.json"))
+
     def referenced_oci_blobs(self) -> set[str]:
         referenced: set[str] = set()
         for path in self.environments.glob("env_*/metadata.json"):
@@ -587,6 +630,9 @@ class EnvironmentStore:
             locks=sum(1 for path in self.locks.glob("lock_*") if path.is_dir()),
             sources=sum(1 for path in self.sources.glob("source_*") if path.is_dir()),
             oci_blobs=sum(1 for path in self.oci_blobs.glob("[0-9a-f]" * 64) if path.is_file()),
+            cas_artifacts=sum(
+                1 for path in self.cas_artifacts.glob("[0-9a-f]" * 64) if path.is_file()
+            ),
             executions=sum(1 for path in self.executions.glob("execution_*.json")),
             aliases=len(aliases),
             bytes_used=bytes_used,
@@ -594,6 +640,7 @@ class EnvironmentStore:
             environments_bytes=sum(item.bytes_used for item in usage),
             sources_bytes=_tree_bytes(self.sources),
             oci_blobs_bytes=_tree_bytes(self.oci_blobs),
+            cas_artifacts_bytes=_tree_bytes(self.cas_artifacts),
             toolchains_bytes=_tree_bytes(self.home / "elan")
             + _tree_bytes(self.home / "toolchains"),
             executions_bytes=_tree_bytes(self.executions),
@@ -712,6 +759,32 @@ class EnvironmentStore:
                     path.unlink()
                     reclaimed_bytes += size
                     removed.append(path.name)
+            for path in sorted(self.cas_artifacts.iterdir()):
+                label = f"cas:{path.name}"
+                if not path.is_file() or _OCI_BLOB.fullmatch(path.name) is None:
+                    retained.append(label)
+                    continue
+                age = now - path.stat().st_mtime
+                if age < minimum_age_seconds or self.has_cas_artifact_leases(path.name):
+                    retained.append(label)
+                    continue
+                candidates.append(label)
+                with suppress(OSError):
+                    candidate_bytes += path.stat().st_size
+                if dry_run:
+                    continue
+                with FileLock(self.lock_dir / f"cas-{path.name}.lock"):
+                    if (
+                        not path.is_file()
+                        or now - path.stat().st_mtime < minimum_age_seconds
+                        or self.has_cas_artifact_leases(path.name)
+                    ):
+                        retained.append(label)
+                        continue
+                    size = path.stat().st_size
+                    path.unlink()
+                    reclaimed_bytes += size
+                    removed.append(label)
         return DownloadCleanupReport(
             tuple(candidates),
             tuple(removed),

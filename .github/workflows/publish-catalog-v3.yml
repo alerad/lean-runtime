@@ -1,0 +1,158 @@
+name: Publish sparse bundled catalog
+
+on:
+  workflow_dispatch:
+    inputs:
+      entry:
+        description: Catalog lock stem, or "all"
+        required: true
+        default: all
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: lean-runtime-catalog-v3
+  cancel-in-progress: false
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      entries: ${{ steps.entries.outputs.entries }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: entries
+        env:
+          REQUESTED_ENTRY: ${{ inputs.entry }}
+        run: |
+          python - <<'PY'
+          import glob, json, os, pathlib
+          requested = os.environ["REQUESTED_ENTRY"]
+          paths = sorted(glob.glob("catalog/locks/*.lock.json"))
+          entries = [
+              {"id": pathlib.Path(path).name.removesuffix(".lock.json"), "lock": path}
+              for path in paths
+          ]
+          if requested != "all":
+              entries = [entry for entry in entries if entry["id"] == requested]
+          if not entries:
+              raise SystemExit(f"unknown catalog entry: {requested}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("entries=" + json.dumps(entries, separators=(",", ":")) + "\n")
+          PY
+
+  platform:
+    needs: matrix
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        entry: ${{ fromJson(needs.matrix.outputs.entries) }}
+        platform:
+          - os: ubuntu-latest
+            name: linux-amd64
+          - os: macos-15-intel
+            name: macos-amd64
+          - os: macos-15
+            name: macos-arm64
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install .
+      - uses: sigstore/cosign-installer@v4.1.2
+      - name: Reuse the public full environment, then publish its sparse successor
+        env:
+          LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
+          LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ github.token }}
+          ENTRY_ID: ${{ matrix.entry.id }}
+          LOCK_PATH: ${{ matrix.entry.lock }}
+          LIBRARY: ghcr.io/alerad/lean-runtime-cache
+          RESULT_SUFFIX: ${{ matrix.platform.name }}
+        run: |
+          runtime_home="$RUNNER_TEMP/lean-runtime-$ENTRY_ID"
+          if [[ "$ENTRY_ID" == core-* ]]; then
+            lean-runtime --home "$runtime_home" --availability auto \
+              --library "$LIBRARY" open "$LOCK_PATH" --name publisher
+          else
+            lean-runtime --home "$runtime_home" --availability required \
+              --library "$LIBRARY" download "$LOCK_PATH" --name publisher
+          fi
+          lean-runtime --home "$runtime_home" --availability local \
+            build-and-publish "$LOCK_PATH" --publish-to "$LIBRARY" \
+            --platform-only --attest > "environment-$RESULT_SUFFIX.json"
+          toolchain=$(python -c \
+            'from lean_runtime import EnvironmentLock; import sys; print(EnvironmentLock.load(sys.argv[1]).toolchain)' \
+            "$LOCK_PATH")
+          lean-runtime --home "$runtime_home" toolchain-publish "$toolchain" \
+            --library "$LIBRARY" > "toolchain-$RESULT_SUFFIX.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: catalog-${{ matrix.entry.id }}-${{ matrix.platform.name }}
+          path: |
+            environment-${{ matrix.platform.name }}.json
+            toolchain-${{ matrix.platform.name }}.json
+          if-no-files-found: error
+
+  finalize:
+    needs: [matrix, platform]
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        entry: ${{ fromJson(needs.matrix.outputs.entries) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: catalog-${{ matrix.entry.id }}-*
+          path: results
+          merge-multiple: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install .
+      - uses: sigstore/cosign-installer@v4.1.2
+      - name: Publish signed indexes only after all platforms succeeded
+        env:
+          LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
+          LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ github.token }}
+          LOCK_PATH: ${{ matrix.entry.lock }}
+          LIBRARY: ghcr.io/alerad/lean-runtime-cache
+        run: |
+          readarray -t identity < <(python - "$LOCK_PATH" <<'PY'
+          from lean_runtime import EnvironmentLock
+          import sys
+          lock = EnvironmentLock.load(sys.argv[1])
+          print(lock.toolchain)
+          print(lock.lock_id)
+          PY
+          )
+          lean-runtime toolchain-finalize-publication "${identity[0]}" \
+            results/toolchain-*.json --library "$LIBRARY" --sign
+          lean-runtime finalize-publication "${identity[1]}" \
+            results/environment-*.json --library "$LIBRARY" --sign
+
+  verify:
+    if: inputs.entry == 'all'
+    needs: finalize
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install .
+      - name: Verify every public v3 artifact anonymously
+        run: python scripts/registry_preflight.py

@@ -29,7 +29,7 @@ on:
       runtime-ref:
         description: lean-runtime Git ref used by the workflow
         required: false
-        default: v2
+        default: v3
         type: string
       build-timeout:
         description: Maximum build/hydration seconds per platform
@@ -68,6 +68,7 @@ jobs:
     outputs:
       lock-id: ${{ steps.lock.outputs.lock_id }}
       revision: ${{ steps.lock.outputs.revision }}
+      toolchain: ${{ steps.lock.outputs.toolchain }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -101,6 +102,7 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"lock_id={lock['lock_id']}\n")
               output.write(f"revision={revision}\n")
+              output.write(f"toolchain={lock['toolchain']}\n")
           PY
       - uses: actions/upload-artifact@v7
         with:
@@ -150,6 +152,8 @@ jobs:
           lean-runtime --availability local build-and-publish environment.lock.json \
             --publish-to "$LIBRARY" --timeout "$BUILD_TIMEOUT" --accelerate \
             --platform-only --attest > "$RESULT"
+          lean-runtime toolchain-publish "${{ needs.resolve.outputs.toolchain }}" \
+            --library "$LIBRARY" > "toolchain-result-${{ matrix.platform }}.json"
           elapsed=$((SECONDS - started))
           python - "$RESULT" "$elapsed" <<'PY'
           import json, os, sys
@@ -181,7 +185,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: platform-${{ matrix.platform }}
-          path: platform-result-${{ matrix.platform }}.json
+          path: |
+            platform-result-${{ matrix.platform }}.json
+            toolchain-result-${{ matrix.platform }}.json
           if-no-files-found: error
 
   finalize:
@@ -215,7 +221,11 @@ jobs:
           LOCK_ID: ${{ needs.resolve.outputs.lock-id }}
           ALIAS_TAG: ${{ inputs.tag }}
         run: |
-          args=(finalize-publication "$LOCK_ID" results/*.json --library "$LIBRARY" --sign)
+          lean-runtime toolchain-finalize-publication \
+            "${{ needs.resolve.outputs.toolchain }}" results/toolchain-result-*.json \
+            --library "$LIBRARY" --sign
+          args=(finalize-publication "$LOCK_ID" results/platform-result-*.json \
+            --library "$LIBRARY" --sign)
           if [[ -n "$ALIAS_TAG" ]]; then args+=(--tag "$ALIAS_TAG"); fi
           lean-runtime "${args[@]}" > publication.json
           cat publication.json

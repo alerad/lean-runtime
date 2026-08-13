@@ -19,6 +19,7 @@ from .discovery import (
     DiscoveryResult,
     default_catalog,
 )
+from .discovery.analyzer import analyze_source
 from .errors import LeanRuntimeError, ProjectError, SpecificationError
 from .events import RuntimeEvent
 from .frontmatter import LeanFrontmatter, parse_frontmatter
@@ -256,18 +257,30 @@ def _render_plan(report: dict[str, Any], *, as_json: bool) -> None:
     print(f"Toolchain installed: {'yes' if report['toolchain_installed'] else 'no'}")
     download = report["download_bytes"]
     libraries = report.get("libraries") or []
-    if report["environment_ready"]:
+    environment_download = report.get("environment_download_bytes")
+    toolchain_download = report.get("toolchain_download_bytes")
+    if isinstance(environment_download, int):
+        print(f"Environment closure: {format_byte_size(environment_download)}")
+    else:
+        print("Environment closure: unknown")
+    if isinstance(toolchain_download, int):
+        print(f"Lean check runtime: {format_byte_size(toolchain_download)}")
+    else:
+        print("Lean check runtime: unknown (no published slim runtime found)")
+    if download == 0 and report.get("download_bytes_complete", True):
         print("Download required: none")
     elif isinstance(download, int):
-        selected = next(item for item in libraries if item.get("available"))
-        cached = selected.get("cached_bytes", 0)
+        selected: dict[str, Any] = next((item for item in libraries if item.get("available")), {})
+        cached = selected.get("cached_bytes", 0) if isinstance(selected, dict) else 0
         suffix = (
             f" ({format_byte_size(cached)} already cached)"
             if isinstance(cached, int) and cached > 0
             else ""
         )
-        print(f"Download required: {format_byte_size(download)}{suffix}")
-        print(f"Library: {selected['library']}")
+        qualifier = "at least " if not report.get("download_bytes_complete", True) else ""
+        print(f"Download required: {qualifier}{format_byte_size(download)}{suffix}")
+        if selected:
+            print(f"Library: {selected['library']}")
     else:
         detail = ""
         if isinstance(libraries, list) and libraries:
@@ -275,7 +288,11 @@ def _render_plan(report: dict[str, Any], *, as_json: bool) -> None:
         print(f"Download required: unknown{detail}")
     limit = report.get("max_download_bytes")
     if isinstance(limit, int):
-        allowed = not isinstance(download, int) or download <= limit
+        allowed = (
+            report.get("download_bytes_complete", True)
+            and isinstance(download, int)
+            and download <= limit
+        )
         print(f"Download limit: {format_byte_size(limit)} ({'ok' if allowed else 'exceeded'})")
 
 
@@ -363,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_download_bytes=arguments.max_download,
                 libraries=() if arguments.offline else None,
             )
-            report = runtime.plan_exact(lock)
+            report = runtime.plan_exact(lock, import_roots=analyze_source(source).imports)
             if candidate_id is not None:
                 report["candidate"] = candidate_id
             _render_plan(report, as_json=arguments.json)
@@ -398,7 +415,9 @@ def main(argv: list[str] | None = None) -> int:
                 source_path,
                 embedded=arguments.lock is None,
             )
-            environment = runtime.open_exact(EnvironmentLock.load(lock_path))
+            environment = runtime.open_exact(
+                EnvironmentLock.load(lock_path), import_roots=analyze_source(source).imports
+            )
             preparation = PhaseTiming(
                 "environment_open", round((time.monotonic() - preparation_started) * 1000)
             )
@@ -411,7 +430,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             if arguments.lock_out is not None:
                 lock.write(arguments.lock_out)
-            environment = runtime.open_exact(lock)
+            environment = runtime.open_exact(lock, import_roots=analyze_source(source).imports)
             preparation = PhaseTiming(
                 "environment_open",
                 round((time.monotonic() - resolution_started) * 1000) - resolution.duration_ms,

@@ -69,6 +69,7 @@ class CandidateProbe(Protocol):
 class LeanRuntimeProbe:
     runtime: Runtime
     events: list[RuntimeEvent] | None = None
+    import_roots: tuple[str, ...] = ()
 
     def acquire(
         self,
@@ -90,6 +91,7 @@ class LeanRuntimeProbe:
             environment = self.runtime.open_exact(
                 candidate.entry.lock,
                 build_timeout=timeout_seconds,
+                import_roots=self.import_roots,
                 cancel=cancel,
             )
         except MaterializationError as exc:

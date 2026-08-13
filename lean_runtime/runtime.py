@@ -14,11 +14,13 @@ from typing import Any
 
 from .backends import Backend, LocalBackend
 from .bundles import EnvironmentBundles, PortableCopyInfo
+from .capsules import source_import_roots
 from .comparison import ComparisonEntry, EnvironmentComparison, compare_locks
 from .decisions import Decision
 from .diagnostics import error_diagnostic, map_diagnostic_paths, parse_diagnostics
 from .environments import Environment, EnvironmentManager, ExecutionCapture
 from .errors import (
+    DownloadLimitExceeded,
     DownloadUnavailable,
     EnvironmentError,
     ProjectError,
@@ -61,6 +63,7 @@ from .store import (
     platform_compatibility,
     platform_record,
 )
+from .toolchain_oci import OCIToolchainLibrary, OCIToolchainPublisher, ToolchainPublication
 from .toolchains import ToolchainManager, normalize_toolchain
 from .verification import (
     VerificationCheck,
@@ -201,6 +204,49 @@ class Runtime:
             )
             for value in configured_libraries
         )
+        self.toolchain_libraries = tuple(
+            OCIToolchainLibrary(
+                OCIRepository.parse(value),
+                self.store,
+                self.toolchains,
+                self.events,
+                self.signature_verifier,
+            )
+            for value in configured_libraries
+        )
+        self.toolchains.remote_ensure = self._acquire_check_toolchain
+        self.environments.sparse_acquirer = self._acquire_sparse_modules
+
+    def _acquire_check_toolchain(self, toolchain: str) -> bool:
+        if self.availability == "local":
+            raise ToolchainError(
+                f"toolchain {normalize_toolchain(toolchain)!r} is not available locally; "
+                "offline mode does not permit a download or Elan installation"
+            )
+        for library in self.toolchain_libraries:
+            try:
+                return library.pull(toolchain)
+            except DownloadUnavailable:
+                continue
+        return False
+
+    def _acquire_sparse_modules(
+        self,
+        lock: EnvironmentLock,
+        roots: tuple[str, ...],
+        capabilities: frozenset[str],
+    ) -> None:
+        rejections: list[str] = []
+        for library in self.libraries:
+            try:
+                library.pull_capsule(lock, roots, capabilities=capabilities)
+                return
+            except DownloadUnavailable as exc:
+                rejections.append(f"{library.repository.display}: {exc}")
+        detail = f" ({'; '.join(rejections)})" if rejections else ""
+        raise EnvironmentError(
+            "sparse environment cannot acquire its requested import closure" + detail
+        )
 
     def prepare(
         self,
@@ -219,16 +265,53 @@ class Runtime:
         build_profile: str = "release",
         build_timeout: float = 1800,
         accelerate: bool = False,
+        import_roots: Sequence[str] = (),
         cancel: threading.Event | None = None,
     ) -> Environment:
         environment_id = environment_identity(lock, build_profile)
         destination = self.store.environment_path(environment_id)
+        if self.max_download_bytes is not None and self.availability != "local":
+            preflight = self.plan_exact(
+                lock,
+                build_profile=build_profile,
+                import_roots=import_roots,
+            )
+            planned = preflight.get("download_bytes")
+            complete = preflight.get("download_bytes_complete") is True
+            self.events.emit(
+                "acquisition.planned",
+                "Combined toolchain and environment acquisition planned",
+                phase="plan",
+                total_bytes=planned if isinstance(planned, int) else None,
+                download_bytes=planned,
+                environment_download_bytes=preflight.get("environment_download_bytes"),
+                toolchain_download_bytes=preflight.get("toolchain_download_bytes"),
+            )
+            if not complete:
+                raise DownloadLimitExceeded(
+                    "acquisition cost is incomplete because no published slim runtime or "
+                    "environment could be priced; refusing to continue under a download "
+                    "limit; inspect components with lean-run --plan"
+                )
+            if isinstance(planned, int) and planned > self.max_download_bytes:
+                raise DownloadLimitExceeded(
+                    f"acquiring this check downloads {planned} bytes, above the configured "
+                    f"limit of {self.max_download_bytes} bytes; inspect components with "
+                    "lean-run --plan"
+                )
         if not destination.is_dir() and self.availability != "local":
             imported = False
             rejections: list[str] = []
             for library in self.libraries:
                 try:
-                    library.pull(lock, name=name)
+                    sparse_pull = getattr(library, "pull_capsule", None)
+                    if sparse_pull is None:
+                        library.pull(lock, name=name)
+                    else:
+                        try:
+                            sparse_pull(lock, tuple(import_roots), name=name)
+                        except DownloadUnavailable:
+                            library.pull(lock, name=name)
                     imported = True
                     break
                 except DownloadUnavailable as exc:
@@ -269,44 +352,102 @@ class Runtime:
         )
 
     def plan_exact(
-        self, lock: EnvironmentLock, *, build_profile: str = "release"
+        self,
+        lock: EnvironmentLock,
+        *,
+        build_profile: str = "release",
+        import_roots: Sequence[str] = (),
     ) -> dict[str, Any]:
         """Report what opening a lock would cost, without acquiring anything."""
         environment_id = environment_identity(lock, build_profile)
-        ready = self.store.environment_path(environment_id).is_dir()
+        destination = self.store.environment_path(environment_id)
+        ready = destination.is_dir()
+        sparse = (destination / "workspace" / ".lean-runtime" / "capsule.json").is_file()
         libraries: list[dict[str, Any]] = []
-        download_bytes: int | None = 0 if ready else None
-        if not ready:
-            for library in self.libraries:
+        environment_download: int | None = 0 if ready and not sparse else None
+        if not ready or sparse:
+            for environment_library in self.libraries:
                 try:
-                    plan = dict(library.plan(lock))
+                    try:
+                        capsule = environment_library.plan_capsule(lock, tuple(import_roots))
+                        environment_plan: dict[str, Any] = {
+                            "library": environment_library.repository.display,
+                            "profile": "check-capsule",
+                            "modules": len(capsule.modules),
+                            "total_bytes": capsule.total_bytes,
+                            "cached_bytes": capsule.cached_bytes,
+                            "download_bytes": capsule.download_bytes,
+                        }
+                    except DownloadUnavailable:
+                        environment_plan = dict(environment_library.plan(lock))
+                        environment_plan["profile"] = "legacy-full"
                 except EnvironmentError as exc:
                     libraries.append(
                         {
-                            "library": library.repository.display,
+                            "library": environment_library.repository.display,
                             "available": False,
                             "error": str(exc),
                         }
                     )
                     continue
-                plan["available"] = True
-                libraries.append(plan)
-                if download_bytes is None:
-                    download_bytes = int(plan["download_bytes"])
+                environment_plan["available"] = True
+                libraries.append(environment_plan)
+                if environment_download is None:
+                    planned_bytes = environment_plan.get("download_bytes")
+                    environment_download = planned_bytes if isinstance(planned_bytes, int) else None
+        toolchain_plans: list[dict[str, Any]] = []
+        toolchain_download: int | None = 0 if self._toolchain_installed(lock.toolchain) else None
+        if toolchain_download is None:
+            for toolchain_library in self.toolchain_libraries:
+                try:
+                    toolchain_plan = toolchain_library.plan(lock.toolchain)
+                except EnvironmentError as exc:
+                    toolchain_plans.append(
+                        {
+                            "library": toolchain_library.repository.display,
+                            "available": False,
+                            "error": str(exc),
+                        }
+                    )
+                    continue
+                toolchain_plans.append(
+                    {
+                        "library": toolchain_library.repository.display,
+                        "available": True,
+                        "reference": toolchain_plan.reference,
+                        "lean_commit": toolchain_plan.lean_commit,
+                        "total_bytes": toolchain_plan.total_bytes,
+                        "cached_bytes": toolchain_plan.cached_bytes,
+                        "download_bytes": toolchain_plan.download_bytes,
+                    }
+                )
+                if toolchain_download is None:
+                    toolchain_download = toolchain_plan.download_bytes
+        known_components = [
+            value for value in (environment_download, toolchain_download) if isinstance(value, int)
+        ]
+        download_bytes = sum(known_components) if known_components else None
         return {
             "lock_id": lock.lock_id,
             "toolchain": lock.toolchain,
             "environment_id": environment_id,
             "environment_ready": ready,
+            "environment_download_bytes": environment_download,
             "toolchain_installed": self._toolchain_installed(lock.toolchain),
+            "toolchain_download_bytes": toolchain_download,
+            "toolchain_libraries": toolchain_plans,
             "max_download_bytes": self.max_download_bytes,
             "download_bytes": download_bytes,
+            "download_bytes_complete": isinstance(environment_download, int)
+            and isinstance(toolchain_download, int),
             "libraries": libraries,
         }
 
     def _toolchain_installed(self, toolchain: str) -> bool:
         """Answer without bootstrapping Elan or installing anything."""
         try:
+            if self.toolchains.is_available_locally(toolchain):
+                return True
             self.toolchains.elan_path(bootstrap=False)
             return self.toolchains.is_installed(toolchain)
         except (AttributeError, ToolchainError):
@@ -442,7 +583,12 @@ class Runtime:
         publisher = OCIEnvironmentPublisher(
             OCIRepository.parse(library), self.store, self.bundles, self.events
         )
-        result = publisher.publish(environment.id, tags=tuple(tags), finalize=finalize)
+        result = publisher.publish(
+            environment.id,
+            tags=tuple(tags),
+            finalize=finalize,
+            profile="check-capsule",
+        )
         if sign:
             if result.publication_id is None:
                 raise ValueError("platform-only publishing cannot sign a lock index")
@@ -468,6 +614,29 @@ class Runtime:
                 digest=result.publication_id or result.computer_copy_id,
             )
         return result
+
+    def publish_toolchain(self, toolchain: str, library: str) -> ToolchainPublication:
+        """Publish one verified platform check-toolchain manifest."""
+        return OCIToolchainPublisher(OCIRepository.parse(library), self.toolchains).publish(
+            toolchain
+        )
+
+    def finalize_toolchain_publication(
+        self,
+        toolchain: str,
+        library: str,
+        descriptors: list[dict[str, Any]],
+        *,
+        sign: bool = False,
+    ) -> str:
+        """Publish the multi-platform index only after every platform succeeds."""
+        publisher = OCIToolchainPublisher(OCIRepository.parse(library), self.toolchains)
+        digest = publisher.publish_index(toolchain, descriptors)
+        if sign:
+            CosignVerifier(executable=self.verification_executable).sign(
+                publisher.repository, digest
+            )
+        return digest
 
     def verify(
         self,
@@ -826,7 +995,12 @@ class Runtime:
         if project is not None and packages:
             raise SpecificationError("check cannot combine project= with packages=")
         if packages:
-            resolved = self.open_references(packages, toolchain=toolchain, cancel=cancel)
+            lock = self.prepare_references(packages, toolchain=toolchain, cancel=cancel)
+            resolved = self.open_exact(
+                lock,
+                import_roots=source_import_roots(source),
+                cancel=cancel,
+            )
             return resolved.check(source, filename=filename, policy=selected_policy, cancel=cancel)
         if environment is not None:
             resolved = self._environment(environment)
@@ -981,7 +1155,13 @@ class Runtime:
             accelerate=accelerate,
             cancel=cancel,
         )
-        return self.save_portable_copy(environment.id, output)
+        roots = tuple(
+            module
+            for line in lock.root_module.splitlines()
+            if line.strip().startswith("import ")
+            for module in line.strip().removeprefix("import ").split()
+        )
+        return self.bundles.export_capsule(environment.id, Path(output), roots=roots)
 
     def clean(
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000

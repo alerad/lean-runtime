@@ -22,6 +22,13 @@ from typing import Any, Generic, Literal, TextIO, TypeVar, cast
 from ._git import git_command
 from ._paths import remove_tree
 from .backends import Backend, BackendResult, InteractiveProcess, InteractiveTextReader
+from .capsules import (
+    CAPSULE_MANIFEST,
+    CapsuleManifest,
+    render_setup,
+    setup_artifact_groups,
+    source_import_roots,
+)
 from .diagnostics import error_diagnostic, map_diagnostic_paths, parse_diagnostics
 from .errors import EnvironmentError, MaterializationError, PolicyError
 from .events import EventEmitter
@@ -171,6 +178,40 @@ def _check_lean_paths(workspace: Path, scratch: Path, lock: EnvironmentLock) -> 
     if workspace_root.is_dir():
         roots.append(workspace_root)
     return tuple(roots)
+
+
+def _capsule_setup(
+    workspace: Path,
+    scratch: Path,
+    source: str,
+    source_name: str,
+    lock: EnvironmentLock,
+) -> Path | None:
+    """Render an exact check-only setup for a sparse environment projection."""
+    manifest_path = workspace / CAPSULE_MANIFEST
+    if not manifest_path.is_file():
+        return None
+    manifest = CapsuleManifest.load(manifest_path)
+    roots = source_import_roots(source)
+    artifact_groups = setup_artifact_groups(manifest, workspace, roots)
+    known = {module.name for module in manifest.modules}
+    for root in roots:
+        if root in known:
+            continue
+        local = (scratch / ".lake" / "build" / "lib" / "lean" / Path(*root.split("."))).with_suffix(
+            ".olean"
+        )
+        if local.is_file():
+            artifact_groups[root] = ((str(local),),)
+    setup = render_setup(
+        lean_version=lock.toolchain,
+        name=_module_name(source_name),
+        package="lean_runtime_scratch",
+        import_artifacts=artifact_groups,
+    )
+    path = (scratch / source_name).with_suffix(".setup.json")
+    write_json_atomic(path, setup)
+    return path
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,6 +494,27 @@ class Environment:
             names=names,
         )
 
+    def require_capabilities(
+        self,
+        capabilities: Sequence[str],
+        *,
+        imports: Sequence[str],
+    ) -> None:
+        """Explicitly acquire optional sparse editor/native/development overlays."""
+        selected = frozenset(capabilities)
+        unknown = selected - {"check", "native", "editor", "development"}
+        if unknown:
+            raise EnvironmentError(
+                f"unknown environment capabilities: {', '.join(sorted(unknown))}"
+            )
+        unavailable = selected.intersection({"native", "development"})
+        if unavailable:
+            raise EnvironmentError(
+                "check capsules do not contain native/development build inputs; "
+                "open or build the exact full environment for " + ", ".join(sorted(unavailable))
+            )
+        self.manager.ensure_sparse_modules(self.lock, tuple(imports), selected)
+
     def check(
         self,
         source: str,
@@ -484,6 +546,12 @@ class Environment:
         selected_entrypoint = _lean_path(entrypoint)
         if selected_entrypoint not in normalized:
             raise EnvironmentError(f"entrypoint is not present in files: {selected_entrypoint}")
+        roots = tuple(
+            dict.fromkeys(
+                module for source in normalized.values() for module in source_import_roots(source)
+            )
+        )
+        self.manager.ensure_sparse_modules(self.lock, roots, frozenset({"check"}))
         return self._execute_in_instance(
             operation="check",
             files=normalized,
@@ -811,11 +879,19 @@ class Environment:
                             instance / ".lake" / "build" / "lib" / "lean" / support
                         ).with_suffix(".olean")
                         output_path.parent.mkdir(parents=True, exist_ok=True)
+                        support_setup = _capsule_setup(
+                            self.workspace,
+                            instance,
+                            files[support],
+                            support,
+                            self.lock,
+                        )
                         support_command = self.manager.toolchains.command(
                             self.lock.toolchain,
                             "lean",
                             "-R",
                             str(instance),
+                            *([f"--setup={support_setup}"] if support_setup is not None else []),
                             "-o",
                             str(output_path),
                             str(support_path),
@@ -851,8 +927,20 @@ class Environment:
                             )
                             return result
                     source_path = instance / entrypoint
+                    setup_path = _capsule_setup(
+                        self.workspace,
+                        instance,
+                        files[entrypoint],
+                        entrypoint,
+                        self.lock,
+                    )
                     command = self.manager.toolchains.command(
-                        self.lock.toolchain, "lean", "-R", str(instance), str(source_path)
+                        self.lock.toolchain,
+                        "lean",
+                        "-R",
+                        str(instance),
+                        *([f"--setup={setup_path}"] if setup_path is not None else []),
+                        str(source_path),
                     )
                 elif operation == "build":
                     staging_timing = PhaseTiming("input_staging", 0, performed=False)
@@ -1001,6 +1089,36 @@ class EnvironmentManager:
         self.toolchains = toolchains
         self.backend = backend
         self.events = events or EventEmitter()
+        self.sparse_acquirer: (
+            Callable[[EnvironmentLock, tuple[str, ...], frozenset[str]], None] | None
+        ) = None
+
+    def ensure_sparse_modules(
+        self,
+        lock: EnvironmentLock,
+        roots: tuple[str, ...],
+        capabilities: frozenset[str],
+    ) -> None:
+        """Extend a sparse projection before checking a new import closure."""
+        environment_id = environment_identity(lock)
+        workspace = self.store.environment_path(environment_id) / "workspace"
+        capsule = workspace / CAPSULE_MANIFEST
+        if capsule.is_file():
+            manifest = CapsuleManifest.load(capsule)
+            required = [
+                artifact
+                for module in manifest.closure(roots)
+                for artifact in module.artifacts
+                if artifact.capability in capabilities
+            ]
+            if all(
+                workspace.joinpath(*PurePosixPath(artifact.path).parts).is_file()
+                for artifact in required
+            ):
+                return
+            if self.sparse_acquirer is None:
+                raise EnvironmentError("sparse environment has no configured acquisition source")
+            self.sparse_acquirer(lock, roots, capabilities)
 
     def ensure(
         self,
@@ -1146,22 +1264,32 @@ class EnvironmentManager:
                         exit_code=result.exit_code,
                         output=result.stdout + result.stderr,
                     )
-            command = self.toolchains.command(lock.toolchain, "lake", "build")
-            result = self.backend.execute(
-                command,
-                cwd=workspace,
-                environment=self.toolchains.environment,
-                policy=build_policy,
-                cancel=cancel,
-            )
-            if result.exit_code:
-                raise MaterializationError(
-                    "environment build failed",
-                    phase="build",
-                    command=tuple(command),
-                    exit_code=result.exit_code,
-                    output=result.stdout + result.stderr,
+            if lock.packages:
+                command = self.toolchains.command(lock.toolchain, "lake", "build")
+                result = self.backend.execute(
+                    command,
+                    cwd=workspace,
+                    environment=self.toolchains.environment,
+                    policy=build_policy,
+                    cancel=cancel,
                 )
+                if result.exit_code:
+                    raise MaterializationError(
+                        "environment build failed",
+                        phase="build",
+                        command=tuple(command),
+                        exit_code=result.exit_code,
+                        output=result.stdout + result.stderr,
+                    )
+                build = {
+                    "command": command,
+                    "exit_code": result.exit_code,
+                    "elapsed_seconds": result.elapsed_seconds,
+                    "output_truncated": result.output_truncated,
+                }
+            else:
+                (workspace / ".lake" / "build" / "lib" / "lean").mkdir(parents=True)
+                build = {"command": [], "exit_code": 0, "performed": False}
             metadata = {
                 "schema": ENVIRONMENT_SCHEMA,
                 "environment_id": environment_id,
@@ -1173,12 +1301,7 @@ class EnvironmentManager:
                 "status": "ready",
                 "created_at": _now(),
                 "hydration": hydration,
-                "build": {
-                    "command": command,
-                    "exit_code": result.exit_code,
-                    "elapsed_seconds": result.elapsed_seconds,
-                    "output_truncated": result.output_truncated,
-                },
+                "build": build,
             }
             write_json_atomic(stage / "metadata.json", metadata)
             stage.replace(destination)

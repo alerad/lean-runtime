@@ -17,21 +17,27 @@ DIR_NAME = "leanprover--lean4---v9.9.9"
 def test_exclusion_rules_match_the_check_profile() -> None:
     kept = [
         "bin/lean",
-        "bin/lake",
+        "bin/leanchecker",
         "lib/lean/Init.olean",
         "lib/lean/Init.olean.private",
         "lib/lean/Init.olean.server",
         "lib/lean/Init/Prelude.ir",
         "lib/lean/libleanshared.dylib",
+        "lib/lean/libleanshared.so",
+        "lib/lean/libInit_shared.so",
         "LICENSE",
     ]
     dropped = [
         "lib/lean/Init.ilean",
+        "lib/lean/Init.lean",
         "lib/lean/libLean.a",
+        "lib/lean/libLake_shared.dylib",
         "lib/libLLVM.dylib",
         "lib/libclang-cpp.dylib",
         "lib/clang/20/include/stdint.h",
         "lib/libc/musl.o",
+        "bin/lake",
+        "bin/leanc",
         "src/lean/kernel.cpp",
     ]
     for path in kept:
@@ -70,8 +76,8 @@ def test_materialize_drops_excluded_classes_and_hardlinks(tmp_path: Path) -> Non
     assert not (destination / "lib" / "lean" / "Init.ilean").exists()
     assert not (destination / "lib" / "libLLVM.dylib").exists()
     assert not (destination / "src").exists()
-    assert manifest.files == 5
-    assert manifest.excluded_files == 4
+    assert manifest.files == 4
+    assert manifest.excluded_files == 5
     # Hardlinked materialization: the same inode backs source and slim copies.
     assert (destination / "bin" / "lean").stat().st_ino == (source / "bin" / "lean").stat().st_ino
     loaded = SlimManifest.load(destination)
@@ -117,6 +123,25 @@ def test_ensure_short_circuits_on_a_slim_copy(tmp_path: Path) -> None:
     manager = _manager_with_slim(tmp_path)
     # No Elan bootstrap, no network: the slim copy satisfies the toolchain.
     assert manager.ensure(TOOLCHAIN) == TOOLCHAIN
+
+
+def test_ensure_uses_remote_slim_acquisition_before_elan(tmp_path: Path) -> None:
+    manager = ToolchainManager(tmp_path / "runtime")
+    source = _fake_toolchain(tmp_path)
+
+    def acquire(toolchain: str) -> bool:
+        materialize(
+            source,
+            manager.slim_path(toolchain),
+            toolchain=toolchain,
+            created_at="2026-08-13T00:00:00+00:00",
+        )
+        return True
+
+    manager.remote_ensure = acquire
+    assert manager.ensure(TOOLCHAIN) == TOOLCHAIN
+    assert manager.has_slim(TOOLCHAIN)
+    assert not manager.elan_home.exists()
 
 
 def test_prune_refuses_without_a_verified_slim_copy(tmp_path: Path) -> None:

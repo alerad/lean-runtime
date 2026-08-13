@@ -11,6 +11,12 @@ Lean Runtime separates three states:
 The separation lets one process resolve a lock and another materialize it. A
 completed environment can subsequently be opened offline.
 
+Downloadable environments may use the legacy full-workspace representation or
+the current sparse check-capsule representation. Both resolve to the same exact
+lock and platform environment identity. A capsule stores a normalized module
+graph and content digest for each Lean artifact; its local projection grows as
+new imports are checked without changing that identity.
+
 Package references are an input compiler for `EnvironmentSpec`, not another
 environment type:
 
@@ -86,6 +92,14 @@ last-executed usage records, rather than directory modification time alone.
 Short-lived execution leases prevent deletion during cloning without
 serializing concurrent checks. Locks and source snapshots remain retained in
 the current store schema.
+
+Sparse downloads are stored once by artifact digest under the shared module
+CAS and hardlinked into environment projections when the filesystem permits.
+`lean-runtime storage` reports this category separately. Because it is shared,
+its logical byte count can overlap environment projections and should not be
+added to their logical sizes as an estimate of physical disk use.
+`clean --include-downloads` reclaims old OCI blobs and unleased CAS artifacts;
+per-artifact locks and recency updates prevent collection during projection.
 
 ```python
 report = runtime.clean(dry_run=True)

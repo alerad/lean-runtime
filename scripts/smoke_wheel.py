@@ -35,7 +35,7 @@ def main() -> int:
             "PYTHONNOUSERSITE": "1",
         }
         _run(
-            [str(python), "-m", "pip", "install", "--no-deps", str(wheel)],
+            [str(python), "-m", "pip", "install", str(wheel)],
             cwd=root,
             environment=clean_environment,
         )

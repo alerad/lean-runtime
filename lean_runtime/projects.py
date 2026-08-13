@@ -291,7 +291,7 @@ permissions:
 
 jobs:
   publish:
-    uses: alerad/lean-runtime/.github/workflows/publish-project.yml@v2
+    uses: alerad/lean-runtime/.github/workflows/publish-project.yml@v3
     with:
       project: .
       library: {library}

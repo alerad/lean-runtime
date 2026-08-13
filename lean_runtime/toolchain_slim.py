@@ -1,11 +1,12 @@
 """Verified slim toolchain derivatives for proof checking.
 
 A slim toolchain is a separate, non-destructive materialization of an
-installed Lean toolchain that keeps everything proof checking needs and drops
-artifact classes used only by editors and native compilation. Lean v4.32
-loads every ``.olean`` facet and per-module ``.ir`` data during ordinary
-elaboration, so those stay; editor indexes (``.ilean``), static libraries
-(``.a``), the bundled LLVM/clang, and ``src/`` are dropped.
+installed Lean toolchain that keeps everything batch proof checking needs and
+drops artifact classes used only by editors, Lake, and native compilation.
+All ``.olean`` facets and per-module ``.ir`` data stay; editor indexes,
+sources, static libraries, Lake, and LLVM are dropped. Supported Lean releases
+open the core module's server and private facets even in batch mode, before a
+per-input setup manifest can override ordinary library import facets.
 
 Materialization hardlinks files where possible, so creating a slim toolchain
 costs almost no additional disk. The saving is realized by pruning the
@@ -31,10 +32,23 @@ SLIM_PROFILE = "check"
 SLIM_MANIFEST_NAME = "slim-manifest.json"
 SLIM_MANIFEST_SCHEMA = "lean-runtime-slim-toolchain/1"
 
-_EXCLUDED_SUFFIXES = (".ilean", ".a")
+_EXCLUDED_SUFFIXES = (".ilean", ".a", ".lean")
 _EXCLUDED_TOP_LEVEL_DIRS = ("src",)
 _EXCLUDED_LIB_DIRS = ("clang", "libc")
 _EXCLUDED_LIB_PREFIXES = ("libLLVM.", "libclang-cpp.")
+_CHECK_BINARIES = frozenset({"lean", "leanchecker"})
+_CHECK_SHARED_LIBRARIES = frozenset(
+    {
+        "libInit_shared.so",
+        "libInit_shared.dylib",
+        "libleanshared.so",
+        "libleanshared_1.so",
+        "libleanshared_2.so",
+        "libleanshared.dylib",
+        "libleanshared_1.dylib",
+        "libleanshared_2.dylib",
+    }
+)
 
 # Each corpus entry must check successfully with the slim toolchain before it
 # is trusted: ordinary elaboration, core tactics, decision procedures, the
@@ -60,16 +74,23 @@ CAPABILITY_CORPUS: tuple[tuple[str, str], ...] = (
 
 def is_excluded(relative: Path) -> bool:
     """Return whether one toolchain-relative file is outside the check profile."""
-    if relative.suffix in _EXCLUDED_SUFFIXES:
+    name = relative.name
+    if name.endswith(_EXCLUDED_SUFFIXES):
         return True
     parts = relative.parts
     if parts and parts[0] in _EXCLUDED_TOP_LEVEL_DIRS:
+        return True
+    if len(parts) == 2 and parts[0] == "bin" and parts[1] not in _CHECK_BINARIES:
         return True
     if len(parts) >= 2 and parts[0] == "lib":
         if parts[1] in _EXCLUDED_LIB_DIRS:
             return True
         if len(parts) == 2 and parts[1].startswith(_EXCLUDED_LIB_PREFIXES):
             return True
+        if len(parts) == 3 and parts[1] == "lean" and name.endswith((".so", ".dylib", ".dll")):
+            # The Lean executable links only its split shared runtime. Lake's
+            # shared library and package plugins belong to other capabilities.
+            return name not in _CHECK_SHARED_LIBRARIES
     return False
 
 
@@ -102,18 +123,34 @@ class SlimManifest:
         path = directory / SLIM_MANIFEST_NAME
         if not path.is_file():
             return None
-        value = json.loads(path.read_text(encoding="utf-8"))
-        if value.get("schema") != SLIM_MANIFEST_SCHEMA:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(value, dict) or value.get("schema") != SLIM_MANIFEST_SCHEMA:
+                return None
+            result = cls(
+                toolchain=str(value["toolchain"]),
+                profile=str(value["profile"]),
+                files=int(value["files"]),
+                bytes=int(value["bytes"]),
+                excluded_files=int(value["excluded_files"]),
+                excluded_bytes=int(value["excluded_bytes"]),
+                created_at=str(value["created_at"]),
+            )
+            if (
+                not result.toolchain
+                or result.profile != SLIM_PROFILE
+                or min(
+                    result.files,
+                    result.bytes,
+                    result.excluded_files,
+                    result.excluded_bytes,
+                )
+                < 0
+            ):
+                return None
+            return result
+        except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError):
             return None
-        return cls(
-            toolchain=str(value["toolchain"]),
-            profile=str(value["profile"]),
-            files=int(value["files"]),
-            bytes=int(value["bytes"]),
-            excluded_files=int(value["excluded_files"]),
-            excluded_bytes=int(value["excluded_bytes"]),
-            created_at=str(value["created_at"]),
-        )
 
 
 def materialize(

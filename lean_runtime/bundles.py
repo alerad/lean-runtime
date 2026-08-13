@@ -13,20 +13,38 @@ import subprocess
 import tarfile
 import tempfile
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import zstandard
+
 from ._git import git_command
 from ._paths import remove_tree
 from .backends import Backend
+from .capsules import (
+    CAPSULE_MANIFEST,
+    ArtifactCapability,
+    CapsuleManifest,
+    inventory_workspace,
+    materialize_capsule,
+    render_setup,
+    setup_artifact_groups,
+)
 from .errors import EnvironmentError
 from .events import EventEmitter
 from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock, LockedPackage
 from .locking import FileLock
+from .packs import (
+    PACK_MEDIA_TYPE,
+    SparsePack,
+    build_sparse_packs,
+    project_artifacts,
+    unpack_frame,
+)
 from .policies import ExecutionPolicy
 from .serialization import canonical_json_bytes, write_json_atomic
 from .store import (
@@ -38,13 +56,16 @@ from .store import (
 from .toolchains import ToolchainManager
 
 BUNDLE_SCHEMA = "lean-runtime-oci-bundle/1"
+CAPSULE_BUNDLE_SCHEMA = "lean-runtime-oci-capsule/1"
 CONFIG_MEDIA_TYPE = "application/vnd.lean-runtime.environment.config.v1+json"
+CAPSULE_CONFIG_MEDIA_TYPE = "application/vnd.lean-runtime.capsule.config.v1+json+zstd"
 LAYER_MEDIA_TYPE = "application/vnd.lean-runtime.environment.layer.v1.tar+gzip"
 MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 MAX_BUNDLE_BYTES = 20 * 1024**3
 MAX_FILES = 2_000_000
 SOURCE_TREE_INVENTORY = ".lean-runtime-source-tree.json"
+MAX_CAPSULE_CONFIG_BYTES = 64 * 1024**2
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +94,22 @@ def _digest_path(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return "sha256:" + digest.hexdigest()
+
+
+def _capsule_config_bytes(value: Mapping[str, Any]) -> bytes:
+    return zstandard.ZstdCompressor(level=10, write_checksum=True).compress(
+        canonical_json_bytes(dict(value))
+    )
+
+
+def _capsule_config_object(data: bytes) -> dict[str, Any]:
+    try:
+        decoded = zstandard.ZstdDecompressor().decompress(
+            data, max_output_size=MAX_CAPSULE_CONFIG_BYTES
+        )
+    except zstandard.ZstdError as exc:
+        raise EnvironmentError("OCI capsule config is not valid zstd data") from exc
+    return _json_object(decoded, "capsule config")
 
 
 def _blob_descriptor(data: bytes, media_type: str, **extra: Any) -> dict[str, Any]:
@@ -741,6 +778,287 @@ class EnvironmentBundles:
             environment_id, lock.lock_id, manifest_descriptor["digest"], str(output)
         )
 
+    def export_capsule_layout(
+        self,
+        environment_id: str,
+        output: Path,
+        *,
+        capsule_manifest: CapsuleManifest | None = None,
+        target_frame_bytes: int | None = None,
+        probe: bool = True,
+        roots: Sequence[str] | None = None,
+        capabilities: frozenset[ArtifactCapability] | None = None,
+    ) -> PortableCopyInfo:
+        """Write a source-free, sparse check-capsule OCI layout.
+
+        ``capsule_manifest`` is an internal test/publisher-resume hook. Normal
+        publication inventories headers with the exact selected Lean parser.
+        """
+        root = self.store.environment_path(environment_id)
+        metadata = _json_object((root / "metadata.json").read_bytes(), "metadata")
+        lock = self.store.load_lock(str(metadata["lock_id"]))
+        expected = environment_identity(lock, str(metadata["build_profile"]))
+        if expected != environment_id:
+            raise EnvironmentError(f"environment identity mismatch: {environment_id}")
+        workspace = root / "workspace"
+        _verify_workspace_lock(workspace, lock)
+        manifest = capsule_manifest or inventory_workspace(
+            workspace,
+            lock,
+            environment_id,
+            self.toolchains.command(lock.toolchain, "lean"),
+        )
+        if (
+            manifest.environment_id != environment_id
+            or manifest.lock_id != lock.lock_id
+            or manifest.toolchain != lock.toolchain
+        ):
+            raise EnvironmentError("check capsule identity does not match its environment")
+        if roots is not None:
+            manifest = CapsuleManifest(
+                manifest.environment_id,
+                manifest.lock_id,
+                manifest.toolchain,
+                manifest.closure(roots),
+            )
+        if probe:
+            self._verify_capsule(workspace, lock, manifest)
+        if output.is_symlink() or (output.exists() and not output.is_dir()):
+            raise EnvironmentError(f"OCI layout destination is not a directory: {output}")
+        if output.exists() and any(output.iterdir()):
+            raise EnvironmentError(f"OCI layout destination is not empty: {output}")
+        output.mkdir(parents=True, exist_ok=True)
+        try:
+            with tempfile.TemporaryDirectory(prefix="lean-runtime-capsule-") as temporary_dir:
+                staging = Path(temporary_dir)
+                packs = build_sparse_packs(
+                    workspace,
+                    manifest,
+                    staging / "packs",
+                    **(
+                        {"target_frame_bytes": target_frame_bytes}
+                        if target_frame_bytes is not None
+                        else {}
+                    ),
+                    capabilities=capabilities,
+                )
+                entries: dict[str, Path] = {}
+                layers: list[dict[str, Any]] = []
+                for pack in packs:
+                    assert pack.path is not None
+                    descriptor = _blob_descriptor_path(
+                        pack.path,
+                        PACK_MEDIA_TYPE,
+                        annotations={
+                            "org.lean-runtime.layer.kind": "sparse-pack",
+                            "org.lean-runtime.package.name": pack.package,
+                            "org.lean-runtime.capability": pack.capability,
+                        },
+                    )
+                    if descriptor["digest"] != pack.digest or descriptor["size"] != pack.size:
+                        raise EnvironmentError("sparse pack descriptor changed during export")
+                    layers.append(descriptor)
+                    entries["blobs/sha256/" + str(descriptor["digest"]).removeprefix("sha256:")] = (
+                        pack.path
+                    )
+
+                config_path = staging / "config.json"
+                config_path.write_bytes(
+                    _capsule_config_bytes(
+                        {
+                            "schema": CAPSULE_BUNDLE_SCHEMA,
+                            "environment_id": environment_id,
+                            "lock_id": lock.lock_id,
+                            "lock": lock.to_dict(),
+                            "build_profile": metadata["build_profile"],
+                            "platform_compatibility": platform_compatibility(),
+                            "capsule": manifest.to_dict(),
+                            "packs": [pack.to_dict() for pack in packs],
+                        }
+                    )
+                )
+                config_descriptor = _blob_descriptor_path(config_path, CAPSULE_CONFIG_MEDIA_TYPE)
+                entries[
+                    "blobs/sha256/" + str(config_descriptor["digest"]).removeprefix("sha256:")
+                ] = config_path
+                manifest_path = staging / "manifest.json"
+                manifest_path.write_bytes(
+                    canonical_json_bytes(
+                        {
+                            "schemaVersion": 2,
+                            "mediaType": MANIFEST_MEDIA_TYPE,
+                            "config": config_descriptor,
+                            "layers": layers,
+                            "annotations": {
+                                "org.lean-runtime.environment-id": environment_id,
+                                "org.lean-runtime.lock-id": lock.lock_id,
+                                "org.lean-runtime.profile": "check-capsule",
+                            },
+                        }
+                    )
+                )
+                compatibility = platform_compatibility()
+                manifest_descriptor = _blob_descriptor_path(
+                    manifest_path,
+                    MANIFEST_MEDIA_TYPE,
+                    annotations={
+                        "org.lean-runtime.platform.schema": compatibility["schema"],
+                        "org.lean-runtime.platform.abi": compatibility["abi"],
+                        "org.lean-runtime.profile": "check-capsule",
+                    },
+                    platform={
+                        "os": compatibility["system"],
+                        "architecture": {
+                            "x86_64": "amd64",
+                            "arm64": "arm64",
+                        }.get(compatibility["machine"], compatibility["machine"]),
+                    },
+                )
+                entries[
+                    "blobs/sha256/" + str(manifest_descriptor["digest"]).removeprefix("sha256:")
+                ] = manifest_path
+                index_path = staging / "index.json"
+                index_path.write_bytes(
+                    canonical_json_bytes(
+                        {
+                            "schemaVersion": 2,
+                            "mediaType": INDEX_MEDIA_TYPE,
+                            "manifests": [manifest_descriptor],
+                        }
+                    )
+                )
+                layout_path = staging / "oci-layout"
+                layout_path.write_bytes(b'{"imageLayoutVersion":"1.0.0"}')
+                entries["index.json"] = index_path
+                entries["oci-layout"] = layout_path
+                for name, path in entries.items():
+                    destination = output.joinpath(*PurePosixPath(name).parts)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if path != destination:
+                        shutil.copy2(path, destination)
+        except BaseException:
+            remove_tree(output)
+            raise
+        self.events.emit(
+            "capsule.layout_exported",
+            "Exported sparse check-capsule OCI layout",
+            path=str(output),
+            modules=len(manifest.modules),
+        )
+        return PortableCopyInfo(
+            environment_id, lock.lock_id, manifest_descriptor["digest"], str(output)
+        )
+
+    def _verify_capsule(
+        self, workspace: Path, lock: EnvironmentLock, manifest: CapsuleManifest
+    ) -> None:
+        """Differentially check a full workspace and an isolated capsule."""
+        roots = tuple(
+            dict.fromkeys(
+                module
+                for line in lock.root_module.splitlines()
+                if line.strip().startswith("import ")
+                for module in line.strip().removeprefix("import ").split()
+            )
+        )
+        source = lock.root_module + "\nexample : True := by trivial\n"
+        policy = ExecutionPolicy(timeout_seconds=600, max_output_bytes=2_000_000)
+        command = self.toolchains.command(lock.toolchain, "lean")
+        with tempfile.TemporaryDirectory(
+            prefix="capsule-differential-", dir=self.store.home
+        ) as raw:
+            root = Path(raw)
+            full_source = root / "FullProbe.lean"
+            full_source.write_text(source)
+            full_environment = self.toolchains.environment
+            full_environment["LEAN_PATH"] = os.pathsep.join(
+                str(path) for path in _bundle_lean_paths(workspace, lock)
+            )
+            full = self.backend.execute(
+                [*command, str(full_source)],
+                cwd=root,
+                environment=full_environment,
+                policy=policy,
+            )
+            if full.exit_code:
+                raise EnvironmentError(
+                    "full environment failed the capsule differential probe: "
+                    + (full.stdout + full.stderr)[-2000:]
+                )
+
+            capsule = root / "isolated"
+            materialize_capsule(workspace, capsule, manifest)
+            capsule_source = root / "CapsuleProbe.lean"
+            capsule_source.write_text(source)
+            setup_path = root / "CapsuleProbe.setup.json"
+            setup_path.write_bytes(
+                canonical_json_bytes(
+                    render_setup(
+                        lean_version=lock.toolchain,
+                        name="CapsuleProbe",
+                        package="lean_runtime_probe",
+                        import_artifacts=setup_artifact_groups(manifest, capsule, roots),
+                    )
+                )
+            )
+            isolated = self.backend.execute(
+                [*command, f"--setup={setup_path}", str(capsule_source)],
+                cwd=root,
+                environment=self.toolchains.environment,
+                policy=policy,
+            )
+            if isolated.exit_code:
+                raise EnvironmentError(
+                    "isolated check capsule failed the differential probe: "
+                    + (isolated.stdout + isolated.stderr)[-2000:]
+                )
+        self.events.emit(
+            "capsule.differential_verified",
+            "Full environment and isolated capsule accepted the verification probe",
+            modules=len(manifest.modules),
+        )
+
+    def _probe_capsule_projection(
+        self, workspace: Path, lock: EnvironmentLock, capsule: CapsuleManifest
+    ) -> None:
+        """Check the locked public root using only one capsule projection."""
+        roots = tuple(
+            module
+            for line in lock.root_module.splitlines()
+            if line.strip().startswith("import ")
+            for module in line.strip().removeprefix("import ").split()
+        )
+        source = lock.root_module + "\nexample : True := by trivial\n"
+        with tempfile.TemporaryDirectory(prefix="portable-capsule-probe-") as raw:
+            probe_root = Path(raw)
+            source_path = probe_root / "Probe.lean"
+            source_path.write_text(source)
+            setup_path = probe_root / "Probe.setup.json"
+            setup_path.write_bytes(
+                canonical_json_bytes(
+                    render_setup(
+                        lean_version=lock.toolchain,
+                        name="Probe",
+                        package="lean_runtime_probe",
+                        import_artifacts=setup_artifact_groups(capsule, workspace, roots),
+                    )
+                )
+            )
+            result = self.backend.execute(
+                [
+                    *self.toolchains.command(lock.toolchain, "lean"),
+                    f"--setup={setup_path}",
+                    str(source_path),
+                ],
+                cwd=probe_root,
+                environment=self.toolchains.environment,
+                policy=ExecutionPolicy(timeout_seconds=300, max_output_bytes=2_000_000),
+            )
+            if result.exit_code:
+                raise EnvironmentError(
+                    "portable capsule Lean probe failed: " + (result.stdout + result.stderr)[-2000:]
+                )
+
     def export(self, environment_id: str, output: Path) -> PortableCopyInfo:
         """Write a deterministic portable archive from a verified direct OCI layout."""
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -760,6 +1078,44 @@ class EnvironmentBundles:
             temporary.unlink(missing_ok=True)
         self.events.emit(
             "bundle.exported", "Exported deterministic environment bundle", path=str(output)
+        )
+        return PortableCopyInfo(
+            info.environment_id,
+            info.exact_environment_id,
+            info.copy_id,
+            str(output),
+        )
+
+    def export_capsule(
+        self,
+        environment_id: str,
+        output: Path,
+        *,
+        roots: Sequence[str] | None = None,
+    ) -> PortableCopyInfo:
+        """Write a portable source-free archive for one import closure."""
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_name(f".{output.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            with tempfile.TemporaryDirectory(prefix="lean-runtime-capsule-layout-") as raw:
+                layout = Path(raw)
+                info = self.export_capsule_layout(
+                    environment_id,
+                    layout,
+                    roots=roots,
+                    capabilities=frozenset({"check"}),
+                )
+                entries = {
+                    path.relative_to(layout).as_posix(): path
+                    for path in layout.rglob("*")
+                    if path.is_file()
+                }
+                _write_oci_archive(entries, temporary)
+            temporary.replace(output)
+        finally:
+            temporary.unlink(missing_ok=True)
+        self.events.emit(
+            "capsule.exported", "Exported portable sparse check capsule", path=str(output)
         )
         return PortableCopyInfo(
             info.environment_id,
@@ -819,6 +1175,156 @@ class EnvironmentBundles:
                 entries[member.name] = path
         return entries
 
+    def _import_capsule_layout(
+        self,
+        manifest_descriptor: dict[str, Any],
+        config_descriptor: dict[str, Any],
+        layers: list[Any],
+        entries: dict[str, Path],
+        *,
+        origin: dict[str, Any],
+        name: str | None,
+        probe: bool,
+    ) -> PortableCopyInfo:
+        """Verify and atomically import a portable sparse capsule."""
+        _require_media_type(config_descriptor, CAPSULE_CONFIG_MEDIA_TYPE, "capsule config")
+        config_path = _descriptor_blob_path(entries, config_descriptor, "capsule config")
+        config = _capsule_config_object(config_path.read_bytes())
+        if (
+            config.get("schema") != CAPSULE_BUNDLE_SCHEMA
+            or not isinstance(config.get("lock"), dict)
+            or not isinstance(config.get("capsule"), dict)
+            or not isinstance(config.get("packs"), list)
+        ):
+            raise EnvironmentError("unsupported portable capsule schema")
+        lock = EnvironmentLock.from_dict(config["lock"])
+        build_profile = str(config.get("build_profile"))
+        environment_id = environment_identity(lock, build_profile)
+        capsule = CapsuleManifest.from_dict(config["capsule"])
+        if (
+            config.get("lock_id") != lock.lock_id
+            or config.get("environment_id") != environment_id
+            or capsule.environment_id != environment_id
+            or capsule.lock_id != lock.lock_id
+            or capsule.toolchain != lock.toolchain
+            or config.get("platform_compatibility") != platform_compatibility()
+        ):
+            raise EnvironmentError("portable capsule identity mismatch")
+
+        descriptors = {
+            str(item.get("digest")): item
+            for item in layers
+            if isinstance(item, dict) and item.get("mediaType") == PACK_MEDIA_TYPE
+        }
+        packs: list[tuple[SparsePack, Path]] = []
+        packed_paths: set[str] = set()
+        capabilities: set[str] = set()
+        for raw in config["packs"]:
+            if not isinstance(raw, dict):
+                raise EnvironmentError("portable capsule has an invalid pack index")
+            pack = SparsePack.from_dict(raw)
+            descriptor = descriptors.get(pack.digest)
+            if descriptor is None or descriptor.get("size") != pack.size:
+                raise EnvironmentError("portable capsule pack descriptor mismatch")
+            path = _descriptor_blob_path(entries, descriptor, "capsule pack")
+            for frame in pack.frames:
+                if packed_paths.intersection(frame.artifacts):
+                    raise EnvironmentError("portable capsule repeats packed artifacts")
+                packed_paths.update(frame.artifacts)
+            if pack.capability != "check":
+                raise EnvironmentError("portable check capsule contains an optional overlay")
+            capabilities.add(pack.capability)
+            packs.append((pack, path))
+        artifacts = {
+            artifact.path: artifact for module in capsule.modules for artifact in module.artifacts
+        }
+        expected_paths = {
+            path for path, artifact in artifacts.items() if artifact.capability == "check"
+        }
+        if packed_paths != expected_paths:
+            raise EnvironmentError("portable capsule pack inventory is incomplete")
+
+        destination = self.store.environment_path(environment_id)
+        probe_existing = False
+        with FileLock(self.store.lock_dir / f"{environment_id}.lock", timeout=1800):
+            if destination.is_dir():
+                probe_existing = probe
+                existing = destination / "workspace" / CAPSULE_MANIFEST
+                if (
+                    not existing.is_file()
+                    or CapsuleManifest.load(existing).digest != capsule.digest
+                ):
+                    raise EnvironmentError(
+                        "portable capsule conflicts with an existing environment"
+                    )
+            else:
+                stage = self.store.environments / f".staging-{os.getpid()}-{uuid.uuid4().hex}"
+                workspace = stage / "workspace"
+                try:
+                    for pack, path in packs:
+                        with path.open("rb") as handle:
+                            for frame in pack.frames:
+                                handle.seek(frame.offset)
+                                unpack_frame(
+                                    handle.read(frame.size),
+                                    frame,
+                                    artifacts,
+                                    self.store.cas_artifacts,
+                                    lock_root=self.store.lock_dir,
+                                )
+                    project_artifacts(
+                        packed_paths,
+                        artifacts,
+                        self.store.cas_artifacts,
+                        workspace,
+                        lock_root=self.store.lock_dir,
+                    )
+                    capsule_path = workspace / CAPSULE_MANIFEST
+                    capsule_path.parent.mkdir(parents=True, exist_ok=True)
+                    capsule_path.write_bytes(canonical_json_bytes(capsule.to_dict()))
+                    (workspace / ".lake" / "build").mkdir(parents=True, exist_ok=True)
+                    (workspace / "lean-toolchain").write_text(lock.toolchain + "\n")
+                    (workspace / "lakefile.toml").write_text(lock.root_lakefile)
+                    (workspace / f"{ROOT_MODULE}.lean").write_text(lock.root_module)
+                    (workspace / "lake-manifest.json").write_bytes(
+                        canonical_json_bytes(lock.manifest)
+                    )
+                    metadata = {
+                        "schema": "lean-runtime-published-environment/1",
+                        "environment_id": environment_id,
+                        "lock_id": lock.lock_id,
+                        "toolchain": lock.toolchain,
+                        "platform": platform_record(),
+                        "platform_compatibility": platform_compatibility(),
+                        "build_profile": build_profile,
+                        "status": "ready",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "origin": {
+                            **origin,
+                            "kind": "portable_sparse_capsule",
+                            "modules": [module.name for module in capsule.modules],
+                            "capabilities": sorted(capabilities),
+                        },
+                    }
+                    if probe:
+                        self._probe_capsule_projection(workspace, lock, capsule)
+                    write_json_atomic(stage / "metadata.json", metadata)
+                    self.store.publish_lock(lock)
+                    stage.replace(destination)
+                finally:
+                    if stage.exists():
+                        remove_tree(stage)
+        if probe_existing:
+            self._probe_capsule_projection(destination / "workspace", lock, capsule)
+        if name:
+            self.store.set_alias(name, environment_id)
+        return PortableCopyInfo(
+            environment_id,
+            lock.lock_id,
+            str(manifest_descriptor["digest"]),
+            str(origin.get("copy", "oci-layout")),
+        )
+
     def import_layout(
         self,
         index: dict[str, Any],
@@ -846,6 +1352,16 @@ class EnvironmentBundles:
         layers = manifest.get("layers")
         if not isinstance(config_descriptor, dict) or not isinstance(layers, list):
             raise EnvironmentError("bundle manifest is incomplete")
+        if config_descriptor.get("mediaType") == CAPSULE_CONFIG_MEDIA_TYPE:
+            return self._import_capsule_layout(
+                manifest_descriptor,
+                config_descriptor,
+                layers,
+                entries,
+                origin=origin,
+                name=name,
+                probe=probe,
+            )
         _require_media_type(config_descriptor, CONFIG_MEDIA_TYPE, "config")
         config_path = _descriptor_blob_path(entries, config_descriptor, "config")
         config = _json_object(config_path.read_bytes(), "config")

@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       lock-id: ${{ steps.lock.outputs.lock_id }}
+      toolchain: ${{ steps.lock.outputs.toolchain }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -40,6 +41,7 @@ jobs:
           lock.write("environment.lock.json")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"lock_id={lock.lock_id}\n")
+              output.write(f"toolchain={lock.toolchain}\n")
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -86,10 +88,15 @@ jobs:
             --timeout 18000 \
             --accelerate \
             --platform-only --attest > "platform-result-${{ matrix.name }}.json"
+          lean-runtime toolchain-publish "${{ needs.resolve.outputs.toolchain }}" \
+            --library ghcr.io/alerad/lean-runtime-cache \
+            > "toolchain-result-${{ matrix.name }}.json"
       - uses: actions/upload-artifact@v4
         with:
           name: platform-${{ matrix.name }}
-          path: platform-result-${{ matrix.name }}.json
+          path: |
+            platform-result-${{ matrix.name }}.json
+            toolchain-result-${{ matrix.name }}.json
 
   finalize:
     needs: [resolve, platform]
@@ -109,14 +116,19 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install .
+      - uses: sigstore/cosign-installer@v4.1.2
       - name: Publish canonical index
         env:
           LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
           LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           ALIAS_TAG: ${{ inputs.alias-tag }}
         run: |
-          args=(finalize-publication "${{ needs.resolve.outputs.lock-id }}" results/*.json \
-            --library ghcr.io/alerad/lean-runtime-cache)
+          lean-runtime toolchain-finalize-publication \
+            "${{ needs.resolve.outputs.toolchain }}" results/toolchain-result-*.json \
+            --library ghcr.io/alerad/lean-runtime-cache --sign
+          args=(finalize-publication "${{ needs.resolve.outputs.lock-id }}" \
+            results/platform-result-*.json \
+            --library ghcr.io/alerad/lean-runtime-cache --sign)
           if [[ -n "$ALIAS_TAG" ]]; then args+=(--tag "$ALIAS_TAG"); fi
           lean-runtime "${args[@]}"
       - name: Verify an anonymous clean public-cache client

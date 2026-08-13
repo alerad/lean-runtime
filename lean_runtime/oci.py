@@ -7,27 +7,34 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from .bundles import (
+    CAPSULE_BUNDLE_SCHEMA,
+    CAPSULE_CONFIG_MEDIA_TYPE,
     INDEX_MEDIA_TYPE,
     MANIFEST_MEDIA_TYPE,
     EnvironmentBundles,
+    _capsule_config_object,
 )
+from .capsules import CapsuleManifest
 from .errors import DownloadLimitExceeded, DownloadUnavailable, EnvironmentError
 from .events import EventEmitter
 from .lockfiles import EnvironmentLock
 from .locking import FileLock
+from .packs import PACK_MEDIA_TYPE, PackFrame, SparsePack, project_artifacts, unpack_frame
 from .policies import format_byte_size
 from .serialization import canonical_json_bytes
-from .store import EnvironmentStore, platform_compatibility
+from .store import EnvironmentStore, environment_identity, platform_compatibility
 
 _REPOSITORY = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+")
 _BEARER_PARAMETER = re.compile(r'([a-zA-Z]+)="([^"]*)"')
@@ -35,6 +42,12 @@ _DIGEST = re.compile(r"sha256:([0-9a-f]{64})")
 _ACCEPT = ", ".join((INDEX_MEDIA_TYPE, MANIFEST_MEDIA_TYPE))
 DEFAULT_ENVIRONMENT_LIBRARIES = ("oci://ghcr.io/alerad/lean-runtime-cache",)
 _BLOB_INTEGRITY_ATTEMPTS = 4
+
+
+def capsule_reference(lock_id: str) -> str:
+    if not re.fullmatch(r"lock_[0-9a-f]{64}", lock_id):
+        raise ValueError(f"invalid lock identity: {lock_id!r}")
+    return "capsule-" + lock_id
 
 
 class SignatureVerifier(Protocol):
@@ -100,6 +113,28 @@ class ManifestResponse:
     data: bytes
     media_type: str
     digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class CapsuleAcquisitionPlan:
+    manifest_descriptor: dict[str, Any]
+    manifest: dict[str, Any]
+    manifest_data: bytes
+    config_descriptor: dict[str, Any]
+    config_data: bytes
+    config: dict[str, Any]
+    capsule: CapsuleManifest
+    packs: tuple[tuple[SparsePack, dict[str, Any]], ...]
+    roots: tuple[str, ...]
+    capabilities: frozenset[str]
+    modules: tuple[str, ...]
+    frames: tuple[tuple[SparsePack, dict[str, Any], PackFrame], ...]
+    total_bytes: int
+    cached_bytes: int
+
+    @property
+    def download_bytes(self) -> int:
+        return self.total_bytes - self.cached_bytes
 
 
 class OCIRegistryClient:
@@ -323,6 +358,119 @@ class OCIRegistryClient:
                     )
         return destination
 
+    def download_blob_range(
+        self,
+        descriptor: dict[str, Any],
+        *,
+        offset: int,
+        size: int,
+        expected_digest: str | None = None,
+    ) -> bytes:
+        """Download one exact byte range without caching a partial OCI blob."""
+        digest = descriptor.get("digest")
+        total = descriptor.get("size")
+        match = _DIGEST.fullmatch(digest) if isinstance(digest, str) else None
+        if (
+            match is None
+            or not isinstance(total, int)
+            or offset < 0
+            or size < 1
+            or offset + size > total
+            or (expected_digest is not None and _DIGEST.fullmatch(expected_digest) is None)
+        ):
+            raise EnvironmentError("OCI range request is outside its blob descriptor")
+        failure = ""
+        for attempt in range(1, _BLOB_INTEGRITY_ATTEMPTS + 1):
+            request = urllib.request.Request(self._url(f"blobs/{digest}"))
+            request.add_header("Range", f"bytes={offset}-{offset + size - 1}")
+            if attempt > 1:
+                request.add_header("Cache-Control", "no-cache")
+            try:
+                with self._request(request) as response:
+                    if response.status != 206:
+                        raise DownloadUnavailable(
+                            "OCI registry does not support sparse range acquisition"
+                        )
+                    content_range = response.headers.get("Content-Range")
+                    expected = f"bytes {offset}-{offset + size - 1}/{total}"
+                    if content_range != expected:
+                        raise EnvironmentError("OCI registry returned a mismatched byte range")
+                    data = bytes(response.read(size + 1))
+            except urllib.error.HTTPError as exc:
+                if attempt == _BLOB_INTEGRITY_ATTEMPTS or (
+                    exc.code not in {408, 429} and not 500 <= exc.code < 600
+                ):
+                    raise DownloadUnavailable(
+                        f"OCI sparse range request failed: HTTP {exc.code}"
+                    ) from exc
+                failure = f"HTTP {exc.code}"
+            except OSError as exc:
+                if attempt == _BLOB_INTEGRITY_ATTEMPTS:
+                    raise DownloadUnavailable(f"OCI registry is unavailable: {exc}") from exc
+                failure = str(exc)
+            else:
+                observed = "sha256:" + hashlib.sha256(data).hexdigest()
+                if len(data) == size and (expected_digest is None or observed == expected_digest):
+                    return data
+                failure = (
+                    "truncated byte range" if len(data) != size else "byte-range digest mismatch"
+                )
+                if attempt == _BLOB_INTEGRITY_ATTEMPTS:
+                    raise EnvironmentError(f"OCI registry returned a {failure}")
+            time.sleep(0.25 * attempt)
+        raise DownloadUnavailable(f"OCI sparse range request failed: {failure}")  # pragma: no cover
+
+    def read_blob(self, descriptor: dict[str, Any], *, limit: int = 64 * 1024**2) -> bytes:
+        """Read and verify a small OCI blob without mutating the local cache."""
+        digest = descriptor.get("digest")
+        size = descriptor.get("size")
+        match = _DIGEST.fullmatch(digest) if isinstance(digest, str) else None
+        if match is None or not isinstance(size, int) or size < 0 or size > limit:
+            raise EnvironmentError("OCI metadata blob exceeds supported limits")
+        request = urllib.request.Request(self._url(f"blobs/{digest}"))
+        try:
+            with self._request(request) as response:
+                data = bytes(response.read(size + 1))
+        except urllib.error.HTTPError as exc:
+            raise DownloadUnavailable(f"OCI metadata download failed: HTTP {exc.code}") from exc
+        except OSError as exc:
+            raise DownloadUnavailable(f"OCI registry is unavailable: {exc}") from exc
+        if len(data) != size or "sha256:" + hashlib.sha256(data).hexdigest() != digest:
+            raise EnvironmentError("OCI metadata blob failed digest verification")
+        return data
+
+    def cache_verified_blob(
+        self,
+        data: bytes,
+        descriptor: dict[str, Any],
+        store: EnvironmentStore,
+    ) -> Path:
+        """Atomically cache bytes already verified against an OCI descriptor."""
+        digest = descriptor.get("digest")
+        size = descriptor.get("size")
+        match = _DIGEST.fullmatch(digest) if isinstance(digest, str) else None
+        if (
+            match is None
+            or not isinstance(size, int)
+            or len(data) != size
+            or "sha256:" + hashlib.sha256(data).hexdigest() != digest
+        ):
+            raise EnvironmentError("refusing to cache an invalid OCI metadata blob")
+        destination = store.oci_blobs / match.group(1)
+        with FileLock(store.lock_dir / f"oci-{match.group(1)}.lock", timeout=1800):
+            if destination.is_file() and destination.stat().st_size == size:
+                if _digest_path(destination) == digest:
+                    return destination
+                destination.unlink()
+            with tempfile.NamedTemporaryFile(dir=store.oci_blobs, delete=False) as handle:
+                temporary = Path(handle.name)
+                handle.write(data)
+            try:
+                temporary.replace(destination)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return destination
+
     def blob_exists(self, digest: str) -> bool:
         request = urllib.request.Request(self._url(f"blobs/{digest}"), method="HEAD")
         try:
@@ -464,7 +612,7 @@ class OCIEnvironmentCache:
         self.client = OCIRegistryClient(repository)
 
     def _platform_manifest(
-        self, lock: EnvironmentLock
+        self, lock: EnvironmentLock, *, reference: str | None = None
     ) -> tuple[dict[str, Any], dict[str, Any], bytes]:
         """Fetch, verify, and select this platform's manifest for a lock."""
         self.events.emit(
@@ -473,7 +621,7 @@ class OCIEnvironmentCache:
             registry=self.repository.display,
             lock_id=lock.lock_id,
         )
-        response = self.client.manifest(lock.lock_id)
+        response = self.client.manifest(reference or lock.lock_id)
         if self.verifier is not None:
             self.verifier.verify(self.repository, response.digest)
             self.events.emit(
@@ -537,6 +685,279 @@ class OCIEnvironmentCache:
             "cached_bytes": cached_bytes,
             "download_bytes": total_bytes - cached_bytes,
         }
+
+    def plan_capsule(
+        self,
+        lock: EnvironmentLock,
+        roots: tuple[str, ...],
+        *,
+        capabilities: frozenset[str] = frozenset({"check"}),
+    ) -> CapsuleAcquisitionPlan:
+        """Plan exact sparse frames for imported roots without downloading packs."""
+        manifest_descriptor, manifest, manifest_data = self._platform_manifest(
+            lock, reference=capsule_reference(lock.lock_id)
+        )
+        config_descriptor = manifest.get("config")
+        layers = manifest.get("layers")
+        if not isinstance(config_descriptor, dict) or not isinstance(layers, list):
+            raise DownloadUnavailable("downloadable environment has no capsule manifest")
+        if config_descriptor.get("mediaType") != CAPSULE_CONFIG_MEDIA_TYPE:
+            raise DownloadUnavailable("downloadable environment is a legacy full bundle")
+        config_digest = str(config_descriptor.get("digest", ""))
+        config_match = _DIGEST.fullmatch(config_digest)
+        config_cache = (
+            self.store.oci_blobs / config_match.group(1) if config_match is not None else None
+        )
+        config_size = config_descriptor.get("size")
+        config_cached = (
+            config_cache is not None
+            and config_cache.is_file()
+            and isinstance(config_size, int)
+            and config_cache.stat().st_size == config_size
+            and _digest_path(config_cache) == config_digest
+        )
+        config_data = (
+            config_cache.read_bytes()
+            if config_cached and config_cache is not None
+            else self.client.read_blob(config_descriptor)
+        )
+        config = _capsule_config_object(config_data)
+        if (
+            config.get("schema") != CAPSULE_BUNDLE_SCHEMA
+            or config.get("lock_id") != lock.lock_id
+            or not isinstance(config.get("capsule"), dict)
+            or not isinstance(config.get("packs"), list)
+        ):
+            raise EnvironmentError("downloadable capsule identity is invalid")
+        capsule = CapsuleManifest.from_dict(config["capsule"])
+        if capsule.lock_id != lock.lock_id or capsule.toolchain != lock.toolchain:
+            raise EnvironmentError("downloadable capsule does not match its lock")
+        closure = capsule.closure(roots)
+        module_names = tuple(module.name for module in closure)
+        descriptors = {
+            str(item.get("digest")): item
+            for item in layers
+            if isinstance(item, dict) and item.get("mediaType") == PACK_MEDIA_TYPE
+        }
+        packs: list[tuple[SparsePack, dict[str, Any]]] = []
+        frames: list[tuple[SparsePack, dict[str, Any], PackFrame]] = []
+        artifact_map = {
+            artifact.path: artifact for module in capsule.modules for artifact in module.artifacts
+        }
+        total_bytes = int(config_descriptor.get("size", 0))
+        cached_bytes = total_bytes if config_cached else 0
+        selected = frozenset(module_names)
+        for raw in config["packs"]:
+            if not isinstance(raw, dict):
+                raise EnvironmentError("downloadable capsule has an invalid pack index")
+            pack = SparsePack.from_dict(raw)
+            descriptor = descriptors.get(pack.digest)
+            if descriptor is None or descriptor.get("size") != pack.size:
+                raise EnvironmentError("downloadable capsule pack descriptor mismatch")
+            packs.append((pack, descriptor))
+            if pack.capability not in capabilities:
+                continue
+            for frame in pack.frames_for_modules(selected):
+                frames.append((pack, descriptor, frame))
+                total_bytes += frame.size
+                if all(
+                    (
+                        self.store.cas_artifacts / artifact_map[path].digest.removeprefix("sha256:")
+                    ).is_file()
+                    and (
+                        self.store.cas_artifacts / artifact_map[path].digest.removeprefix("sha256:")
+                    )
+                    .stat()
+                    .st_size
+                    == artifact_map[path].size
+                    and _digest_path(
+                        self.store.cas_artifacts / artifact_map[path].digest.removeprefix("sha256:")
+                    )
+                    == artifact_map[path].digest
+                    for path in frame.artifacts
+                ):
+                    cached_bytes += frame.size
+        return CapsuleAcquisitionPlan(
+            manifest_descriptor,
+            manifest,
+            manifest_data,
+            config_descriptor,
+            config_data,
+            config,
+            capsule,
+            tuple(packs),
+            roots,
+            capabilities,
+            module_names,
+            tuple(frames),
+            total_bytes,
+            cached_bytes,
+        )
+
+    def pull_capsule(
+        self,
+        lock: EnvironmentLock,
+        roots: tuple[str, ...],
+        *,
+        name: str | None = None,
+        capabilities: frozenset[str] = frozenset({"check"}),
+    ) -> str:
+        """Acquire only selected module frames and project a check environment."""
+        plan = self.plan_capsule(lock, roots, capabilities=capabilities)
+        self.client.cache_verified_blob(plan.config_data, plan.config_descriptor, self.store)
+        self.events.emit(
+            "acquisition.planned",
+            f"Sparse environment download planned: {format_byte_size(plan.download_bytes)}",
+            phase="plan",
+            current_bytes=plan.cached_bytes,
+            total_bytes=plan.total_bytes,
+            registry=self.repository.display,
+            lock_id=lock.lock_id,
+            download_bytes=plan.download_bytes,
+            cached_bytes=plan.cached_bytes,
+            modules=len(plan.modules),
+        )
+        if self.max_download_bytes is not None and plan.download_bytes > self.max_download_bytes:
+            raise DownloadLimitExceeded(
+                f"acquiring this import closure downloads {format_byte_size(plan.download_bytes)}, "
+                f"above the configured limit of {format_byte_size(self.max_download_bytes)}"
+            )
+        artifacts = {
+            artifact.path: artifact
+            for module in plan.capsule.modules
+            for artifact in module.artifacts
+        }
+        missing_frames = [
+            (descriptor, frame)
+            for _pack, descriptor, frame in plan.frames
+            if not all(
+                (
+                    self.store.cas_artifacts / artifacts[path].digest.removeprefix("sha256:")
+                ).is_file()
+                and (self.store.cas_artifacts / artifacts[path].digest.removeprefix("sha256:"))
+                .stat()
+                .st_size
+                == artifacts[path].size
+                and _digest_path(
+                    self.store.cas_artifacts / artifacts[path].digest.removeprefix("sha256:")
+                )
+                == artifacts[path].digest
+                for path in frame.artifacts
+            )
+        ]
+        # Bound both concurrency and buffered compressed data. Eight parallel
+        # range reads hide registry round-trip latency without turning a full
+        # Mathlib closure into thousands of serial HTTP requests.
+        for offset in range(0, len(missing_frames), 8):
+            batch = missing_frames[offset : offset + 8]
+            with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+                compressed_frames = tuple(
+                    executor.map(
+                        lambda item: self.client.download_blob_range(
+                            item[0],
+                            offset=item[1].offset,
+                            size=item[1].size,
+                            expected_digest=item[1].digest,
+                        ),
+                        batch,
+                    )
+                )
+            for (_descriptor, frame), compressed in zip(batch, compressed_frames, strict=True):
+                unpack_frame(
+                    compressed,
+                    frame,
+                    artifacts,
+                    self.store.cas_artifacts,
+                    lock_root=self.store.lock_dir,
+                )
+                self.events.emit(
+                    "library.layer_progress",
+                    "Downloading sparse capsule frames",
+                    phase="download",
+                    current_bytes=frame.size,
+                    total_bytes=frame.size,
+                    digest=frame.digest,
+                )
+
+        environment_id = environment_identity(lock)
+        destination = self.store.environment_path(environment_id)
+        with FileLock(self.store.lock_dir / f"{environment_id}.lock", timeout=1800):
+            fresh = not destination.is_dir()
+            stage = (
+                self.store.environments / f".staging-{os.getpid()}-{time.time_ns()}"
+                if fresh
+                else destination
+            )
+            workspace = stage / "workspace"
+            try:
+                paths = {
+                    artifact.path
+                    for module in plan.capsule.closure(plan.roots)
+                    for artifact in module.artifacts
+                    if artifact.capability in plan.capabilities
+                }
+                project_artifacts(
+                    paths,
+                    artifacts,
+                    self.store.cas_artifacts,
+                    workspace,
+                    lock_root=self.store.lock_dir,
+                )
+                capsule_path = workspace / ".lean-runtime" / "capsule.json"
+                capsule_path.parent.mkdir(parents=True, exist_ok=True)
+                capsule_path.write_bytes(canonical_json_bytes(plan.capsule.to_dict()))
+                if fresh:
+                    (workspace / ".lake" / "build").mkdir(parents=True, exist_ok=True)
+                    (workspace / "lean-toolchain").write_text(lock.toolchain + "\n")
+                    (workspace / "lakefile.toml").write_text(lock.root_lakefile)
+                    (workspace / "LeanRuntimeEnvironment.lean").write_text(lock.root_module)
+                    (workspace / "lake-manifest.json").write_bytes(
+                        canonical_json_bytes(lock.manifest)
+                    )
+                    self.store.publish_lock(lock)
+                    metadata = {
+                        "schema": "lean-runtime-published-environment/1",
+                        "environment_id": environment_id,
+                        "lock_id": lock.lock_id,
+                        "toolchain": lock.toolchain,
+                        "platform": platform_compatibility(),
+                        "platform_compatibility": platform_compatibility(),
+                        "build_profile": "release",
+                        "status": "ready",
+                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "origin": {
+                            "kind": "sparse_downloadable",
+                            "library": self.repository.display,
+                            "modules": list(plan.modules),
+                            "capabilities": sorted(plan.capabilities),
+                        },
+                    }
+                    (stage / "metadata.json").write_bytes(canonical_json_bytes(metadata))
+                    stage.replace(destination)
+                else:
+                    metadata_path = destination / "metadata.json"
+                    metadata = _json_object(metadata_path.read_bytes(), "environment metadata")
+                    origin = metadata.get("origin")
+                    if not isinstance(origin, dict) or origin.get("kind") != "sparse_downloadable":
+                        raise EnvironmentError("cannot extend a non-sparse environment projection")
+                    origin["modules"] = sorted(set(origin.get("modules", ())).union(plan.modules))
+                    origin["capabilities"] = sorted(
+                        set(origin.get("capabilities", ())).union(plan.capabilities)
+                    )
+                    metadata_path.write_bytes(canonical_json_bytes(metadata))
+            except BaseException:
+                if fresh and stage.exists():
+                    shutil.rmtree(stage)
+                raise
+        if name:
+            self.store.set_alias(name, environment_id)
+        self.events.emit(
+            "library.verified",
+            "Sparse environment artifacts were verified and projected",
+            environment_id=environment_id,
+            modules=len(plan.modules),
+        )
+        return environment_id
 
     def pull(self, lock: EnvironmentLock, *, name: str | None = None) -> str:
         manifest_descriptor, manifest, manifest_data = self._platform_manifest(lock)
@@ -683,7 +1104,10 @@ class OCIEnvironmentPublisher:
         *,
         tags: tuple[str, ...] = (),
         finalize: bool = True,
+        profile: str = "full",
     ) -> PublicationInfo:
+        if profile not in {"full", "check-capsule"}:
+            raise ValueError("publication profile must be 'full' or 'check-capsule'")
         with tempfile.TemporaryDirectory(prefix="lean-runtime-publish-") as temporary:
             temporary_root = Path(temporary)
             layout_root = temporary_root / "layout"
@@ -693,7 +1117,11 @@ class OCIEnvironmentPublisher:
                 environment_id=environment_id,
                 registry=self.repository.display,
             )
-            bundle_info = self.bundles.export_layout(environment_id, layout_root)
+            bundle_info = (
+                self.bundles.export_capsule_layout(environment_id, layout_root)
+                if profile == "check-capsule"
+                else self.bundles.export_layout(environment_id, layout_root)
+            )
             self.events.emit(
                 "library.bundle_ready",
                 "Environment OCI layout is ready for publication",
@@ -805,6 +1233,7 @@ class OCIEnvironmentPublisher:
         platform_descriptors: list[dict[str, Any]],
         *,
         tags: tuple[str, ...] = (),
+        profile: str | None = None,
     ) -> str:
         if not re.fullmatch(r"lock_[0-9a-f]{64}", lock_id):
             raise ValueError(f"invalid lock identity: {lock_id!r}")
@@ -829,6 +1258,15 @@ class OCIEnvironmentPublisher:
             digest = descriptor.get("digest")
             if not isinstance(digest, str) or not self.client.manifest_exists(digest):
                 raise EnvironmentError(f"platform manifest is not published: {digest!r}")
+        selected_profile = profile or (
+            "check-capsule"
+            if all(
+                isinstance(item.get("annotations"), dict)
+                and item["annotations"].get("org.lean-runtime.profile") == "check-capsule"
+                for item in platform_descriptors
+            )
+            else "full"
+        )
         ordered = sorted(
             platform_descriptors,
             key=lambda item: (
@@ -846,7 +1284,8 @@ class OCIEnvironmentPublisher:
                 "annotations": {"org.lean-runtime.lock-id": lock_id},
             }
         )
-        index_digest = self.client.publish_manifest(lock_id, index_data, INDEX_MEDIA_TYPE)
+        reference = capsule_reference(lock_id) if selected_profile == "check-capsule" else lock_id
+        index_digest = self.client.publish_manifest(reference, index_data, INDEX_MEDIA_TYPE)
         for tag in tags:
             if not tag or len(tag) > 128 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", tag):
                 raise ValueError(f"invalid OCI tag: {tag!r}")

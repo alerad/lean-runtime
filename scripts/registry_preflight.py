@@ -1,22 +1,8 @@
 #!/usr/bin/env python3
-"""Verify every bundled catalog entry is anonymously downloadable.
+"""Fail closed unless every catalog capsule and slim runtime is publicly usable.
 
-For each catalog lock this checks, without any registry credentials:
-
-1. the anonymous GHCR pull token can be obtained;
-2. the OCI index tagged with the lock id exists;
-3. a platform manifest exists for every required platform;
-4. every blob in each required platform manifest answers a HEAD request.
-
-A catalog entry is a public claim that a prebuilt environment can be
-downloaded. This script fails when any claim lacks an externally retrievable
-artifact, which is exactly the failure mode that otherwise degrades into a
-silent half-hour source build on end-user machines.
-
-Usage:
-    python scripts/registry_preflight.py
-    python scripts/registry_preflight.py --platforms linux/amd64,darwin/arm64
-    python scripts/registry_preflight.py --skip core-v4.32.2
+The check is anonymous and validates all required platform indexes, media
+types, blob availability, and byte-range support for sparse capsule packs.
 """
 
 from __future__ import annotations
@@ -39,15 +25,24 @@ def anonymous_token(registry: str, repository: str) -> str:
         return str(json.loads(response.read())["token"])
 
 
-def _get(url: str, token: str, *, method: str = "GET") -> tuple[int, bytes]:
+def _get(
+    url: str,
+    token: str,
+    *,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+) -> tuple[int, bytes, dict[str, str]]:
     request = urllib.request.Request(url, method=method)
     request.add_header("Authorization", f"Bearer {token}")
     request.add_header("Accept", ACCEPT)
+    for name, value in (headers or {}).items():
+        request.add_header(name, value)
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-            return response.status, response.read() if method == "GET" else b""
+            data = response.read() if method == "GET" else b""
+            return response.status, data, dict(response.headers)
     except urllib.error.HTTPError as error:
-        return error.code, b""
+        return error.code, b"", dict(error.headers)
 
 
 def check_entry(
@@ -56,48 +51,86 @@ def check_entry(
     token: str,
     entry_id: str,
     lock_id: str,
+    toolchain: str,
     platforms: list[tuple[str, str]],
 ) -> list[str]:
-    """Return a list of human-readable failures for one catalog entry."""
+    """Return failures for one capsule and its exact check-only toolchain."""
+    from lean_runtime.oci import CAPSULE_CONFIG_MEDIA_TYPE, capsule_reference
+    from lean_runtime.packs import PACK_MEDIA_TYPE
+    from lean_runtime.toolchain_oci import (
+        TOOLCHAIN_CONFIG_MEDIA_TYPE,
+        TOOLCHAIN_LAYER_MEDIA_TYPE,
+        toolchain_reference,
+    )
+
     base = f"https://{registry}/v2/{repository}"
-    status, data = _get(f"{base}/manifests/{lock_id}", token)
-    if status != 200:
-        return [f"{entry_id}: index manifest {lock_id} -> HTTP {status}"]
-    document = json.loads(data)
-    manifests = document.get("manifests")
-    if not isinstance(manifests, list):
-        # A single-platform manifest published without an index.
-        manifests = [{"digest": None, "platform": None, "_flat": document}]
     failures: list[str] = []
-    for wanted_os, wanted_arch in platforms:
-        descriptor = next(
-            (
-                item
-                for item in manifests
-                if isinstance(item.get("platform"), dict)
-                and item["platform"].get("os") == wanted_os
-                and item["platform"].get("architecture") == wanted_arch
-            ),
-            None,
-        )
-        if descriptor is None:
-            failures.append(f"{entry_id}: no platform manifest for {wanted_os}/{wanted_arch}")
-            continue
-        status, data = _get(f"{base}/manifests/{descriptor['digest']}", token)
+    references = (
+        ("capsule", capsule_reference(lock_id), CAPSULE_CONFIG_MEDIA_TYPE, PACK_MEDIA_TYPE, True),
+        (
+            "toolchain",
+            toolchain_reference(toolchain),
+            TOOLCHAIN_CONFIG_MEDIA_TYPE,
+            TOOLCHAIN_LAYER_MEDIA_TYPE,
+            False,
+        ),
+    )
+    for kind, reference, config_type, layer_type, require_range in references:
+        status, data, _ = _get(f"{base}/manifests/{reference}", token)
         if status != 200:
-            failures.append(f"{entry_id}: {wanted_os}/{wanted_arch} manifest -> HTTP {status}")
+            failures.append(f"{entry_id}: {kind} index {reference} -> HTTP {status}")
             continue
-        platform_manifest = json.loads(data)
-        blobs = [platform_manifest.get("config", {})] + list(platform_manifest.get("layers", []))
-        for blob in blobs:
-            digest = blob.get("digest")
-            if not digest:
+        manifests = json.loads(data).get("manifests")
+        if not isinstance(manifests, list):
+            failures.append(f"{entry_id}: {kind} reference is not a multi-platform index")
+            continue
+        for wanted_os, wanted_arch in platforms:
+            descriptor = next(
+                (
+                    item
+                    for item in manifests
+                    if isinstance(item.get("platform"), dict)
+                    and item["platform"].get("os") == wanted_os
+                    and item["platform"].get("architecture") == wanted_arch
+                ),
+                None,
+            )
+            label = f"{entry_id}: {kind} {wanted_os}/{wanted_arch}"
+            if descriptor is None:
+                failures.append(f"{label} manifest is missing")
                 continue
-            status, _ = _get(f"{base}/blobs/{digest}", token, method="HEAD")
+            status, data, _ = _get(f"{base}/manifests/{descriptor['digest']}", token)
             if status != 200:
-                failures.append(
-                    f"{entry_id}: {wanted_os}/{wanted_arch} blob {digest[:19]} -> HTTP {status}"
+                failures.append(f"{label} manifest -> HTTP {status}")
+                continue
+            platform_manifest = json.loads(data)
+            config = platform_manifest.get("config", {})
+            layers = platform_manifest.get("layers", [])
+            if config.get("mediaType") != config_type or not isinstance(layers, list):
+                failures.append(f"{label} config media type mismatch")
+                continue
+            if any(
+                not isinstance(layer, dict) or layer.get("mediaType") != layer_type
+                for layer in layers
+            ):
+                failures.append(f"{label} layer media type mismatch")
+                continue
+            for blob in [config, *layers]:
+                digest = blob.get("digest")
+                if not isinstance(digest, str):
+                    failures.append(f"{label} descriptor has no digest")
+                    continue
+                status, _, _ = _get(f"{base}/blobs/{digest}", token, method="HEAD")
+                if status != 200:
+                    failures.append(f"{label} blob {digest[:19]} -> HTTP {status}")
+            if require_range and layers:
+                digest = layers[0]["digest"]
+                status, ranged, headers = _get(
+                    f"{base}/blobs/{digest}", token, headers={"Range": "bytes=0-0"}
                 )
+                content_range = headers.get("Content-Range", headers.get("content-range", ""))
+                if status != 206 or len(ranged) != 1 or not content_range.startswith("bytes 0-0/"):
+                    failures.append(f"{label} pack does not support byte ranges")
     return failures
 
 
@@ -111,44 +144,39 @@ def main() -> int:
     from lean_runtime.discovery import default_catalog
     from lean_runtime.oci import DEFAULT_ENVIRONMENT_LIBRARIES
 
-    library = arguments.library or DEFAULT_ENVIRONMENT_LIBRARIES[0]
-    reference = library.removeprefix("oci://")
+    reference = (arguments.library or DEFAULT_ENVIRONMENT_LIBRARIES[0]).removeprefix("oci://")
     registry, _, repository = reference.partition("/")
-    platforms = [
-        (item.split("/")[0], item.split("/")[1]) for item in arguments.platforms.split(",") if item
-    ]
-
+    platforms = [tuple(item.split("/", 1)) for item in arguments.platforms.split(",") if item]
     try:
         token = anonymous_token(registry, repository)
     except (urllib.error.URLError, KeyError, json.JSONDecodeError) as error:
-        print(
-            f"FAIL: anonymous pull token for {registry}/{repository} is unavailable: "
-            f"{error}\n      (is the GHCR package public?)"
-        )
+        print(f"FAIL: anonymous pull token for {registry}/{repository}: {error}")
         return 1
 
-    catalog = default_catalog()
     failures: list[str] = []
     checked = 0
-    for entry in catalog.entries:
+    for entry in default_catalog().entries:
         if entry.id in arguments.skip:
             print(f"skip  {entry.id}")
             continue
         entry_failures = check_entry(
-            registry, repository, token, entry.id, entry.lock.lock_id, platforms
+            registry,
+            repository,
+            token,
+            entry.id,
+            entry.lock.lock_id,
+            entry.toolchain,
+            platforms,  # type: ignore[arg-type]
         )
+        failures.extend(entry_failures)
         checked += 1
-        if entry_failures:
-            failures.extend(entry_failures)
-            print(f"FAIL  {entry.id}")
-        else:
-            print(f"ok    {entry.id}")
+        print(("FAIL" if entry_failures else "ok  ") + f"  {entry.id}")
     if failures:
         print(f"\n{len(failures)} failure(s) across {checked} entries:")
         for failure in failures:
             print(f"  - {failure}")
         return 1
-    print(f"\nall {checked} catalog entries are anonymously downloadable")
+    print(f"\nall {checked} catalog entries have public sparse capsules and slim runtimes")
     return 0
 
 

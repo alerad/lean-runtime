@@ -8,11 +8,11 @@ check runs with ``--no-source-build``, so a broken or private registry fails
 in seconds instead of degrading into a silent source build.
 
 Steps:
-1. cold check of acceptance/Main.lean with --no-source-build and --lock-out
-2. warm re-check (must be fast)
-3. acceptance/Fail.lean must be rejected with a diagnostic naming Fail.lean
-4. re-check via the emitted lock (reproducibility)
-5. the documented Python batch API against the same lock
+1. side-effect-free narrow-import plan with byte budgets
+2. cold narrow check with --no-source-build and --lock-out
+3. incremental full-Mathlib plan and check
+4. warm re-check and clean failing diagnostics
+5. lock replay and the documented Python batch API
 
 Run it on a machine WITHOUT registry credentials; the point is proving the
 anonymous path. The runtime home is created fresh; pass --keep-home to retain
@@ -36,9 +36,11 @@ ACCEPTANCE = Path(__file__).resolve().parent.parent / "acceptance"
 
 COLD_TIMEOUT = 2700  # toolchain download + environment download, no builds
 WARM_TIMEOUT = 600
-WARM_LIMIT = 400  # hang detector, not a perf bar: GitHub macOS runners take ~4x
-# longer than real hardware for the warm Lake trace scan (238s observed vs 38s
-# on an M-series laptop)
+WARM_LIMIT = 300
+NARROW_ENVIRONMENT_LIMIT = 100 * 1024**2
+NARROW_TOTAL_LIMIT = 900 * 1024**2
+FULL_INCREMENTAL_LIMIT = 2 * 1024**3
+HOME_LIMIT = 9 * 1024**3
 
 
 def run(
@@ -85,6 +87,7 @@ def main() -> int:
     env = {**os.environ, "LEAN_RUNTIME_HOME": str(home)}
     lock_path = home / "gate.lock.json"
     main_lean = str(ACCEPTANCE / "Main.lean")
+    narrow_lean = str(ACCEPTANCE / "Narrow.lean")
     fail_lean = str(ACCEPTANCE / "Fail.lean")
 
     report: dict[str, object] = {"home": str(home), "steps": [], "ok": False}
@@ -137,24 +140,98 @@ def main() -> int:
     report["lean_runtime_version"] = version
     print(f"gate: lean-runtime {version}, home {home}")
 
-    ok = step(
-        "cold-no-source-build",
+    def plan(name: str, source: str) -> tuple[bool, dict[str, object]]:
+        code, output, elapsed = run(
+            ["lean-run", source, "--plan", "--json"], timeout=WARM_TIMEOUT, env=env
+        )
+        try:
+            value = json.loads(output)
+        except json.JSONDecodeError:
+            value = {}
+        ok = code == 0 and isinstance(value, dict)
+        if ok:
+            ok = bool(value.get("download_bytes_complete"))
+        steps.append(
+            {
+                "name": name,
+                "command": ["lean-run", source, "--plan", "--json"],
+                "exit_code": code,
+                "elapsed_seconds": round(elapsed, 2),
+                "ok": ok,
+                "detail": None if ok else "plan was unavailable or incomplete",
+                "plan": value,
+                "tail": output[-2000:],
+            }
+        )
+        print(f"{'ok  ' if ok else 'FAIL'} {name} ({elapsed:.1f}s)")
+        return ok, value
+
+    ok, narrow_plan = plan("narrow-plan", narrow_lean)
+    narrow_environment = narrow_plan.get("environment_download_bytes")
+    narrow_total = narrow_plan.get("download_bytes")
+    budgets_ok = (
+        isinstance(narrow_environment, int)
+        and narrow_environment <= NARROW_ENVIRONMENT_LIMIT
+        and isinstance(narrow_total, int)
+        and narrow_total <= NARROW_TOTAL_LIMIT
+        and not any(home.joinpath("cas", "artifacts", "sha256").iterdir())
+    )
+    steps.append(
+        {
+            "name": "narrow-byte-budgets",
+            "ok": budgets_ok,
+            "environment_limit": NARROW_ENVIRONMENT_LIMIT,
+            "total_limit": NARROW_TOTAL_LIMIT,
+            "environment_download_bytes": narrow_environment,
+            "download_bytes": narrow_total,
+        }
+    )
+    ok = ok and budgets_ok
+
+    cold_ok = step(
+        "cold-narrow-no-source-build",
         [
             "lean-run",
-            main_lean,
+            narrow_lean,
             "--no-source-build",
             "--lock-out",
             str(lock_path),
+            "--max-download",
+            str(NARROW_TOTAL_LIMIT),
         ],
         timeout=arguments.cold_timeout,
     )
-    ok = ok and step(
+    ok = cold_ok and ok
+    full_plan_ok, full_plan = plan("full-incremental-plan", main_lean)
+    full_incremental = full_plan.get("download_bytes")
+    full_budget_ok = (
+        full_plan_ok
+        and isinstance(full_incremental, int)
+        and full_incremental <= FULL_INCREMENTAL_LIMIT
+    )
+    steps.append(
+        {
+            "name": "full-incremental-byte-budget",
+            "ok": full_budget_ok,
+            "limit": FULL_INCREMENTAL_LIMIT,
+            "download_bytes": full_incremental,
+        }
+    )
+    ok = ok and full_budget_ok
+    full_ok = step(
+        "complete-Mathlib-closure",
+        ["lean-run", main_lean, "--lock", str(lock_path), "--no-source-build"],
+        timeout=arguments.cold_timeout,
+    )
+    ok = full_ok and ok
+    warm_ok = step(
         "warm",
         ["lean-run", main_lean],
         timeout=WARM_TIMEOUT,
         limit=WARM_LIMIT,
     )
-    ok = ok and step(
+    ok = warm_ok and ok
+    diagnostic_ok = step(
         "failing-proof-diagnostics",
         ["lean-run", fail_lean, "--lock", str(lock_path)],
         timeout=WARM_TIMEOUT,
@@ -162,21 +239,45 @@ def main() -> int:
         require="Fail.lean",
         forbid="instance-",
     )
-    ok = ok and step(
+    ok = diagnostic_ok and ok
+    replay_ok = step(
         "lock-reproducibility",
         ["lean-run", main_lean, "--lock", str(lock_path)],
         timeout=WARM_TIMEOUT,
         limit=WARM_LIMIT,
     )
-    ok = ok and step(
+    ok = replay_ok and ok
+    batch_ok = step(
         "python-batch-api",
         [sys.executable, str(ACCEPTANCE / "python_api.py"), str(lock_path)],
         timeout=1500,
     )
+    ok = batch_ok and ok
 
     usage = shutil.disk_usage(home)
+    seen: set[tuple[int, int]] = set()
+    home_bytes = 0
+    for file in home.rglob("*"):
+        if not file.is_file() or file.is_symlink():
+            continue
+        stat = file.stat()
+        identity = (stat.st_dev, stat.st_ino)
+        if identity not in seen:
+            seen.add(identity)
+            home_bytes += stat.st_size
+    report["home_bytes"] = home_bytes
+    report["home_limit_bytes"] = HOME_LIMIT
+    size_ok = home_bytes <= HOME_LIMIT
+    steps.append(
+        {
+            "name": "installed-size-budget",
+            "ok": size_ok,
+            "home_bytes": home_bytes,
+            "limit": HOME_LIMIT,
+        }
+    )
+    ok = size_ok and ok
     report["ok"] = ok
-    report["home_bytes"] = sum(f.stat().st_size for f in home.rglob("*") if f.is_file())
     report["disk_free_bytes"] = usage.free
     Path(arguments.report).write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"report: {arguments.report}")

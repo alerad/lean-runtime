@@ -114,6 +114,29 @@ renames the stage to its final identity.
 Crashes cannot publish a partially ready environment. Concurrent processes
 requesting the same identity converge on the same published directory.
 
+## Check capsules and sparse acquisition
+
+Publication derives a normalized capsule manifest from the authoritative full
+build with the selected Lean version's import parser. Each module records exact
+imports and all retained artifact facets. The publisher physically projects a
+source-free copy and requires both the full build and that isolated projection
+to accept the locked public import before it can upload anything.
+
+Artifacts are grouped by package and capability into deterministic zstd packs.
+Each pack is a sequence of independently compressed and hashed frames; the OCI
+manifest still addresses the complete pack, while consumers use exact HTTP
+Range requests for only the frames intersecting a source's transitive import
+closure. Decompressed artifacts are verified into a raw-content CAS and
+hardlinked into a growing environment projection. The generated versioned
+`--setup` file points Lean directly at those facets, bypassing Lake and source
+metadata during checks.
+
+The Lean executable and core libraries use a separate multi-platform check
+toolchain index keyed by normalized toolchain identity. Platform selection is
+encoded only in child descriptors, so one atomic index serves Linux AMD64,
+macOS AMD64, and macOS ARM64. Consumers verify the exact Lean commit and run a
+capability corpus before publishing the downloaded runtime locally.
+
 ## Execution
 
 A published build is not used as an ordinary mutable working directory. Each

@@ -61,8 +61,8 @@ class FakeRuntime:
             )
         return self.lock
 
-    def open_exact(self, lock) -> Environment:
-        self.calls.append(("ensure", lock))
+    def open_exact(self, lock, *, import_roots=()) -> Environment:
+        self.calls.append(("ensure", lock, tuple(import_roots)))
         return Environment()
 
     def check_file(self, path, *, toolchain=None, policy=None) -> ExecutionResult:
@@ -109,7 +109,7 @@ def test_lean_run_resolves_embedded_lock_relative_to_source(monkeypatch, tmp_pat
     )
     assert main([str(source), "--quiet"]) == 0
     assert observed == [tmp_path / "environment.lock.json"]
-    assert FakeRuntime.instance.calls[0] == ("ensure", expected)
+    assert FakeRuntime.instance.calls[0] == ("ensure", expected, ())
 
 
 def test_lean_run_rejects_conflicting_cli_and_frontmatter(
@@ -351,7 +351,8 @@ def _plan_report() -> dict:
 
 
 class PlanningRuntime(FakeRuntime):
-    def plan_exact(self, lock) -> dict:
+    def plan_exact(self, lock, *, import_roots=()) -> dict:
+        del import_roots
         self.calls.append(("plan", lock))
         return _plan_report()
 

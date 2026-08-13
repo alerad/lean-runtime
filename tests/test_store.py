@@ -120,6 +120,23 @@ def test_oci_blob_gc_reports_reclaimed_bytes(tmp_path: Path) -> None:
     assert report.reclaimed_bytes == len(b"payload")
 
 
+def test_sparse_cas_gc_reports_bytes_and_respects_leases(tmp_path: Path) -> None:
+    store = EnvironmentStore(tmp_path)
+    leased = "5" * 64
+    candidate = "6" * 64
+    (store.cas_artifacts / leased).write_bytes(b"leased")
+    (store.cas_artifacts / candidate).write_bytes(b"candidate")
+
+    with store.cas_artifact_lease([f"sha256:{leased}"]):
+        report = store.clean_downloads(dry_run=False, minimum_age_seconds=0)
+        assert report.removed == (f"cas:{candidate}",)
+        assert f"cas:{leased}" in report.retained
+
+    status = store.status()
+    assert status.cas_artifacts == 1
+    assert status.cas_artifacts_bytes == len(b"leased")
+
+
 def test_alias_record_is_validated(tmp_path: Path) -> None:
     store = EnvironmentStore(tmp_path)
     store.environment_path(FIRST).mkdir()

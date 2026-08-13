@@ -8,7 +8,7 @@ version = "2.4.0"
 description = "Run Lean 4 proofs from Python or standalone files"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["tomli>=2; python_version < '3.11'"]
+dependencies = ["tomli>=2; python_version < '3.11'", "zstandard>=0.23,<1"]
 license = "Apache-2.0"
 authors = [{ name = "Alejandro Radisic" }]
 keywords = ["lean4", "theorem-prover", "formal-verification", "toolchain"]
