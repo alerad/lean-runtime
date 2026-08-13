@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from typing import Any, Literal, TextIO
@@ -23,6 +24,42 @@ def select_mode(*, quiet: bool = False, stream: TextIO | None = None) -> RenderM
     return "tty" if stream.isatty() else "plain"
 
 
+class Styler:
+    """Minimal ANSI styling that degrades to plain text when disabled."""
+
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+
+    def _wrap(self, code: str, text: str) -> str:
+        return f"\x1b[{code}m{text}\x1b[0m" if self.enabled else text
+
+    def bold(self, text: str) -> str:
+        return self._wrap("1", text)
+
+    def dim(self, text: str) -> str:
+        return self._wrap("2", text)
+
+    def red(self, text: str) -> str:
+        return self._wrap("31", text)
+
+    def green(self, text: str) -> str:
+        return self._wrap("32", text)
+
+    def yellow(self, text: str) -> str:
+        return self._wrap("33", text)
+
+    def cyan(self, text: str) -> str:
+        return self._wrap("36", text)
+
+
+def styler_for(stream: TextIO | None = None) -> Styler:
+    """Style only real terminals, honoring the NO_COLOR convention."""
+    stream = stream if stream is not None else sys.stderr
+    isatty = getattr(stream, "isatty", None)
+    enabled = bool(isatty and isatty()) and "NO_COLOR" not in os.environ
+    return Styler(enabled)
+
+
 class ConsoleRenderer:
     """Render runtime events as terse, single-purpose progress output.
 
@@ -36,11 +73,13 @@ class ConsoleRenderer:
         *,
         mode: RenderMode | None = None,
         verbose: bool = False,
+        color: bool | None = None,
         clock: Any = time.monotonic,
     ) -> None:
         self.stream = stream if stream is not None else sys.stderr
         self.mode: RenderMode = mode if mode is not None else select_mode(stream=self.stream)
         self.verbose = verbose
+        self.style = Styler(color) if color is not None else styler_for(self.stream)
         self._clock = clock
         self._download_total: int | None = None
         self._layer_bytes: dict[str, int] = {}
@@ -139,7 +178,7 @@ class ConsoleRenderer:
         if self.mode == "tty":
             self._draw_bar(self._download_total, self._download_total)
         self._end_progress_line()
-        self._print("Downloaded and verified environment")
+        self._print(self.style.green("Downloaded and verified environment"))
 
     def _render_source_fetch_started(self, event: RuntimeEvent) -> None:
         package = event.data.get("package", "sources")
@@ -152,7 +191,11 @@ class ConsoleRenderer:
     def _render_availability_fallback(self, event: RuntimeEvent) -> None:
         library = event.data.get("library", "environment library")
         reason = event.data.get("reason_code") or event.data.get("reason") or "unavailable"
-        self._print(f"WARNING: downloadable environment unavailable from {library} ({reason})")
+        self._print(
+            self.style.yellow(
+                f"WARNING: downloadable environment unavailable from {library} ({reason})"
+            )
+        )
 
     def _render_environment_build_started(self, event: RuntimeEvent) -> None:
         self._print(
@@ -180,13 +223,16 @@ class ConsoleRenderer:
         filled = _BAR_WIDTH * done // total if total else _BAR_WIDTH
         bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
         percent = done * 100 // total if total else 100
+        sizes = f"{format_byte_size(done)}/{format_byte_size(total)}"
+        plain = f"Downloading [{bar}] {percent}% · {sizes}"
         line = (
-            f"Downloading [{bar}] {percent}% · {format_byte_size(done)}/{format_byte_size(total)}"
+            f"Downloading [{self.style.cyan(bar)}] "
+            f"{self.style.bold(f'{percent}%')} · {self.style.dim(sizes)}"
         )
-        padding = " " * max(0, self._line_length - len(line))
+        padding = " " * max(0, self._line_length - len(plain))
         self.stream.write("\r" + line + padding)
         self.stream.flush()
-        self._line_length = len(line)
+        self._line_length = len(plain)
 
     def _end_progress_line(self) -> None:
         if self._line_length:

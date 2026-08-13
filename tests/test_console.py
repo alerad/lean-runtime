@@ -208,3 +208,44 @@ def test_event_emitter_carries_structured_progress_fields() -> None:
     assert event.to_dict()["current_bytes"] == 1
     plain = RuntimeEvent(kind="x", message="y").to_dict()
     assert "current_bytes" not in plain and "phase" not in plain
+
+
+def test_styler_disabled_leaves_text_plain() -> None:
+    from lean_runtime.console import Styler, styler_for
+
+    plain = Styler(False)
+    assert plain.green("ok") == "ok"
+    assert plain.bold("ok") == "ok"
+    styled = Styler(True)
+    assert styled.green("ok") == "\x1b[32mok\x1b[0m"
+    assert styled.bold("ok") == "\x1b[1mok\x1b[0m"
+    # StringIO is not a tty, so auto-detection stays plain
+    assert styler_for(io.StringIO()).enabled is False
+
+
+def test_tty_bar_uses_color_only_when_enabled() -> None:
+    stream = io.StringIO()
+    renderer = ConsoleRenderer(stream, mode="tty", color=True, clock=lambda: 0.0)
+    renderer(_event("acquisition.planned", download_bytes=100, cached_bytes=0))
+    renderer(
+        _event("library.layer_progress", digest="sha256:a", current_bytes=100, total_bytes=100)
+    )
+    renderer(_event("library.verified", "done"))
+    output = stream.getvalue()
+    assert "\x1b[36m" in output  # cyan bar
+    assert "\x1b[32mDownloaded and verified environment\x1b[0m" in output
+
+    stream = io.StringIO()
+    renderer = ConsoleRenderer(stream, mode="tty", color=False, clock=lambda: 0.0)
+    renderer(_event("acquisition.planned", download_bytes=100, cached_bytes=0))
+    renderer(
+        _event("library.layer_progress", digest="sha256:a", current_bytes=100, total_bytes=100)
+    )
+    assert "\x1b[" not in stream.getvalue()
+
+
+def test_fallback_warning_is_yellow_when_colored() -> None:
+    stream = io.StringIO()
+    renderer = ConsoleRenderer(stream, mode="plain", color=True)
+    renderer(_event("availability.fallback", library="oci://x/y", reason_code="missing"))
+    assert stream.getvalue().startswith("\x1b[33mWARNING:")

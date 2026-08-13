@@ -14,6 +14,7 @@ import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -132,12 +133,28 @@ def clone_tree(source: Path, destination: Path) -> None:
     shutil.copytree(source, destination, symlinks=True)
 
 
+def _tree_bytes(root: Path) -> int:
+    """Sum regular-file sizes under a directory, tolerating races."""
+    total = 0
+    if not root.is_dir():
+        return 0
+    for path in root.rglob("*"):
+        try:
+            if path.is_file() and not path.is_symlink():
+                total += path.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 @dataclass(frozen=True, slots=True)
 class CleanupReport:
     candidates: tuple[str, ...]
     removed: tuple[str, ...]
     retained: tuple[str, ...]
     dry_run: bool
+    candidate_bytes: int = 0
+    reclaimed_bytes: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -145,6 +162,8 @@ class CleanupReport:
             "removed": list(self.removed),
             "retained": list(self.retained),
             "dry_run": self.dry_run,
+            "candidate_bytes": self.candidate_bytes,
+            "reclaimed_bytes": self.reclaimed_bytes,
         }
 
 
@@ -155,6 +174,7 @@ class DownloadCleanupReport:
     retained: tuple[str, ...]
     reclaimed_bytes: int
     dry_run: bool
+    candidate_bytes: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -163,6 +183,27 @@ class DownloadCleanupReport:
             "retained": list(self.retained),
             "reclaimed_bytes": self.reclaimed_bytes,
             "dry_run": self.dry_run,
+            "candidate_bytes": self.candidate_bytes,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentUsage:
+    """Disk footprint and recency of one published environment."""
+
+    environment_id: str
+    bytes_used: int
+    aliases: tuple[str, ...]
+    toolchain: str | None
+    last_used_at: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "environment_id": self.environment_id,
+            "bytes_used": self.bytes_used,
+            "aliases": list(self.aliases),
+            "toolchain": self.toolchain,
+            "last_used_at": self.last_used_at,
         }
 
 
@@ -177,6 +218,12 @@ class StoreStatus:
     aliases: int
     bytes_used: int
     bytes_free: int
+    environments_bytes: int = 0
+    sources_bytes: int = 0
+    oci_blobs_bytes: int = 0
+    toolchains_bytes: int = 0
+    executions_bytes: int = 0
+    environment_usage: tuple[EnvironmentUsage, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -189,6 +236,12 @@ class StoreStatus:
             "aliases": self.aliases,
             "bytes_used": self.bytes_used,
             "bytes_free": self.bytes_free,
+            "environments_bytes": self.environments_bytes,
+            "sources_bytes": self.sources_bytes,
+            "oci_blobs_bytes": self.oci_blobs_bytes,
+            "toolchains_bytes": self.toolchains_bytes,
+            "executions_bytes": self.executions_bytes,
+            "environment_usage": [usage.to_dict() for usage in self.environment_usage],
         }
 
 
@@ -505,16 +558,58 @@ class EnvironmentStore:
                     bytes_used += path.stat().st_size
             except OSError:
                 continue
+        aliases = self.aliases()
+        names_by_environment: dict[str, list[str]] = {}
+        for name, environment_id in aliases.items():
+            names_by_environment.setdefault(environment_id, []).append(name)
+        usage: list[EnvironmentUsage] = []
+        for path in sorted(self.environments.glob("env_*")):
+            if not path.is_dir():
+                continue
+            toolchain: str | None = None
+            with suppress(OSError, json.JSONDecodeError, TypeError):
+                record = json.loads((path / "metadata.json").read_text(encoding="utf-8"))
+                value = record.get("toolchain")
+                toolchain = value if isinstance(value, str) else None
+            usage.append(
+                EnvironmentUsage(
+                    environment_id=path.name,
+                    bytes_used=_tree_bytes(path),
+                    aliases=tuple(sorted(names_by_environment.get(path.name, ()))),
+                    toolchain=toolchain,
+                    last_used_at=self._last_used_at(path),
+                )
+            )
+        usage.sort(key=lambda item: item.bytes_used, reverse=True)
         return StoreStatus(
             home=str(self.home),
-            environments=sum(1 for path in self.environments.glob("env_*") if path.is_dir()),
+            environments=len(usage),
             locks=sum(1 for path in self.locks.glob("lock_*") if path.is_dir()),
             sources=sum(1 for path in self.sources.glob("source_*") if path.is_dir()),
             oci_blobs=sum(1 for path in self.oci_blobs.glob("[0-9a-f]" * 64) if path.is_file()),
             executions=sum(1 for path in self.executions.glob("execution_*.json")),
-            aliases=len(self.aliases()),
+            aliases=len(aliases),
             bytes_used=bytes_used,
             bytes_free=shutil.disk_usage(self.home).free,
+            environments_bytes=sum(item.bytes_used for item in usage),
+            sources_bytes=_tree_bytes(self.sources),
+            oci_blobs_bytes=_tree_bytes(self.oci_blobs),
+            toolchains_bytes=_tree_bytes(self.home / "elan")
+            + _tree_bytes(self.home / "toolchains"),
+            executions_bytes=_tree_bytes(self.executions),
+            environment_usage=tuple(usage),
+        )
+
+    def _last_used_at(self, environment_path: Path) -> str | None:
+        marker = self.usage / f"{environment_path.name}.json"
+        try:
+            timestamp = (marker if marker.exists() else environment_path).stat().st_mtime
+        except OSError:
+            return None
+        return (
+            datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
         )
 
     def clean(
@@ -529,6 +624,8 @@ class EnvironmentStore:
         candidates: list[str] = []
         retained: list[str] = []
         removed: list[str] = []
+        candidate_bytes = 0
+        reclaimed_bytes = 0
         with FileLock(self.lock_dir / "gc.lock"):
             for path in sorted(self.environments.glob("env_*")):
                 if _ENVIRONMENT_ID.fullmatch(path.name) is None:
@@ -544,6 +641,8 @@ class EnvironmentStore:
                     retained.append(path.name)
                     continue
                 candidates.append(path.name)
+                size = _tree_bytes(path)
+                candidate_bytes += size
                 if not dry_run:
                     with FileLock(self.lock_dir / f"{path.name}.lock"):
                         referenced = set(self.aliases().values())
@@ -560,7 +659,15 @@ class EnvironmentStore:
                         remove_tree(path)
                         usage.unlink(missing_ok=True)
                         removed.append(path.name)
-        return CleanupReport(tuple(candidates), tuple(removed), tuple(retained), dry_run)
+                        reclaimed_bytes += size
+        return CleanupReport(
+            tuple(candidates),
+            tuple(removed),
+            tuple(retained),
+            dry_run,
+            candidate_bytes=candidate_bytes,
+            reclaimed_bytes=reclaimed_bytes,
+        )
 
     def clean_downloads(
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
@@ -570,6 +677,7 @@ class EnvironmentStore:
         removed: list[str] = []
         retained: list[str] = []
         reclaimed_bytes = 0
+        candidate_bytes = 0
         now = time.time()
         with FileLock(self.lock_dir / "oci-gc.lock"):
             referenced = self.referenced_oci_blobs()
@@ -586,6 +694,8 @@ class EnvironmentStore:
                     retained.append(path.name)
                     continue
                 candidates.append(path.name)
+                with suppress(OSError):
+                    candidate_bytes += path.stat().st_size
                 if dry_run:
                     continue
                 with FileLock(self.lock_dir / f"oci-{path.name}.lock"):
@@ -603,5 +713,10 @@ class EnvironmentStore:
                     reclaimed_bytes += size
                     removed.append(path.name)
         return DownloadCleanupReport(
-            tuple(candidates), tuple(removed), tuple(retained), reclaimed_bytes, dry_run
+            tuple(candidates),
+            tuple(removed),
+            tuple(retained),
+            reclaimed_bytes,
+            dry_run,
+            candidate_bytes=candidate_bytes,
         )
