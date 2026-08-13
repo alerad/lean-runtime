@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -87,6 +88,21 @@ def _write_layer(root: Path, output: Path) -> None:
             if path.is_dir():
                 info.type = tarfile.DIRTYPE
                 archive.addfile(info)
+            elif path.is_symlink():
+                linkname = os.readlink(path)
+                resolved = posixpath.normpath(
+                    posixpath.join(PurePosixPath(relative).parent, linkname)
+                )
+                if (
+                    PurePosixPath(linkname).is_absolute()
+                    or resolved == ".."
+                    or resolved.startswith("../")
+                ):
+                    raise ToolchainError(f"check toolchain contains unsafe symlink: {path}")
+                info.type = tarfile.SYMTYPE
+                info.linkname = linkname
+                info.size = 0
+                archive.addfile(info)
             elif path.is_file() and not path.is_symlink():
                 info.size = stat.st_size
                 with path.open("rb") as source:
@@ -117,6 +133,15 @@ def _extract_layer(layer: Path, destination: Path) -> None:
                     raise ToolchainError("check toolchain exceeds extraction limits")
                 relative = _safe_member(member.name)
                 target = destination.joinpath(*relative.parts)
+                for parent in target.parents:
+                    if parent == destination:
+                        break
+                    if parent.is_symlink():
+                        raise ToolchainError(
+                            "check toolchain member traverses an extracted symlink"
+                        )
+                else:
+                    raise ToolchainError("check toolchain member escapes its destination")
                 if member.isdir():
                     target.mkdir(parents=True, exist_ok=True)
                     target.chmod(member.mode & 0o777)
@@ -128,8 +153,24 @@ def _extract_layer(layer: Path, destination: Path) -> None:
                     with target.open("wb") as output:
                         shutil.copyfileobj(source, output)
                     target.chmod(member.mode & 0o777)
+                elif member.issym():
+                    linkname = member.linkname
+                    resolved = posixpath.normpath(
+                        posixpath.join(PurePosixPath(member.name).parent, linkname)
+                    )
+                    if (
+                        not linkname
+                        or PurePosixPath(linkname).is_absolute()
+                        or resolved == ".."
+                        or resolved.startswith("../")
+                    ):
+                        raise ToolchainError("check toolchain contains an unsafe symlink")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.symlink_to(linkname)
                 else:
-                    raise ToolchainError("check toolchain may contain only files and directories")
+                    raise ToolchainError(
+                        "check toolchain may contain only files, directories, and safe symlinks"
+                    )
     except (tarfile.TarError, zstandard.ZstdError, OSError) as exc:
         raise ToolchainError("could not extract published check toolchain") from exc
 

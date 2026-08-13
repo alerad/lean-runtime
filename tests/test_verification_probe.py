@@ -6,12 +6,14 @@ import pytest
 
 from lean_runtime import EnvironmentError, ExecutionResult
 from lean_runtime.lake import ROOT_MODULE
+from lean_runtime.lockfiles import EnvironmentLock
 from lean_runtime.verification import _probe
 
 
 @dataclass
 class ProbeEnvironment:
     result: ExecutionResult
+    lock: EnvironmentLock
     observed_source: str | None = None
     observed_filename: str | None = None
 
@@ -35,7 +37,7 @@ def execution(ok: bool) -> ExecutionResult:
 
 
 def test_verification_probe_uses_environment_check_not_lake() -> None:
-    environment = ProbeEnvironment(execution(True))
+    environment = ProbeEnvironment(execution(True), lock(packages=True))
 
     _probe(environment)  # type: ignore[arg-type]
 
@@ -45,7 +47,44 @@ def test_verification_probe_uses_environment_check_not_lake() -> None:
 
 
 def test_verification_probe_surfaces_compiler_failure() -> None:
-    environment = ProbeEnvironment(execution(False))
+    environment = ProbeEnvironment(execution(False), lock(packages=True))
 
     with pytest.raises(EnvironmentError, match="verification rejected"):
         _probe(environment)  # type: ignore[arg-type]
+
+
+def lock(*, packages: bool) -> EnvironmentLock:
+    value = {
+        "schema": "lean-runtime-environment-lock/1",
+        "spec_digest": "spec_" + "0" * 64,
+        "toolchain": "leanprover/lean4:v4.33.0",
+        "root_lakefile": 'name = "probe"\n',
+        "root_module": "",
+        "manifest": {},
+        "packages": [],
+    }
+    if packages:
+        value["packages"] = [
+            {
+                "name": "sample",
+                "url": "https://example.invalid/sample",
+                "revision": "0" * 40,
+                "tree_hash": "0" * 40,
+                "source_id": "source_" + "0" * 64,
+                "requested_revision": "main",
+                "source": "git",
+                "inherited": False,
+                "artifact_command": [],
+                "subdir": None,
+                "root_module": "Sample",
+            }
+        ]
+    return EnvironmentLock.from_dict(value)
+
+
+def test_core_verification_probe_does_not_import_synthetic_root() -> None:
+    environment = ProbeEnvironment(execution(True), lock(packages=False))
+
+    _probe(environment)  # type: ignore[arg-type]
+
+    assert environment.observed_source == "example : True := by trivial\n"

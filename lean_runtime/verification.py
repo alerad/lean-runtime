@@ -105,8 +105,11 @@ def _verify_capsule_state(environment: Environment) -> int:
 def _probe(environment: Environment) -> None:
     """Probe the immutable compiled environment without asking Lake to resolve it."""
 
+    source = (
+        f"import {ROOT_MODULE}\n" if environment.lock.packages else "example : True := by trivial\n"
+    )
     result = environment.check(
-        f"import {ROOT_MODULE}\n",
+        source,
         # The generated environment module itself is named ROOT_MODULE.  Giving
         # the probe that filename would make Lean see `import X` inside X and
         # correctly reject it as an import cycle.
