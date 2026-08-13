@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.2.0 - 2026-08-12
 
 - Make published-environment checks invoke Lean directly with the immutable
   compiled module roots instead of cloning the multi-gigabyte workspace and
