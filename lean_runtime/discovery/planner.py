@@ -67,7 +67,7 @@ class Planner:
             )
 
         required_packages = frozenset(_package_name(item) for item in evidence.package_hints)
-        ranked: list[tuple[int, float, str, CatalogEntry, tuple[CandidateReason, ...]]] = []
+        ranked: list[tuple[int, int, float, str, CatalogEntry, tuple[CandidateReason, ...]]] = []
         excluded: list[ExcludedCandidate] = []
         for entry in catalog.entries:
             filter_reasons: list[CandidateReason] = []
@@ -153,12 +153,25 @@ class Planner:
                 score += 100
                 reasons.append(CandidateReason(RANK_CORE_ONLY, "source appears core-only"))
             created_at = datetime.fromisoformat(entry.created_at.replace("Z", "+00:00"))
-            ranked.append((-score, -created_at.timestamp(), entry.id, entry, tuple(reasons)))
+            ranked.append(
+                (
+                    -score,
+                    len(entry.lock.packages),
+                    -created_at.timestamp(),
+                    entry.id,
+                    entry,
+                    tuple(reasons),
+                )
+            )
 
-        ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+        # Prefer the smallest exact environment when otherwise-equivalent
+        # candidates cover the same imports. This keeps an extension package
+        # such as LeanCert discoverable without making ordinary Mathlib files
+        # download and open the larger Mathlib-plus-LeanCert environment.
+        ranked.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
         selected = ranked[: policy.max_candidates]
         candidates = tuple(
-            Candidate(rank=index, entry=item[3], score=-item[0], reasons=item[4])
+            Candidate(rank=index, entry=item[4], score=-item[0], reasons=item[5])
             for index, item in enumerate(selected, start=1)
         )
         excluded.sort(key=lambda item: item.entry_id)

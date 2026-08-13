@@ -1,5 +1,5 @@
 schema = "lean-runtime.discovery.catalog-source/v1"
-generated_at = "2026-08-08T16:24:59Z"
+generated_at = "2026-08-13T13:49:46Z"
 
 [[environment]]
 id = "core-v4.32.2"
@@ -20,6 +20,15 @@ library_hints = []
 created_at = "2026-07-28T18:36:13+02:00"
 
 [[environment]]
+id = "mathlib-v4.33.0"
+channel = "stable"
+lock = "locks/mathlib-v4.33.0.lock.json"
+references = ["github:leanprover-community/mathlib4@v4.33.0"]
+inventory_packages = ["mathlib"]
+library_hints = []
+created_at = "2026-08-10T09:12:31Z"
+
+[[environment]]
 id = "mathlib-v4.31.0"
 channel = "stable"
 lock = "locks/mathlib-v4.31.0.lock.json"
@@ -36,3 +45,39 @@ references = ["github:leanprover-community/mathlib4@v4.30.0"]
 inventory_packages = ["mathlib"]
 library_hints = []
 created_at = "2026-05-26T18:25:31Z"
+
+[[environment]]
+id = "leancert-v4.30.0.5"
+channel = "stable"
+lock = "locks/leancert-v4.30.0.5.lock.json"
+references = ["github:alerad/leancert@v4.30.0.5"]
+inventory_packages = ["LeanCert", "mathlib"]
+library_hints = []
+created_at = "2026-06-14T03:06:27Z"
+
+[[environment]]
+id = "leancert-v4.31.0"
+channel = "stable"
+lock = "locks/leancert-v4.31.0.lock.json"
+references = ["github:alerad/leancert@v4.31.0"]
+inventory_packages = ["LeanCert", "mathlib"]
+library_hints = []
+created_at = "2026-06-18T16:14:44Z"
+
+[[environment]]
+id = "leancert-v4.32.2.4"
+channel = "stable"
+lock = "locks/leancert-v4.32.2.4.lock.json"
+references = ["github:alerad/leancert@v4.32.2.4"]
+inventory_packages = ["LeanCert", "mathlib"]
+library_hints = []
+created_at = "2026-08-01T10:49:16Z"
+
+[[environment]]
+id = "leancert-v4.33.0"
+channel = "stable"
+lock = "locks/leancert-v4.33.0.lock.json"
+references = ["github:alerad/leancert@v4.33.0"]
+inventory_packages = ["LeanCert", "mathlib"]
+library_hints = []
+created_at = "2026-08-10T22:05:27Z"

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Extend the bundled catalog through Mathlib v4.33.0 and add exact LeanCert
+  environments for the supported Lean 4.30, 4.31, 4.32, and 4.33 lines.
+  Otherwise-equivalent discovery candidates now prefer the smallest exact
+  dependency closure, so LeanCert support does not enlarge ordinary Mathlib
+  checks.
+- Make the public-cache post-publication consumer genuinely anonymous by
+  withholding registry credentials during its clean download and import probe.
 - Add a strict existing-project publication journey: `lean-runtime project
   inspect`, `project lock`, `project export`, and `project init-publish` turn a
   clean, pushed root GitHub Lean project into an exact managed environment.

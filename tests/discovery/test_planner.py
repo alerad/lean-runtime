@@ -30,6 +30,54 @@ def test_local_availability_can_break_tie(sample_catalog) -> None:  # type: igno
     assert plan.candidates[0].entry.id == "mathlib-old"
 
 
+def test_smallest_compatible_environment_breaks_tie() -> None:
+    from lean_runtime.discovery import Catalog
+
+    mathlib = make_entry(
+        "mathlib",
+        "d",
+        modules=("Mathlib",),
+        packages=("mathlib",),
+        created_at="2026-08-10T00:00:00Z",
+    )
+    leancert = make_entry(
+        "leancert",
+        "e",
+        modules=("Mathlib", "LeanCert"),
+        packages=("mathlib", "leancert"),
+        created_at="2026-08-11T00:00:00Z",
+    )
+    catalog = Catalog(generated_at="2026-08-12T00:00:00Z", entries=(leancert, mathlib))
+
+    mathlib_plan = Discovery(catalog=catalog).plan("import Mathlib\n")
+    assert [candidate.entry.id for candidate in mathlib_plan.candidates] == [
+        "mathlib",
+        "leancert",
+    ]
+
+    leancert_plan = Discovery(catalog=catalog).plan("import LeanCert\n")
+    assert [candidate.entry.id for candidate in leancert_plan.candidates] == ["leancert"]
+
+
+def test_local_extension_can_still_beat_smaller_remote_environment() -> None:
+    from lean_runtime.discovery import Catalog
+
+    mathlib = make_entry("mathlib", "d", modules=("Mathlib",), packages=("mathlib",))
+    leancert = make_entry(
+        "leancert",
+        "e",
+        modules=("Mathlib", "LeanCert"),
+        packages=("mathlib", "leancert"),
+    )
+    catalog = Catalog(generated_at="2026-08-12T00:00:00Z", entries=(mathlib, leancert))
+    plan = Discovery(
+        catalog=catalog,
+        availability={leancert.lock.lock_id: AvailabilityObservation(local=True)},
+    ).plan("import Mathlib\n")
+
+    assert plan.candidates[0].entry.id == "leancert"
+
+
 def test_candidate_limit_is_strict(sample_catalog) -> None:  # type: ignore[no-untyped-def]
     plan = Discovery(
         catalog=sample_catalog,
