@@ -103,12 +103,19 @@ def _tree_entries(
     excluded: Path | None = None,
     *,
     excluded_names: frozenset[str] = frozenset(),
+    omit_volatile_build_metadata: bool = False,
 ) -> Iterable[tuple[Path, str]]:
     for path in sorted(root.rglob("*"), key=lambda value: value.relative_to(root).as_posix()):
         if excluded is not None and (path == excluded or excluded in path.parents):
             continue
         relative = path.relative_to(root)
         if relative.parts and relative.parts[0] in excluded_names:
+            continue
+        if (
+            omit_volatile_build_metadata
+            and ".lake" in relative.parts
+            and (relative.name.endswith(".trace") or relative.name.endswith(".setup.json"))
+        ):
             continue
         yield path, relative.as_posix()
 
@@ -120,6 +127,7 @@ def _write_tar_gzip(
     excluded: Path | None = None,
     excluded_names: frozenset[str] = frozenset(),
     extra_files: Mapping[str, bytes] | None = None,
+    omit_volatile_build_metadata: bool = False,
 ) -> None:
     with (
         output.open("wb") as raw_output,
@@ -128,7 +136,12 @@ def _write_tar_gzip(
         ) as compressed,
         tarfile.open(fileobj=compressed, mode="w|", format=tarfile.PAX_FORMAT) as archive,
     ):
-        for path, name in _tree_entries(root, excluded, excluded_names=excluded_names):
+        for path, name in _tree_entries(
+            root,
+            excluded,
+            excluded_names=excluded_names,
+            omit_volatile_build_metadata=omit_volatile_build_metadata,
+        ):
             stat = path.lstat()
             mode = stat.st_mode & 0o777
             if path.is_symlink():
@@ -600,7 +613,12 @@ class EnvironmentBundles:
                 layers: list[dict[str, Any]] = []
 
                 root_layer = staging / "root.tar.gz"
-                _write_tar_gzip(workspace, root_layer, excluded=packages_dir)
+                _write_tar_gzip(
+                    workspace,
+                    root_layer,
+                    excluded=packages_dir,
+                    omit_volatile_build_metadata=True,
+                )
                 layers.append(
                     _blob_descriptor_path(
                         root_layer,
@@ -619,6 +637,7 @@ class EnvironmentBundles:
                         layer,
                         excluded_names=frozenset({".git", SOURCE_TREE_INVENTORY}),
                         extra_files={SOURCE_TREE_INVENTORY: inventory},
+                        omit_volatile_build_metadata=True,
                     )
                     descriptor = _blob_descriptor_path(
                         layer,
