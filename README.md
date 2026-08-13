@@ -55,6 +55,21 @@ environment libraries, then builds the exact source environment when necessary. 
 `--no-source-build` to forbid that potentially large fallback or `--offline` to use
 retained environments only.
 
+Before a cold run, inspect its cost without changing the store:
+
+```bash
+lean-run Main.lean --plan
+lean-run Main.lean --max-download 2GiB
+```
+
+New-format libraries publish two independently verified pieces: a slim Lean
+check runtime and seekable module packs. Lean Runtime computes the source's
+transitive import closure, downloads only the corresponding compressed frames,
+and shares verified module artifacts across Mathlib, LeanCert, and future
+environments. A warm check is silent apart from its result. Older published
+environments remain readable and automatically use the legacy full-bundle
+path, so this optimization does not invalidate existing locks.
+
 Explicit frontmatter remains available when the desired context is already known:
 
 ```lean
@@ -182,7 +197,9 @@ lean-runtime project init-publish . \
 ```
 
 The workflow builds and verifies Linux and macOS environments, finalizes the
-index atomically, then checks clean consumers. See
+environment and slim-toolchain indexes atomically, then checks clean consumers.
+For a one-machine handoff, `lean-runtime project export` writes a source-free
+portable capsule containing only the selected public module's closure. See
 [Publishing a Lean project](https://alerad.github.io/lean-runtime/project-publishing/).
 
 For an already-built executable, Lean Runtime can also create a verified
@@ -194,10 +211,10 @@ library. See [Ready-to-run programs](https://github.com/alerad/lean-runtime/blob
 
 The simple API is backed by exact Git commits and trees, Lake-resolved locks,
 platform-aware content-addressed environments, atomic cross-process builds,
-downloadable environment reuse, replayable provenance, verification, and trusted
-publishers. The libraries use OCI-compatible storage internally, but users do
-not need Docker or container concepts. Advanced protocol details remain in the
-architecture documentation.
+downloadable environment reuse, sparse content-addressed module packs,
+replayable provenance, verification, and trusted publishers. The libraries use
+OCI-compatible storage internally, but users do not need Docker or container
+concepts. Advanced protocol details remain in the architecture documentation.
 
 ## Documentation
 

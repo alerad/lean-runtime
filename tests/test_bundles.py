@@ -22,7 +22,13 @@ from lean_runtime import (
     LockedPackage,
     Runtime,
 )
-from lean_runtime.bundles import SOURCE_TREE_INVENTORY, _extract_layer, _oci_archive
+from lean_runtime.bundles import (
+    SOURCE_TREE_INVENTORY,
+    _capsule_config_object,
+    _extract_layer,
+    _oci_archive,
+)
+from lean_runtime.capsules import build_manifest
 from lean_runtime.environments import ENVIRONMENT_SCHEMA
 from lean_runtime.events import EventEmitter
 from lean_runtime.oci import OCIEnvironmentPublisher, OCIRegistryClient, OCIRepository
@@ -228,6 +234,244 @@ def test_bundle_export_is_deterministic_and_imports_into_fresh_store(tmp_path: P
     assert not (bundled_package / ".git").exists()
 
 
+def test_capsule_layout_contains_only_indexed_sparse_artifacts(tmp_path: Path) -> None:
+    producer, environment_id, lock = _published_runtime(tmp_path / "producer")
+    workspace = producer.store.environment_path(environment_id) / "workspace"
+    build = workspace / ".lake" / "packages" / "sample" / ".lake" / "build" / "lib" / "lean"
+    manifest = build_manifest(
+        workspace=workspace,
+        environment_id=environment_id,
+        lock_id=lock.lock_id,
+        toolchain=lock.toolchain,
+        build_roots={"sample": build},
+        imports={"Sample": ()},
+    )
+    layout = tmp_path / "capsule-layout"
+    info = producer.bundles.export_capsule_layout(
+        environment_id, layout, capsule_manifest=manifest, probe=False
+    )
+    assert info.exact_environment_id == lock.lock_id
+    index = json.loads((layout / "index.json").read_text())
+    manifest_descriptor = index["manifests"][0]
+    platform_manifest = json.loads(
+        (layout / "blobs" / "sha256" / manifest_descriptor["digest"].split(":", 1)[1]).read_text()
+    )
+    assert platform_manifest["annotations"]["org.lean-runtime.profile"] == "check-capsule"
+    config_descriptor = platform_manifest["config"]
+    config = _capsule_config_object(
+        (layout / "blobs" / "sha256" / config_descriptor["digest"].split(":", 1)[1]).read_bytes()
+    )
+    assert config["schema"] == "lean-runtime-oci-capsule/1"
+    assert config["capsule"]["modules"][0]["name"] == "Sample"
+    assert config["packs"][0]["frames"][0]["artifacts"] == [
+        ".lake/packages/sample/.lake/build/lib/lean/Sample.olean"
+    ]
+    all_bytes = b"".join(path.read_bytes() for path in layout.rglob("*") if path.is_file())
+    assert b"def sampleValue" not in all_bytes
+
+
+def test_portable_capsule_imports_without_sources(tmp_path: Path) -> None:
+    producer, environment_id, lock = _published_runtime(tmp_path / "producer")
+    workspace = producer.store.environment_path(environment_id) / "workspace"
+    build = workspace / ".lake" / "packages" / "sample" / ".lake" / "build" / "lib" / "lean"
+    manifest = build_manifest(
+        workspace=workspace,
+        environment_id=environment_id,
+        lock_id=lock.lock_id,
+        toolchain=lock.toolchain,
+        build_roots={"sample": build},
+        imports={"Sample": ()},
+    )
+    layout = tmp_path / "layout"
+    producer.bundles.export_capsule_layout(
+        environment_id,
+        layout,
+        capsule_manifest=manifest,
+        capabilities=frozenset({"check"}),
+        probe=False,
+    )
+    archive = tmp_path / "sample.lean-capsule"
+    archive.write_bytes(
+        _oci_archive(
+            {
+                path.relative_to(layout).as_posix(): path.read_bytes()
+                for path in layout.rglob("*")
+                if path.is_file()
+            }
+        )
+    )
+
+    consumer = Runtime(home=tmp_path / "consumer", libraries=[])
+    imported = consumer.open_portable_copy(archive, name="sample", probe=False)
+
+    assert imported.id == environment_id
+    assert (imported.workspace / ".lean-runtime" / "capsule.json").is_file()
+    assert (
+        imported.workspace
+        / ".lake"
+        / "packages"
+        / "sample"
+        / ".lake"
+        / "build"
+        / "lib"
+        / "lean"
+        / "Sample.olean"
+    ).read_bytes() == b"built"
+    assert not (imported.workspace / ".lake" / "packages" / "sample" / "Sample.lean").exists()
+    assert consumer.environment("sample").id == environment_id
+
+
+def test_oci_client_reads_verified_ranges_and_metadata_without_cache() -> None:
+    payload = b"0123456789abcdef"
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        range_requests = 0
+
+        def do_GET(self) -> None:  # noqa: N802
+            if not self.path.endswith(digest):
+                self.send_error(404)
+                return
+            requested = self.headers.get("Range")
+            if requested:
+                type(self).range_requests += 1
+                start, end = (int(item) for item in requested.removeprefix("bytes=").split("-"))
+                data = payload[start : end + 1]
+                if type(self).range_requests == 2:
+                    data = b"x" * len(data)
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(payload)}")
+            else:
+                data = payload
+                self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, _format: str, *args: object) -> None:
+            del args
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        repository = OCIRepository.parse(f"oci+http://127.0.0.1:{server.server_port}/owner/cache")
+        client = OCIRegistryClient(repository)
+        descriptor = {"digest": digest, "size": len(payload)}
+        assert client.download_blob_range(descriptor, offset=3, size=5) == b"34567"
+        expected = "sha256:" + hashlib.sha256(b"34567").hexdigest()
+        assert (
+            client.download_blob_range(descriptor, offset=3, size=5, expected_digest=expected)
+            == b"34567"
+        )
+        assert Handler.range_requests == 3
+        assert client.read_blob(descriptor) == payload
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_sparse_oci_pull_downloads_only_the_import_closure(tmp_path: Path) -> None:
+    producer, environment_id, lock = _published_runtime(tmp_path / "producer")
+    workspace = producer.store.environment_path(environment_id) / "workspace"
+    build = workspace / ".lake" / "packages" / "sample" / ".lake" / "build" / "lib" / "lean"
+    for module, byte in (("A", b"a"), ("B", b"b"), ("C", b"c")):
+        (build / f"{module}.olean").write_bytes(byte * 700)
+        (build / f"{module}.ilean").write_bytes(byte.upper() * 100)
+    manifest = build_manifest(
+        workspace=workspace,
+        environment_id=environment_id,
+        lock_id=lock.lock_id,
+        toolchain=lock.toolchain,
+        build_roots={"sample": build},
+        imports={"A": (), "B": ("A",), "C": ("B",), "Sample": ()},
+    )
+    layout = tmp_path / "layout"
+    producer.bundles.export_capsule_layout(
+        environment_id,
+        layout,
+        capsule_manifest=manifest,
+        target_frame_bytes=1024,
+        probe=False,
+    )
+    index = (layout / "index.json").read_bytes()
+    blobs = {
+        "sha256:" + path.name: path.read_bytes() for path in (layout / "blobs" / "sha256").iterdir()
+    }
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        transferred_ranges: list[tuple[int, int]] = []
+
+        def do_GET(self) -> None:  # noqa: N802
+            reference = urllib.parse.unquote(self.path.rsplit("/", 1)[-1])
+            if "/manifests/" in self.path:
+                data = index if reference == f"capsule-{lock.lock_id}" else blobs.get(reference)
+                if data is None:
+                    self.send_error(404)
+                    return
+                media = (
+                    "application/vnd.oci.image.index.v1+json"
+                    if reference == f"capsule-{lock.lock_id}"
+                    else "application/vnd.oci.image.manifest.v1+json"
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", media)
+                self.send_header(
+                    "Docker-Content-Digest",
+                    "sha256:" + hashlib.sha256(data).hexdigest(),
+                )
+            else:
+                data = blobs.get(reference)
+                if data is None:
+                    self.send_error(404)
+                    return
+                requested = self.headers.get("Range")
+                if requested:
+                    start, end = (int(item) for item in requested.removeprefix("bytes=").split("-"))
+                    type(self).transferred_ranges.append((start, end))
+                    whole = data
+                    data = whole[start : end + 1]
+                    self.send_response(206)
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{len(whole)}")
+                else:
+                    self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, _format: str, *args: object) -> None:
+            del args
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        library = f"oci+http://127.0.0.1:{server.server_port}/owner/cache"
+        consumer = Runtime(home=tmp_path / "consumer", libraries=(library,))
+        cache = consumer.libraries[0]
+        before = set(consumer.store.cas_artifacts.iterdir())
+        plan = cache.plan_capsule(lock, ("B",))
+        assert set(consumer.store.cas_artifacts.iterdir()) == before
+        assert plan.modules == ("A", "B")
+        cache.pull_capsule(lock, ("B",))
+        environment = consumer.environment(environment_id)
+        assert list(environment.workspace.rglob("A.olean"))
+        assert list(environment.workspace.rglob("B.olean"))
+        assert not list(environment.workspace.rglob("C.olean"))
+        assert len(Handler.transferred_ranges) == 2
+        assert sum(frame.size for _pack, _descriptor, frame in plan.frames) < sum(
+            pack.size for pack, _descriptor in plan.packs
+        )
+        environment.require_capabilities(["editor"], imports=["B"])
+        assert list(environment.workspace.rglob("A.ilean"))
+        assert list(environment.workspace.rglob("B.ilean"))
+        assert not list(environment.workspace.rglob("C.ilean"))
+        assert len(Handler.transferred_ranges) == 3
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_bundle_import_rejects_a_corrupted_blob(tmp_path: Path) -> None:
     producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
     bundle = tmp_path / "environment.oci.tar.gz"
@@ -318,6 +562,9 @@ class _FakeToolchains:
 
     def command(self, _toolchain: str, _executable: str, *_args: str) -> list[str]:
         return [sys.executable, "-c", "raise SystemExit(0)"]
+
+    def is_available_locally(self, _toolchain: str) -> bool:
+        return True
 
 
 def test_transparent_authenticated_oci_pull_and_blob_reuse(tmp_path: Path) -> None:
@@ -703,3 +950,17 @@ def test_open_exact_announces_source_build_capability(tmp_path: Path, monkeypatc
     assert "availability.fallback" in kinds
     required = next(event for event in events if event.kind == "capability.required")
     assert required.data["capability"] == "source_build"
+
+
+def test_download_limit_fails_closed_when_a_component_cannot_be_priced(tmp_path: Path) -> None:
+    _producer, _environment_id, lock = _published_runtime(tmp_path / "producer")
+    runtime = Runtime(
+        toolchains=_FakeToolchains(tmp_path / "consumer"),  # type: ignore[arg-type]
+        libraries=[],
+        max_download_bytes=10**12,
+    )
+
+    report = runtime.plan_exact(lock)
+    assert report["download_bytes_complete"] is False
+    with pytest.raises(DownloadLimitExceeded, match="cost is incomplete"):
+        runtime.open_exact(lock)

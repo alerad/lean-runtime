@@ -37,7 +37,7 @@ class Discovery:
     def plan(self, source: str) -> DiscoveryPlan:
         return self.planner.plan(self.analyze(source), self.catalog, self.policy, self.availability)
 
-    def _probe(self) -> CandidateProbe:
+    def _probe(self, import_roots: tuple[str, ...] = ()) -> CandidateProbe:
         if self.probe is not None and self.runtime is not None:
             raise PolicyError("configure either a Runtime or a custom probe, not both")
         if self.runtime_events is not None and self.runtime is None:
@@ -67,7 +67,7 @@ class Discovery:
             raise PolicyError(
                 "the injected Runtime has active libraries but allow_download is false"
             )
-        return LeanRuntimeProbe(runtime, events)
+        return LeanRuntimeProbe(runtime, events, import_roots)
 
     def discover_and_check(
         self,
@@ -79,7 +79,7 @@ class Discovery:
         selected_probe = (
             None
             if selected_plan.explicit_lock is not None or not selected_plan.candidates
-            else self._probe()
+            else self._probe(selected_plan.evidence.imports)
         )
         return discover(source, selected_plan, selected_probe, cancel=cancel)
 

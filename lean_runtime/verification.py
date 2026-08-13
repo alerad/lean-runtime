@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .bundles import _packages_directory, _verify_package, _verify_workspace_lock
+from .capsules import CAPSULE_MANIFEST, CapsuleManifest
 from .environments import Environment, EnvironmentManager
 from .errors import EnvironmentError
 from .lake import ROOT_MODULE
@@ -63,6 +64,42 @@ def _verify_sources(environment: Environment) -> None:
     packages = workspace.joinpath(*_packages_directory(environment.lock).parts)
     for package in environment.lock.packages:
         _verify_package(packages / package.name, package)
+
+
+def _verify_capsule_state(environment: Environment) -> int:
+    workspace = environment.root / "workspace"
+    manifest = CapsuleManifest.load(workspace / CAPSULE_MANIFEST)
+    if (
+        manifest.environment_id != environment.id
+        or manifest.lock_id != environment.lock.lock_id
+        or manifest.toolchain != environment.lock.toolchain
+    ):
+        raise EnvironmentError("sparse capsule identity mismatch")
+    origin = environment._record.get("origin")
+    if not isinstance(origin, dict):
+        raise EnvironmentError("sparse capsule has no acquisition provenance")
+    modules = origin.get("modules")
+    capabilities = origin.get("capabilities")
+    if not isinstance(modules, list) or not isinstance(capabilities, list):
+        raise EnvironmentError("sparse capsule provenance is incomplete")
+    selected = frozenset(str(item) for item in capabilities)
+    verified = 0
+    for module in manifest.closure(str(item) for item in modules):
+        for artifact in module.artifacts:
+            if artifact.capability not in selected:
+                continue
+            path = workspace.joinpath(*Path(artifact.path).parts)
+            if not path.is_file() or path.stat().st_size != artifact.size:
+                raise EnvironmentError(f"sparse capsule artifact is missing: {artifact.path}")
+            observed = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    observed.update(chunk)
+            digest = observed.hexdigest()
+            if "sha256:" + digest != artifact.digest:
+                raise EnvironmentError(f"sparse capsule artifact changed: {artifact.path}")
+            verified += 1
+    return verified
 
 
 def _probe(environment: Environment) -> None:
@@ -198,17 +235,26 @@ def verify_environment(
     checks.append(platform)
     if not platform.ok:
         failures.append(platform)
+    sparse = (environment.workspace / CAPSULE_MANIFEST).is_file()
     try:
-        _verify_sources(environment)
-        source = VerificationCheck(
-            "package_trees_verified", True, details={"packages": len(environment.lock.packages)}
-        )
+        if sparse:
+            verified = _verify_capsule_state(environment)
+            source = VerificationCheck(
+                "capsule_artifacts_verified", True, details={"artifacts": verified}
+            )
+        else:
+            _verify_sources(environment)
+            source = VerificationCheck(
+                "package_trees_verified",
+                True,
+                details={"packages": len(environment.lock.packages)},
+            )
     except EnvironmentError as exc:
         source = VerificationCheck("source_tree_mismatch", False, details={"message": str(exc)})
         failures.append(source)
     checks.append(source)
     try:
-        if offline and not runtime.toolchains.is_installed(environment.lock.toolchain):
+        if offline and not runtime.toolchains.is_available_locally(environment.lock.toolchain):
             raise EnvironmentError(
                 "offline verification requires the locked toolchain to be installed"
             )

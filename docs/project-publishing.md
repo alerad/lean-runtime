@@ -42,7 +42,8 @@ and selected public module.
 
 ## Export this computer
 
-A portable copy is useful for transferring the current computer's environment:
+A portable capsule is useful for transferring the current computer's
+source-free check environment:
 
 ```bash
 lean-runtime project export . --module MyProject \
@@ -51,8 +52,11 @@ lean-runtime project export . --module MyProject \
 lean-runtime open-copy MyProject.lean-environment --name MyProject
 ```
 
-Portable copies are computer-type-specific. Use the reusable workflow for a
-public multi-platform environment.
+The export contains the selected public module's exact transitive closure, not
+the project checkout, Lake metadata, editor indexes, or native/development
+outputs. `open-copy` verifies every artifact and runs the locked import before
+publishing it locally. Capsules are computer-type-specific; use the reusable
+workflow for a public multi-platform environment.
 
 ## Generate the publication workflow
 
@@ -79,7 +83,7 @@ permissions:
 
 jobs:
   publish:
-    uses: alerad/lean-runtime/.github/workflows/publish-project.yml@v2
+    uses: alerad/lean-runtime/.github/workflows/publish-project.yml@v3
     with:
       project: .
       library: ghcr.io/OWNER/my-project-environments
@@ -89,10 +93,11 @@ jobs:
 ```
 
 The maintained workflow validates and locks the checkout once; builds Linux
-AMD64, macOS AMD64, and macOS ARM64; verifies source identity and a Lean import
-probe; streams and deduplicates OCI blobs; signs and attests each publication;
-publishes the index only after every platform succeeds; then downloads it into
-clean stores on all three platforms and checks `import MyProject`.
+AMD64, macOS AMD64, and macOS ARM64; differentially verifies a source-free
+capsule against the full build; publishes seekable module packs and the matching
+slim Lean runtime; signs the two indexes; and makes either index visible only
+after every platform succeeds. It then downloads them into clean stores on all
+three platforms and checks `import MyProject` without a source-build fallback.
 
 The clean-consumer import has configurable `check-budget-seconds` and
 `warm-check-budget-seconds` inputs (300 seconds each by default). These are

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -120,6 +121,20 @@ def test_check_accepts_source(tmp_path: Path) -> None:
     assert result.toolchain == "leanprover/lean4:v4.32.0"
 
 
+def test_core_environment_needs_neither_lake_nor_a_full_build(tmp_path: Path) -> None:
+    runtime = Runtime(
+        toolchains=FakeToolchains(tmp_path),  # type: ignore[arg-type]
+        libraries=[],
+        availability="local",
+    )
+    environment = runtime.open_toolchain("v4.32.2")
+
+    assert environment.lock.packages == ()
+    metadata = json.loads((environment.root / "metadata.json").read_text())
+    assert metadata["build"]["performed"] is False
+    assert environment.check("example : True := by trivial").ok
+
+
 def test_repeated_requests_have_unique_execution_history_ids(tmp_path: Path) -> None:
     runtime = Runtime(toolchains=FakeToolchains(tmp_path))  # type: ignore[arg-type]
     first = runtime.check("example : True := by trivial", toolchain="4.32.0")
@@ -174,3 +189,10 @@ def test_resolution_cancellation_stops_lake_before_lock_publication(tmp_path: Pa
         )
     assert captured.value.exit_code == 130
     assert not list(runtime.store.locks.glob("lock_*.json"))
+
+
+def test_local_runtime_never_falls_through_to_elan_install(tmp_path: Path) -> None:
+    runtime = Runtime(home=tmp_path / "home", availability="local", libraries=())
+
+    with pytest.raises(ToolchainError, match="offline mode does not permit"):
+        runtime.toolchains.ensure("v4.32.2")

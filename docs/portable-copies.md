@@ -25,6 +25,13 @@ and testing; normal use should keep the probe enabled.
 Saving, opening, and downloading are disk-backed and streamed. Peak memory does
 not scale with the size of the environment.
 
+`save-copy` deliberately preserves the legacy full environment, including
+sources, for users who need a self-contained development handoff. `project
+export` instead writes a source-free sparse check capsule containing only the
+selected public module's transitive closure. `open-copy` detects and verifies
+both formats. Native compilation and project development require the full
+format; proof checking should prefer the capsule.
+
 ## Environment libraries
 
 By default, Lean Runtime checks the public
@@ -64,8 +71,9 @@ lean-runtime \
   download environment.lock.json
 ```
 
-Downloaded files are retained under the runtime home. Opening another
-environment with identical dependencies reuses them without another download.
+Downloaded pack frames are verified into a raw module CAS under the runtime
+home. Opening another environment with identical module bytes reuses them even
+when its lock or top-level package differs.
 
 Old blobs can be included in garbage collection explicitly:
 
@@ -75,10 +83,11 @@ lean-runtime clean --include-downloads
 lean-runtime clean --include-downloads --execute
 ```
 
-Files used by a ready environment or an active download are retained. Cleanup
-rechecks both conditions before removing anything.
+Full OCI blobs referenced by ready legacy environments are retained. Sparse CAS
+artifacts may be reclaimed because ready projections hold their own hardlink or
+copy; active projection leases and per-artifact locks prevent races.
 
-### Required publisher publisher_verification
+### Required publisher verification
 
 For high-trust workflows, require a Sigstore signature from one exact GitHub
 Actions identity:
@@ -192,7 +201,7 @@ steps are not promised to produce byte-identical artifacts.
 
 ## Advanced storage details
 
-The gzip file is a deterministic OCI image-layout archive. It contains a
+The legacy gzip file is a deterministic OCI image-layout archive. It contains a
 standard `oci-layout`, `index.json`, one image manifest, a Lean Runtime config
 blob, and content-addressed layer blobs. The config contains the complete
 `EnvironmentLock`, build profile, environment identity, and platform
@@ -212,6 +221,13 @@ change the locked source identity.
 Archives use sorted paths, zero timestamps and ownership, normalized tar
 metadata, canonical JSON, and deterministic gzip headers. Exporting an unchanged
 environment twice therefore produces identical bytes and digests.
+
+A sparse capsule uses the same outer OCI layout but replaces source/package
+tarballs with seekable zstd packs and a normalized module manifest. Pack frames
+carry their own compressed digest and an inventory of raw artifact digests, so
+a ranged response is verified without downloading the surrounding pack. The
+matching check-only Lean toolchain is a separate OCI index and is never hidden
+inside the environment lock.
 
 ## Compatibility and trust
 

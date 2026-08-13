@@ -37,10 +37,7 @@ jobs:
               "lean-runtime${REQUESTED_VERSION:+==$REQUESTED_VERSION}"
           fi
       - name: Registry preflight (anonymous)
-        # core-v4.32.2 has no packages, so the publish workflow cannot build
-        # it from a package reference; a local core build takes ~2 minutes and
-        # is acceptable until toolchain-only publication exists.
-        run: python scripts/registry_preflight.py --skip core-v4.32.2
+        run: python scripts/registry_preflight.py
 
   gate:
     needs: preflight

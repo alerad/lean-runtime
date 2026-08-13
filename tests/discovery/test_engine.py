@@ -305,8 +305,10 @@ def test_lean_runtime_probe_passes_the_acquisition_budget_to_builds(sample_catal
 
     captured: dict[str, float] = {}
 
-    def open_exact(lock, *, build_timeout, cancel=None):  # type: ignore[no-untyped-def]
-        del lock, cancel
+    def open_exact(  # type: ignore[no-untyped-def]
+        lock, *, build_timeout, import_roots=(), cancel=None
+    ):
+        del lock, import_roots, cancel
         captured["build_timeout"] = build_timeout
         return SimpleNamespace(id="env_fake")
 

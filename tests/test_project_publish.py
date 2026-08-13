@@ -134,7 +134,7 @@ def test_project_publication_workflow_is_a_small_public_caller() -> None:
     workflow = project_publication_workflow(
         library="ghcr.io/example/fixture-environments", module="Fixture"
     )
-    assert "alerad/lean-runtime/.github/workflows/publish-project.yml@v2" in workflow
+    assert "alerad/lean-runtime/.github/workflows/publish-project.yml@v3" in workflow
     assert "library: ghcr.io/example/fixture-environments" in workflow
     assert "module: Fixture" in workflow
     assert "public: true" in workflow

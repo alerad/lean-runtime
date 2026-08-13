@@ -14,6 +14,7 @@ from .console import styler_for
 from .environments import ExecutionCapture
 from .errors import LeanRuntimeError, MaterializationError, ResolutionError
 from .events import RuntimeEvent
+from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock
 from .matrix import load_matrix
 from .models import ExecutionResult, PhaseTiming
@@ -71,6 +72,7 @@ def _render_storage(status: StoreStatus) -> None:
         ("Environments", status.environments, status.environments_bytes),
         ("Sources", status.sources, status.sources_bytes),
         ("Download cache", status.oci_blobs, status.oci_blobs_bytes),
+        ("Shared module CAS", status.cas_artifacts, status.cas_artifacts_bytes),
         ("Toolchains", None, status.toolchains_bytes),
         ("Executions", status.executions, status.executions_bytes),
     )
@@ -276,6 +278,21 @@ def parser() -> argparse.ArgumentParser:
     publish_index.add_argument("--library", required=True)
     publish_index.add_argument("--tag", action="append", default=[])
     publish_index.add_argument("--sign", action="store_true")
+
+    toolchain_publish = commands.add_parser(
+        "toolchain-publish", help="publish this platform's verified check-only Lean toolchain"
+    )
+    toolchain_publish.add_argument("toolchain")
+    toolchain_publish.add_argument("--library", required=True)
+
+    toolchain_finalize = commands.add_parser(
+        "toolchain-finalize-publication",
+        help="combine platform check-toolchain manifests",
+    )
+    toolchain_finalize.add_argument("toolchain")
+    toolchain_finalize.add_argument("platform_results", nargs="+", type=Path)
+    toolchain_finalize.add_argument("--library", required=True)
+    toolchain_finalize.add_argument("--sign", action="store_true")
 
     export = commands.add_parser("save-copy", help="save a verified portable environment copy")
     export.add_argument("environment")
@@ -591,7 +608,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "download":
             runtime.availability = "required"
-            environment = runtime.open_exact(EnvironmentLock.load(args.lock), name=args.name)
+            environment = runtime.open_exact(
+                EnvironmentLock.load(args.lock),
+                name=args.name,
+                import_roots=(ROOT_MODULE,),
+            )
             _json(environment.inspect().to_dict())
             return 0
         if args.command == "build-and-publish":
@@ -629,6 +650,22 @@ def main(argv: list[str] | None = None) -> int:
                     args.library, args.lock_id, descriptors, tags=args.tag
                 )
             _json({"exact_environment_id": args.lock_id, "publication_id": digest})
+            return 0
+        if args.command == "toolchain-publish":
+            _json(runtime.publish_toolchain(args.toolchain, args.library).to_dict())
+            return 0
+        if args.command == "toolchain-finalize-publication":
+            descriptors = []
+            for path in args.platform_results:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                descriptor = value.get("descriptor") if isinstance(value, dict) else None
+                if not isinstance(descriptor, dict):
+                    raise ValueError(f"invalid toolchain platform result: {path}")
+                descriptors.append(descriptor)
+            digest = runtime.finalize_toolchain_publication(
+                args.toolchain, args.library, descriptors, sign=args.sign
+            )
+            _json({"toolchain": args.toolchain, "publication_id": digest})
             return 0
         if args.command == "save-copy":
             _json(runtime.save_portable_copy(args.environment, args.output).to_dict())

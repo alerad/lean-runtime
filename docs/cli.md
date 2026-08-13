@@ -109,8 +109,29 @@ stay; larger reductions require upstream facet-loading changes.
 
 After pruning, source builds of *new* environments and native compilation
 need the full toolchain again; reinstall it with `lean-runtime install`.
-Downloads are unaffected: first-time installation still transfers the full
-official release before a slim copy can be derived from it.
+
+Libraries produced by the current publication workflow also carry this
+verified check profile directly. A cold consumer downloads that compressed
+profile instead of first transferring the full official release. If the
+library has no compatible published check runtime, Lean Runtime falls back to
+the official Elan installation path. Local `toolchain-slim` remains useful for
+older stores and for testing a profile before publication.
+
+## Sparse acquisition and capabilities
+
+`lean-run FILE --plan` reads capsule metadata and reports the exact compressed
+frames required by `FILE`'s transitive import closure, plus the selected Lean
+check-runtime cost. The operation has no store side effects. `--max-download`
+applies before acquisition to the combined known cost; an unknown component is
+reported explicitly instead of treated as zero.
+
+The ordinary check capability retains `.olean`, `.olean.server`,
+`.olean.private`, `.ir`, and `.ir.sig`. This is empirical, not conservative
+guesswork: Lean 4.32 and 4.33 reject ordinary imports when the corresponding
+server/private or IR facets are omitted. `.ilean` editor indexes are a separate
+on-demand capability through `Environment.require_capabilities(["editor"],
+imports=[...])`. Native compilation and development builds require a full
+environment and full toolchain; check capsules reject those requests clearly.
 
 ## Replay
 

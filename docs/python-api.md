@@ -23,6 +23,23 @@ default `Runtime` is created lazily on the first operation; importing
 `lean_runtime` has no filesystem or network side effects. Supply
 `runtime=Runtime(...)` to any façade function for explicit configuration.
 
+When an exact library has a current check capsule, `setup()` may initially
+materialize only its metadata. Each `check()` extends the projection with the
+source's exact transitive import closure. Reusing the `Environment` also reuses
+the verified CAS artifacts; its lock and environment identity do not change.
+
+Optional editor indexes are explicit:
+
+```python
+environment.require_capabilities(
+    ["editor"],
+    imports=["Mathlib.Data.Nat.Prime.Basic"],
+)
+```
+
+Native and development capabilities require a full built environment and are
+rejected by check capsules with an actionable error.
+
 One-shot helpers use the same routing:
 
 ```python
@@ -273,6 +290,8 @@ revision/dirty state when available.
 Diagnostic extraction is explicitly best-effort. The original stdout and
 stderr remain authoritative.
 
-Before checking, the environment asks Lake to build imported roots matching
-locked packages. This makes transitive package modules available on demand even
-when the synthetic environment root did not originally require them.
+Before checking, a sparse environment computes the imports' recorded closure,
+verifies any missing pack frames into the shared CAS, and writes a versioned
+Lean `--setup` file for the projected artifacts. Legacy full environments keep
+their direct compiled-module path. Ordinary managed checks do not ask Lake to
+rescan or build the dependency graph.

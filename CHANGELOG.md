@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- Add versioned check capsules: publisher-built manifests record every retained
+  module facet, exact import edges, content digest, package owner, and
+  capability. Publication now fails unless the full environment and a
+  physically isolated capsule both accept the locked public import.
+- Replace monolithic environment pulls with deterministic seekable zstd packs.
+  A clean check downloads only the pack frames covering its transitive import
+  closure; verified raw artifacts are shared in a cross-environment CAS and
+  projected atomically. `lean-run --plan` reports closure and check-runtime
+  costs before transfer, and `--max-download` gates their combined known cost.
+- Publish independently verified check-only Lean toolchains through the same
+  multi-platform OCI library. Consumers prefer the slim signed runtime before
+  installing the full official toolchain, while retaining an Elan fallback for
+  libraries that have not published the new artifact yet.
+- Add explicit sparse capabilities. Batch checking includes every olean facet
+  and IR file Lean actually requires; editor indexes are acquired only when
+  requested. Native/development requests fail with an actionable full-build
+  requirement instead of pretending that a check capsule supports them.
+- Make project export source-free and closure-scoped. `project export` now
+  creates a portable sparse capsule, and `open-copy` verifies its OCI digest
+  chain, per-artifact CAS hashes, exact lock/platform identity, and Lean probe
+  before publishing it locally.
+- Include shared sparse artifacts in `lean-runtime storage` and safely reclaim
+  old unleased CAS entries with `clean --include-downloads`.
+- Make releases tag-driven and fail closed: the helper waits for CI on the exact
+  release commit; the tag workflow independently checks version, changelog,
+  tests, docs, wheel metadata, and wheel installation; PyPI must succeed before
+  the GitHub release is created.
 - Extend the bundled catalog through Mathlib v4.33.0 and add exact LeanCert
   environments for the supported Lean 4.30, 4.31, 4.32, and 4.33 lines.
   Otherwise-equivalent discovery candidates now prefer the smallest exact

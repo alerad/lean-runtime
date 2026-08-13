@@ -64,6 +64,12 @@ class EnvironmentResolver:
         timeout: float = 900,
         cancel: threading.Event | None = None,
     ) -> EnvironmentLock:
+        if cancel is not None and cancel.is_set():
+            raise ResolutionError(
+                "Environment resolution was cancelled",
+                phase="resolution",
+                exit_code=130,
+            )
         self.events.emit(
             "resolution.started",
             "Resolving environment",
@@ -71,10 +77,40 @@ class EnvironmentResolver:
             packages=len(spec.packages),
         )
         toolchain = self.toolchains.ensure(spec.toolchain, cancel=cancel)
+        if cancel is not None and cancel.is_set():
+            raise ResolutionError(
+                "Environment resolution was cancelled",
+                phase="resolution",
+                exit_code=130,
+            )
         self.events.emit("toolchain.ready", "Lean toolchain is ready", toolchain=toolchain)
         pinned_spec = self._pin_tags(spec, cancel=cancel)
         root_lakefile = generate_lakefile(pinned_spec)
         root_module = generate_root_module(spec)
+        if not pinned_spec.packages:
+            lock = EnvironmentLock(
+                toolchain=toolchain,
+                spec_digest=spec.spec_digest,
+                root_lakefile=root_lakefile,
+                root_module=root_module,
+                manifest={
+                    "version": "1.2.0",
+                    "packagesDir": ".lake/packages",
+                    "packages": [],
+                    "name": "lean_runtime_environment",
+                    "lakeDir": ".lake",
+                    "fixedToolchain": False,
+                },
+                packages=(),
+            )
+            self.store.publish_lock(lock)
+            self.events.emit(
+                "resolution.completed",
+                "Core-only environment lock published without Lake resolution",
+                lock_id=lock.lock_id,
+                packages=0,
+            )
+            return lock
         resolution_root = self.store.home / "resolution"
         resolution_root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="resolve-", dir=resolution_root) as raw:

@@ -25,18 +25,30 @@ SHA-256 digest before execution. Lean toolchains and exact Git package revisions
 are then acquired through Elan and Git. This is integrity hardening, not a full
 signed software-supply-chain system.
 
-Local OCI bundle import verifies the complete blob digest chain, recomputes the
-lock and environment identities, verifies package Git commits and trees, and
-runs a Lean probe before publication. Registry pulls apply the same checks.
+Legacy OCI bundle import verifies the complete blob digest chain, recomputes
+the lock and environment identities, verifies package Git commits and trees,
+and runs a Lean probe before publication. Sparse capsules verify the platform
+index digest chain, normalized module graph, pack ranges, per-frame digests, and
+every projected artifact digest, then run Lean against the source-free
+projection. Published slim toolchains verify their index, exact platform
+ABI and Lean commit, archive limits, manifest, and a six-part capability corpus
+before becoming visible. Registry pulls apply the corresponding checks.
 Ordinary availability failures may fall back to source in `auto` mode; integrity,
 lock, archive-safety, and probe failures do not. A bundle still contains trusted
 executable build output: these checks do not prove that its builder compiled the
 locked sources faithfully. Registry authentication is not a builder signature.
-Required Cosign policy authenticates an expected publisher workflow and index
-digest, but still trusts that workflow to compile the locked sources faithfully.
+Required Cosign policy authenticates the expected publisher workflow and both
+capsule and toolchain index digests, but still trusts that workflow to compile
+the locked sources faithfully.
 Publishers can attach a signed source/probe/build-inventory attestation, and
 `lean-runtime verify --rebuild` independently reacquires the locked sources,
 rebuilds them, reruns the Lean probe, and compares artifact inventories.
+
+A check capsule is evidence that the trusted publisher accepted the recorded
+statements and build artifacts; removing source and build inputs does not make
+those artifacts independently derivable. Native compilation, `native_decide`,
+editor source navigation, and development builds are outside the capsule's
+batch-check capability and require the exact full environment and toolchain.
 
 ## Reproducibility boundary
 
