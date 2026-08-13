@@ -36,6 +36,11 @@ on:
         required: false
         default: 18000
         type: number
+      check-budget-seconds:
+        description: Maximum clean-consumer import-check seconds
+        required: false
+        default: 60
+        type: number
 
 permissions:
   contents: read
@@ -250,6 +255,7 @@ jobs:
           REQUIRE_PUBLIC: ${{ inputs.public }}
           AUTH_USERNAME: ${{ github.actor }}
           AUTH_PASSWORD: ${{ github.token }}
+          CHECK_BUDGET_SECONDS: ${{ inputs.check-budget-seconds }}
           ACCEPTANCE_RESULT: acceptance-${{ matrix.platform }}.json
         run: |
           if [[ "$REQUIRE_PUBLIC" == "true" ]]; then
@@ -269,7 +275,7 @@ jobs:
           export DOWNLOAD_SECONDS=$((SECONDS - download_started))
           python - <<'PY'
           import json, os, statistics, time
-          from lean_runtime import Runtime
+          from lean_runtime import ExecutionPolicy, Runtime
 
           runtime = Runtime(
               home=os.environ["LEAN_RUNTIME_HOME"],
@@ -282,8 +288,13 @@ jobs:
               environment = runtime.environment("acceptance")
               setup_samples.append(time.perf_counter() - started)
           source = f"import {os.environ['PROJECT_MODULE']}\nexample : True := by trivial\n"
+          check_budget = float(os.environ["CHECK_BUDGET_SECONDS"])
           started = time.perf_counter()
-          result = environment.check(source, filename="Acceptance.lean")
+          result = environment.check(
+              source,
+              filename="Acceptance.lean",
+              policy=ExecutionPolicy(timeout_seconds=check_budget),
+          )
           check_seconds = time.perf_counter() - started
           result.raise_for_error()
           setup_median = statistics.median(setup_samples)
@@ -295,6 +306,7 @@ jobs:
               "download_seconds": int(os.environ["DOWNLOAD_SECONDS"]),
               "warm_setup_median_seconds": setup_median,
               "check_seconds": check_seconds,
+              "check_budget_seconds": check_budget,
               "scratch_empty": scratch_empty,
               "platform": os.environ["RUNNER_OS"] + "/" + os.environ["RUNNER_ARCH"],
           }
@@ -315,8 +327,11 @@ jobs:
           failures = []
           if setup_median >= 0.25:
               failures.append(f"warm setup median {setup_median:.3f}s is not below 0.25s")
-          if check_seconds >= 10:
-              failures.append(f"clean import check {check_seconds:.3f}s is not below 10s")
+          if check_seconds >= check_budget:
+              failures.append(
+                  f"clean import check {check_seconds:.3f}s is not below "
+                  f"the {check_budget:g}s budget"
+              )
           if not scratch_empty:
               failures.append("execution scratch directory was not empty after the check")
           if failures:

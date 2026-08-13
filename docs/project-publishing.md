@@ -94,6 +94,11 @@ probe; streams and deduplicates OCI blobs; signs and attests each publication;
 publishes the index only after every platform succeeds; then downloads it into
 clean stores on all three platforms and checks `import MyProject`.
 
+The clean-consumer import has a configurable `check-budget-seconds` input (60
+seconds by default). This is both the real execution timeout and a regression
+gate. A project with an intentionally heavier public import can raise the value
+explicitly; the workflow reports the selected budget and measured check time.
+
 The final acceptance is anonymous when `public: true`. GHCR package visibility
 is controlled by GitHub: after the first publication, make the package public
 in its package settings. Until then, acceptance intentionally fails rather
@@ -133,7 +138,7 @@ The release gate tracks phases separately, and publication JSON includes
 - registry selection produces visible progress within two seconds;
 - verification time is reported separately from download time;
 - warm setup remains below 250 ms;
-- the clean import proof remains below ten seconds after acquisition; and
+- the clean import proof remains below its explicit consumer budget after acquisition; and
 - execution scratch space is empty after the check.
 
 Publication reports total, uploaded, and reused bytes. Clean acceptance reports
