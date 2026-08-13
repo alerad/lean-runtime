@@ -493,6 +493,36 @@ def test_oci_publisher_uploads_blobs_before_manifests(tmp_path: Path) -> None:
     assert operations[-2:] == [("manifest", lock.lock_id), ("manifest", "v1")]
 
 
+def test_oci_publisher_reports_remote_blob_reuse(tmp_path: Path) -> None:
+    producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
+    publisher = OCIEnvironmentPublisher(
+        OCIRepository.parse("oci://registry.example/owner/cache"),
+        producer.store,
+        producer.bundles,
+        producer.events,
+    )
+
+    class ReusingClient:
+        def manifest_exists(self, _digest: str) -> bool:
+            return True
+
+        def blob_exists(self, _digest: str) -> bool:
+            return True
+
+        def upload_blob(self, _path: Path, _digest: str) -> None:
+            pass
+
+        def publish_manifest(self, _reference: str, data: bytes, _media_type: str) -> str:
+            return "sha256:" + hashlib.sha256(data).hexdigest()
+
+    publisher.client = ReusingClient()  # type: ignore[assignment]
+    result = publisher.publish(environment_id)
+    assert result.uploaded_files == 0
+    assert result.uploaded_bytes == 0
+    assert result.reused_bytes == result.total_blob_bytes
+    assert result.reuse_percent == 100
+
+
 def test_oci_truncated_blob_download_resumes_with_range(tmp_path: Path) -> None:
     data = b"large layer contents " * 512
     cut = len(data) // 3
