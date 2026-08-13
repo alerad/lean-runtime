@@ -288,6 +288,22 @@ def _packages_directory(lock: EnvironmentLock) -> PurePosixPath:
     return path
 
 
+def _bundle_lean_paths(workspace: Path, lock: EnvironmentLock) -> tuple[Path, ...]:
+    packages = workspace.joinpath(*_packages_directory(lock).parts)
+    roots: list[Path] = []
+    for package in lock.packages:
+        root = packages / package.name
+        if package.subdir:
+            root = root.joinpath(*PurePosixPath(package.subdir).parts)
+        compiled = root / ".lake" / "build" / "lib" / "lean"
+        if compiled.is_dir():
+            roots.append(compiled)
+    workspace_root = workspace / ".lake" / "build" / "lib" / "lean"
+    if workspace_root.is_dir():
+        roots.append(workspace_root)
+    return tuple(roots)
+
+
 def _extract_layer(data: bytes | Path, destination: Path) -> None:
     total = 0
     count = 0
@@ -362,7 +378,10 @@ def _source_tree_inventory(root: Path, package: LockedPackage) -> bytes:
             raise EnvironmentError(
                 f"package uses reserved runtime path {SOURCE_TREE_INVENTORY!r}: {package.name}"
             )
-        if kind != "blob" or mode not in {"100644", "100755", "120000"}:
+        supported = (kind == "blob" and mode in {"100644", "100755", "120000"}) or (
+            kind == "commit" and mode == "160000"
+        )
+        if not supported:
             raise EnvironmentError(
                 f"package has an unsupported Git tree entry {path!r}: {package.name}"
             )
@@ -430,11 +449,16 @@ def _verify_source_tree_inventory(root: Path, package: LockedPackage, path: Path
         mode = entry["mode"]
         object_id = entry["object_id"]
         if (
-            mode not in {"100644", "100755", "120000"}
+            mode not in {"100644", "100755", "120000", "160000"}
             or re.fullmatch(r"[0-9a-f]{40}", object_id) is None
         ):
             raise EnvironmentError(f"bundled package source inventory is invalid: {package.name}")
         source = root.joinpath(*PurePosixPath(source_name).parts)
+        if mode == "160000":
+            if not source.is_dir():
+                raise EnvironmentError(f"bundled package Git link mismatch: {package.name}")
+            entries.append(entry)
+            continue
         if mode == "120000":
             if not source.is_symlink():
                 raise EnvironmentError(f"bundled package source mismatch: {package.name}")
@@ -869,12 +893,16 @@ class EnvironmentBundles:
                         _verify_package(package_root, package)
                     if probe:
                         command = self.toolchains.command(
-                            lock.toolchain, "lake", "env", "lean", f"{ROOT_MODULE}.lean"
+                            lock.toolchain, "lean", f"{ROOT_MODULE}.lean"
+                        )
+                        probe_environment = self.toolchains.environment
+                        probe_environment["LEAN_PATH"] = os.pathsep.join(
+                            str(path) for path in _bundle_lean_paths(workspace, lock)
                         )
                         result = self.backend.execute(
                             command,
                             cwd=workspace,
-                            environment=self.toolchains.environment,
+                            environment=probe_environment,
                             policy=ExecutionPolicy(timeout_seconds=300, max_output_bytes=2_000_000),
                         )
                         if result.exit_code:
