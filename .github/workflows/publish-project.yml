@@ -146,6 +146,15 @@ jobs:
           with open(path, "w", encoding="utf-8") as output:
               json.dump(value, output, sort_keys=True)
               output.write("\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(
+                  "### Lean environment platform publication\n\n"
+                  f"- Platform: `{value['workflow_metrics']['platform']}`\n"
+                  f"- Elapsed: {elapsed}s\n"
+                  f"- Uploaded: {value['uploaded_bytes']:,} bytes\n"
+                  f"- Reused: {value['reused_bytes']:,} bytes "
+                  f"({value['reuse_percent']:.2f}%)\n"
+              )
           PY
       - uses: actions/upload-artifact@v7
         with:
@@ -193,6 +202,12 @@ jobs:
           value = json.load(open("publication.json", encoding="utf-8"))
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"publication_id={value['publication_id']}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(
+                  "### Final Lean environment index\n\n"
+                  f"- Lock: `{value['exact_environment_id']}`\n"
+                  f"- OCI index: `{value['publication_id']}`\n"
+              )
           PY
       - uses: actions/upload-artifact@v7
         with:
@@ -287,6 +302,16 @@ jobs:
               json.dump(report, output, sort_keys=True)
               output.write("\n")
           print(json.dumps(report, sort_keys=True))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(
+                  "### Clean consumer acceptance\n\n"
+                  f"- Platform: `{report['platform']}`\n"
+                  f"- Anonymous: `{report['anonymous']}`\n"
+                  f"- Acquisition: {report['download_seconds']}s\n"
+                  f"- Warm setup median: {setup_median:.4f}s\n"
+                  f"- Import check: {check_seconds:.3f}s\n"
+                  f"- Scratch cleaned: `{scratch_empty}`\n"
+              )
           failures = []
           if setup_median >= 0.25:
               failures.append(f"warm setup median {setup_median:.3f}s is not below 0.25s")
