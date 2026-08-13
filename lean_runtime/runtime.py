@@ -389,12 +389,22 @@ class Runtime:
                 publisher.repository, result.publication_id
             )
         if attest:
+            self.events.emit(
+                "library.attestation_started",
+                "Verifying and attesting the published environment",
+                environment_id=environment.id,
+            )
             report = self.verify(environment.id)
             report.raise_for_error()
             CosignVerifier(executable=self.verification_executable).attest(
                 publisher.repository,
                 result.publication_id or result.computer_copy_id,
                 report.to_dict(),
+            )
+            self.events.emit(
+                "library.attestation_published",
+                "Published the signed environment attestation",
+                digest=result.publication_id or result.computer_copy_id,
             )
         return result
 
@@ -593,8 +603,18 @@ class Runtime:
         )
         publication_id = publisher.publish_index(lock_id, list(computer_records), tags=tuple(tags))
         if sign:
+            self.events.emit(
+                "library.index_signing_started",
+                "Signing the finalized environment index",
+                digest=publication_id,
+            )
             CosignVerifier(executable=self.verification_executable).sign(
                 publisher.repository, publication_id
+            )
+            self.events.emit(
+                "library.index_signed",
+                "Signed the finalized environment index",
+                digest=publication_id,
             )
         return publication_id
 

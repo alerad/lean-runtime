@@ -13,6 +13,8 @@
   libraries produce concise invocation errors instead of Python tracebacks.
 - Report total, uploaded, and remotely reused OCI blob bytes (plus the reuse
   percentage) in every environment publication result.
+- Emit visible progress for bundle export, blob upload/reuse, platform
+  manifests, attestations, and final index signing during long publications.
 
 ## 2.2.0 - 2026-08-12
 

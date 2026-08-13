@@ -607,7 +607,19 @@ class OCIEnvironmentPublisher:
         with tempfile.TemporaryDirectory(prefix="lean-runtime-publish-") as temporary:
             temporary_root = Path(temporary)
             bundle_path = temporary_root / "environment.oci.tar.gz"
+            self.events.emit(
+                "library.bundle_export_started",
+                "Exporting and verifying the environment bundle",
+                environment_id=environment_id,
+                registry=self.repository.display,
+            )
             bundle_info = self.bundles.export(environment_id, bundle_path)
+            self.events.emit(
+                "library.bundle_ready",
+                "Environment bundle is ready for publication",
+                environment_id=environment_id,
+                compressed_bytes=bundle_path.stat().st_size,
+            )
             layout_root = temporary_root / "layout"
             entries = self.bundles._extract_oci_archive(bundle_path, layout_root)
             index_path = entries.get("index.json")
@@ -646,14 +658,32 @@ class OCIEnvironmentPublisher:
                     raise EnvironmentError("exported OCI blob descriptor has an invalid size")
                 total_blob_bytes += size
                 existed = self.client.blob_exists(digest)
+                self.events.emit(
+                    "library.layer_reused" if existed else "library.layer_upload_started",
+                    "Reusing remote OCI blob" if existed else "Uploading OCI blob",
+                    digest=digest,
+                    size=size,
+                )
                 self.client.upload_blob(blob, digest)
                 uploaded += int(not existed)
                 uploaded_bytes += 0 if existed else size
+                if not existed:
+                    self.events.emit(
+                        "library.layer_uploaded",
+                        "Uploaded OCI blob",
+                        digest=digest,
+                        size=size,
+                    )
             manifest_digest = self.client.publish_manifest(
                 str(manifest_descriptor["digest"]), manifest_data, MANIFEST_MEDIA_TYPE
             )
             if manifest_digest != manifest_descriptor["digest"]:
                 raise EnvironmentError("published platform manifest digest changed")
+            self.events.emit(
+                "library.platform_manifest_published",
+                "Published the computer-specific OCI manifest",
+                digest=manifest_digest,
+            )
             if tags and not finalize:
                 raise ValueError("tags can only be published while finalizing an OCI index")
             index_digest = (
