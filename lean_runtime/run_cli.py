@@ -8,6 +8,7 @@ import sys
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from .console import ConsoleRenderer
 from .discovery import (
@@ -23,7 +24,7 @@ from .events import RuntimeEvent
 from .frontmatter import LeanFrontmatter, parse_frontmatter
 from .lockfiles import EnvironmentLock
 from .models import ExecutionResult, PhaseTiming
-from .policies import ExecutionPolicy
+from .policies import ExecutionPolicy, format_byte_size, parse_byte_size
 from .projects import discover_project
 from .runtime import Runtime
 from .timings import render_timings
@@ -78,6 +79,17 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--quiet", action="store_true")
     root.add_argument(
         "--verbose", action="store_true", help="show every runtime event while preparing"
+    )
+    root.add_argument(
+        "--max-download",
+        type=parse_byte_size,
+        metavar="SIZE",
+        help="fail instead of downloading more than SIZE (e.g. 500MiB)",
+    )
+    root.add_argument(
+        "--plan",
+        action="store_true",
+        help="report the acquisition cost without downloading or checking",
     )
     root.add_argument(
         "--explain", action="store_true", help="explain context selection without running"
@@ -194,6 +206,77 @@ def _emit(
         print(render_timings(result.timings))
 
 
+def _plan_lock(
+    arguments: argparse.Namespace,
+    context: LeanFrontmatter,
+    source: str,
+    source_path: Path,
+) -> tuple[EnvironmentLock, str | None]:
+    """Select the exact lock whose acquisition cost --plan should report."""
+    if context.requires or context.toolchain is not None:
+        raise SpecificationError(
+            "--plan supports an exact lock or automatic discovery; explicit dependencies "
+            "need Lake resolution first (run once with --lock-out, then plan the lock)"
+        )
+    if context.lock is not None:
+        path = _lock_path(context.lock, source_path, embedded=arguments.lock is None)
+        return EnvironmentLock.load(path), None
+    try:
+        project = discover_project(source_path)
+    except ProjectError:
+        plan = Discovery(
+            catalog=_catalog(arguments.catalog),
+            policy=_discovery_policy(arguments),
+        ).plan(source)
+        if not plan.candidates:
+            raise SpecificationError(
+                "no plausible catalog candidate for this file; nothing to plan"
+            ) from None
+        candidate = plan.candidates[0]
+        return candidate.entry.lock, candidate.entry.id
+    raise SpecificationError(f"--plan is not supported inside a Lake project: {project.root}")
+
+
+def _render_plan(report: dict[str, Any], *, as_json: bool) -> None:
+    if as_json:
+        print(
+            json.dumps(
+                envelope("lean-runtime.plan/v1", ok=True, data=dict(report)),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+    subject = report.get("candidate") or report.get("lock_id")
+    print(f"Environment: {subject} · {report['toolchain']}")
+    print(f"Environment ready locally: {'yes' if report['environment_ready'] else 'no'}")
+    print(f"Toolchain installed: {'yes' if report['toolchain_installed'] else 'no'}")
+    download = report["download_bytes"]
+    libraries = report.get("libraries") or []
+    if report["environment_ready"]:
+        print("Download required: none")
+    elif isinstance(download, int):
+        selected = next(item for item in libraries if item.get("available"))
+        cached = selected.get("cached_bytes", 0)
+        suffix = (
+            f" ({format_byte_size(cached)} already cached)"
+            if isinstance(cached, int) and cached > 0
+            else ""
+        )
+        print(f"Download required: {format_byte_size(download)}{suffix}")
+        print(f"Library: {selected['library']}")
+    else:
+        detail = ""
+        if isinstance(libraries, list) and libraries:
+            detail = f" ({libraries[0].get('error', 'no library responded')})"
+        print(f"Download required: unknown{detail}")
+    limit = report.get("max_download_bytes")
+    if isinstance(limit, int):
+        allowed = not isinstance(download, int) or download <= limit
+        print(f"Download limit: {format_byte_size(limit)} ({'ok' if allowed else 'exceeded'})")
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = parser().parse_args(argv)
     source_path = arguments.file.expanduser().resolve()
@@ -271,6 +354,18 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(f"Context: {selected}\nSelected: {detail}")
             return 0
+        if arguments.plan:
+            lock, candidate_id = _plan_lock(arguments, context, source, source_path)
+            runtime = Runtime(
+                home=arguments.home,
+                max_download_bytes=arguments.max_download,
+                libraries=() if arguments.offline else None,
+            )
+            report = runtime.plan_exact(lock)
+            if candidate_id is not None:
+                report["candidate"] = candidate_id
+            _render_plan(report, as_json=arguments.json)
+            return 0
         preparation_started = time.monotonic()
         runtime_events: list[RuntimeEvent] = []
 
@@ -290,6 +385,7 @@ def main(argv: list[str] | None = None) -> int:
             on_event=observe,
             availability=availability,
             libraries=() if arguments.offline else None,
+            max_download_bytes=arguments.max_download,
         )
         policy = ExecutionPolicy(timeout_seconds=arguments.check_timeout)
         if context.lock is not None:

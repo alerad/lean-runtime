@@ -15,7 +15,13 @@ from pathlib import Path
 
 import pytest
 
-from lean_runtime import EnvironmentError, EnvironmentLock, LockedPackage, Runtime
+from lean_runtime import (
+    DownloadLimitExceeded,
+    EnvironmentError,
+    EnvironmentLock,
+    LockedPackage,
+    Runtime,
+)
 from lean_runtime.bundles import SOURCE_TREE_INVENTORY, _extract_layer, _oci_archive
 from lean_runtime.environments import ENVIRONMENT_SCHEMA
 from lean_runtime.events import EventEmitter
@@ -594,3 +600,106 @@ def test_oci_truncated_blob_download_resumes_with_range(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_acquisition_plan_and_download_limit(tmp_path: Path) -> None:
+    producer, environment_id, lock = _published_runtime(tmp_path / "producer")
+    bundle = tmp_path / "environment.oci.tar.gz"
+    producer.save_portable_copy(environment_id, bundle)
+    entries = _archive_entries(bundle)
+    index = json.loads(entries["index.json"])
+    manifest_digest = index["manifests"][0]["digest"]
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            prefix = "/v2/owner/cache/manifests/"
+            blob_prefix = "/v2/owner/cache/blobs/"
+            if self.path == prefix + lock.lock_id:
+                self._send(entries["index.json"], "application/vnd.oci.image.index.v1+json")
+                return
+            if self.path == prefix + urllib.parse.quote(manifest_digest, safe=":"):
+                self._send(
+                    entries["blobs/sha256/" + manifest_digest.removeprefix("sha256:")],
+                    "application/vnd.oci.image.manifest.v1+json",
+                )
+                return
+            if self.path.startswith(blob_prefix):
+                digest = self.path.removeprefix(blob_prefix)
+                data = entries.get("blobs/sha256/" + digest.removeprefix("sha256:"))
+                if data is not None:
+                    self._send(data, "application/octet-stream")
+                    return
+            self.send_response(404)
+            self.end_headers()
+
+        def _send(self, data: bytes, content_type: str) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Docker-Content-Digest", "sha256:" + hashlib.sha256(data).hexdigest())
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    cache = f"oci+http://127.0.0.1:{server.server_port}/owner/cache"
+    try:
+        consumer_home = tmp_path / "consumer"
+        events = []
+        limited = Runtime(
+            toolchains=_FakeToolchains(consumer_home),  # type: ignore[arg-type]
+            availability="auto",
+            libraries=[cache],
+            max_download_bytes=1,
+            on_event=events.append,
+        )
+        report = limited.plan_exact(lock)
+        assert report["environment_ready"] is False
+        assert isinstance(report["download_bytes"], int) and report["download_bytes"] > 1
+        assert report["libraries"][0]["available"] is True
+        assert report["libraries"][0]["cached_bytes"] == 0
+        assert report["max_download_bytes"] == 1
+
+        with pytest.raises(DownloadLimitExceeded, match="above the configured limit"):
+            limited.open_exact(lock)
+        # a policy failure must not silently fall back to a source build
+        kinds = {event.kind for event in events}
+        assert "acquisition.planned" in kinds
+        assert "environment.build_started" not in kinds
+
+        consumer = Runtime(
+            toolchains=_FakeToolchains(consumer_home),  # type: ignore[arg-type]
+            availability="required",
+            libraries=[cache],
+            max_download_bytes=10**12,
+        )
+        assert consumer.open_exact(lock).id == environment_id
+        after = consumer.plan_exact(lock)
+        assert after["environment_ready"] is True
+        assert after["download_bytes"] == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_open_exact_announces_source_build_capability(tmp_path: Path, monkeypatch) -> None:
+    producer, _environment_id, lock = _published_runtime(tmp_path / "producer")
+    events = []
+    runtime = Runtime(
+        toolchains=_FakeToolchains(tmp_path / "consumer"),  # type: ignore[arg-type]
+        availability="auto",
+        libraries=["oci+http://127.0.0.1:1/owner/cache"],
+        on_event=events.append,
+    )
+    sentinel = object()
+    monkeypatch.setattr(runtime.environments, "ensure", lambda _lock, **_kw: sentinel)
+    assert runtime.open_exact(lock) is sentinel
+    kinds = [event.kind for event in events]
+    assert "availability.fallback" in kinds
+    required = next(event for event in events if event.kind == "capability.required")
+    assert required.data["capability"] == "source_build"
