@@ -107,7 +107,9 @@ def _tree_entries(root: Path, excluded: Path | None = None) -> Iterable[tuple[Pa
 def _write_tar_gzip(root: Path, output: Path, *, excluded: Path | None = None) -> None:
     with (
         output.open("wb") as raw_output,
-        gzip.GzipFile(filename="", mode="wb", fileobj=raw_output, mtime=0) as compressed,
+        gzip.GzipFile(
+            filename="", mode="wb", fileobj=raw_output, compresslevel=6, mtime=0
+        ) as compressed,
         tarfile.open(fileobj=compressed, mode="w|", format=tarfile.PAX_FORMAT) as archive,
     ):
         for path, name in _tree_entries(root, excluded):
@@ -146,7 +148,9 @@ def _oci_archive(entries: dict[str, bytes]) -> bytes:
             info.size = len(data)
             archive.addfile(info, io.BytesIO(data))
     output = io.BytesIO()
-    with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as compressed:
+    with gzip.GzipFile(
+        filename="", mode="wb", fileobj=output, compresslevel=6, mtime=0
+    ) as compressed:
         compressed.write(raw.getvalue())
     return output.getvalue()
 
@@ -154,7 +158,9 @@ def _oci_archive(entries: dict[str, bytes]) -> bytes:
 def _write_oci_archive(entries: dict[str, Path], output: Path) -> None:
     with (
         output.open("wb") as raw_output,
-        gzip.GzipFile(filename="", mode="wb", fileobj=raw_output, mtime=0) as compressed,
+        gzip.GzipFile(
+            filename="", mode="wb", fileobj=raw_output, compresslevel=6, mtime=0
+        ) as compressed,
         tarfile.open(fileobj=compressed, mode="w|", format=tarfile.PAX_FORMAT) as archive,
     ):
         for name, path in sorted(entries.items()):

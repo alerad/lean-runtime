@@ -17,6 +17,9 @@
   manifests, attestations, and final index signing during long publications.
 - Publish from the verified OCI layout directly, avoiding the redundant outer
   gzip archive and immediate re-extraction previously performed before upload.
+- Compress deterministic OCI layers at gzip level 6 instead of Python's
+  level-9 default; a representative Mathlib subtree encoded about eight times
+  faster for roughly two percent more bytes.
 
 ## 2.2.0 - 2026-08-12
 
