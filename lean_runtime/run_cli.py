@@ -9,6 +9,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+from .console import ConsoleRenderer
 from .discovery import (
     Catalog,
     Discovery,
@@ -27,31 +28,6 @@ from .projects import discover_project
 from .runtime import Runtime
 from .timings import render_timings
 from .wire import envelope, error, serialize_execution_v1
-
-
-def _progress(event: RuntimeEvent) -> None:
-    messages = {
-        "package_reference.started": "Resolving dependency",
-        "library.lookup": "Looking for a cached environment",
-        "library.layer_download_started": "Downloading cached environment",
-        "library.layer_download_retry": "Retrying cached-environment download",
-        "toolchain.install_started": "Installing Lean toolchain (a first run can take minutes)",
-        "environment.build_started": "Building environment from source (large dependencies "
-        "such as Mathlib can take 30+ minutes; pass --no-source-build to fail fast instead)",
-        "environment.cache_hit": "Using local environment",
-    }
-    if event.kind == "availability.fallback":
-        library = event.data.get("library", "environment library")
-        reason = event.data.get("reason_code") or event.data.get("reason") or "unavailable"
-        print(
-            f"lean-run: WARNING: downloadable environment unavailable from {library} ({reason})",
-            file=sys.stderr,
-        )
-        return
-    message = messages.get(event.kind)
-    if message:
-        package = f" {event.data['reference']}" if "reference" in event.data else ""
-        print(f"lean-run: {message}{package}", file=sys.stderr)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -94,7 +70,15 @@ def parser() -> argparse.ArgumentParser:
     )
     root.add_argument("--home", help="runtime store root")
     root.add_argument("--json", action="store_true")
+    root.add_argument(
+        "--json-events",
+        action="store_true",
+        help="stream runtime lifecycle events to stderr as JSON lines",
+    )
     root.add_argument("--quiet", action="store_true")
+    root.add_argument(
+        "--verbose", action="store_true", help="show every runtime event while preparing"
+    )
     root.add_argument(
         "--explain", action="store_true", help="explain context selection without running"
     )
@@ -213,6 +197,10 @@ def _emit(
 def main(argv: list[str] | None = None) -> int:
     arguments = parser().parse_args(argv)
     source_path = arguments.file.expanduser().resolve()
+    renderer = ConsoleRenderer(
+        mode="quiet" if arguments.quiet or arguments.json else None,
+        verbose=arguments.verbose,
+    )
     try:
         source = source_path.read_text(encoding="utf-8")
         embedded = parse_frontmatter(source)
@@ -288,8 +276,11 @@ def main(argv: list[str] | None = None) -> int:
 
         def observe(event: RuntimeEvent) -> None:
             runtime_events.append(event)
-            if not arguments.quiet and not arguments.json:
-                _progress(event)
+            if arguments.json_events:
+                print(
+                    json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True), file=sys.stderr
+                )
+            renderer(event)
 
         availability = (
             "local" if arguments.offline else ("required" if arguments.no_source_build else "auto")
@@ -350,8 +341,7 @@ def main(argv: list[str] | None = None) -> int:
                         "the file has no execution context; add frontmatter, pass --with or "
                         "--toolchain, provide --lock, or place it in a pinned Lake project"
                     ) from None
-                if not arguments.quiet and not arguments.json:
-                    print("lean-run: Discovering an exact environment", file=sys.stderr)
+                renderer.note("Discovering an exact environment")
                 discovery_started = time.monotonic()
                 discovered = Discovery(
                     catalog=_catalog(arguments.catalog),
@@ -374,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
         if context.lock is not None or context.toolchain is not None or not context.requires:
             result = replace(result, timings=(preparation, *result.timings))
+        renderer.close()
         _emit(
             result,
             as_json=arguments.json,
@@ -383,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0 if result.ok else 1
     except (DiscoveryError, LeanRuntimeError, OSError, UnicodeError, ValueError) as exc:
+        renderer.close()
         if arguments.json:
             print(
                 json.dumps(

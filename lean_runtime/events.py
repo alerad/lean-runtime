@@ -16,9 +16,16 @@ class RuntimeEvent:
     message: str
     data: dict[str, Any] = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    phase: str | None = None
+    current_bytes: int | None = None
+    total_bytes: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        for key in ("phase", "current_bytes", "total_bytes"):
+            if value[key] is None:
+                del value[key]
+        return value
 
 
 EventCallback = Callable[[RuntimeEvent], None]
@@ -30,6 +37,24 @@ class EventEmitter:
     def __init__(self, callback: EventCallback | None = None) -> None:
         self.callback = callback
 
-    def emit(self, kind: str, message: str, **data: Any) -> None:
+    def emit(
+        self,
+        kind: str,
+        message: str,
+        *,
+        phase: str | None = None,
+        current_bytes: int | None = None,
+        total_bytes: int | None = None,
+        **data: Any,
+    ) -> None:
         if self.callback is not None:
-            self.callback(RuntimeEvent(kind=kind, message=message, data=data))
+            self.callback(
+                RuntimeEvent(
+                    kind=kind,
+                    message=message,
+                    data=data,
+                    phase=phase,
+                    current_bytes=current_bytes,
+                    total_bytes=total_bytes,
+                )
+            )
