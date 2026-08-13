@@ -114,7 +114,11 @@ def _tree_entries(
         if (
             omit_volatile_build_metadata
             and ".lake" in relative.parts
-            and (relative.name.endswith(".trace") or relative.name.endswith(".setup.json"))
+            and (
+                relative.name.endswith(".trace")
+                or relative.name.endswith(".setup.json")
+                or relative.name.endswith(".rsp")
+            )
         ):
             continue
         yield path, relative.as_posix()

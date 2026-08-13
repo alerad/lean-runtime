@@ -193,12 +193,15 @@ def test_bundle_export_is_deterministic_and_imports_into_fresh_store(tmp_path: P
     (package / ".lake" / "build" / "ir" / "Sample.setup.json").write_text(
         '{"workspace":"/tmp/build-one"}\n'
     )
+    (package / ".lake" / "build" / "bin").mkdir(parents=True, exist_ok=True)
+    (package / ".lake" / "build" / "bin" / "sample.rsp").write_text("/tmp/build-one\n")
     info = producer.save_portable_copy(environment_id, first)
     (package / ".git" / "logs" / "nondeterministic-export-state").write_text("changed\n")
     (package / ".lake" / "build" / "lib" / "lean" / "Sample.trace").write_text("/tmp/build-two\n")
     (package / ".lake" / "build" / "ir" / "Sample.setup.json").write_text(
         '{"workspace":"/tmp/build-two"}\n'
     )
+    (package / ".lake" / "build" / "bin" / "sample.rsp").write_text("/tmp/build-two\n")
     producer.save_portable_copy(environment_id, second)
 
     assert first.read_bytes() == second.read_bytes()

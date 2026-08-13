@@ -24,7 +24,7 @@
   a verified deterministic source-tree inventory instead. Identical dependency
   trees now produce identical blobs across clean builders, so OCI reuse works
   across project revisions rather than only within one local environment.
-- Omit Lake's path-sensitive `.trace` and `.setup.json` build metadata from
+- Omit Lake's path-sensitive `.trace`, `.setup.json`, and response-file metadata from
   check-profile layers. Lean checks use the retained compiled artifacts, while
   clean builders no longer invalidate multi-gigabyte blobs solely because their
   temporary workspace paths differ.
