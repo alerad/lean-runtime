@@ -40,7 +40,8 @@ def test_verification_probe_uses_environment_check_not_lake() -> None:
     _probe(environment)  # type: ignore[arg-type]
 
     assert environment.observed_source == f"import {ROOT_MODULE}\n"
-    assert environment.observed_filename == f"{ROOT_MODULE}.lean"
+    assert environment.observed_filename == "LeanRuntimeVerification.lean"
+    assert environment.observed_filename != f"{ROOT_MODULE}.lean"
 
 
 def test_verification_probe_surfaces_compiler_failure() -> None:

@@ -70,7 +70,10 @@ def _probe(environment: Environment) -> None:
 
     result = environment.check(
         f"import {ROOT_MODULE}\n",
-        filename=f"{ROOT_MODULE}.lean",
+        # The generated environment module itself is named ROOT_MODULE.  Giving
+        # the probe that filename would make Lean see `import X` inside X and
+        # correctly reject it as an import cycle.
+        filename="LeanRuntimeVerification.lean",
         policy=ExecutionPolicy(timeout_seconds=300, max_output_bytes=2_000_000),
     )
     if not result.ok:
