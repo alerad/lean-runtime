@@ -44,7 +44,7 @@ on:
       warm-check-budget-seconds:
         description: Maximum warm import-check seconds
         required: false
-        default: 60
+        default: 300
         type: number
 
 permissions:
