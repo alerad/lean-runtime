@@ -42,9 +42,14 @@ permissions:
   packages: write
   id-token: write
 
+concurrency:
+  group: lean-runtime-publish-${{ github.repository }}-${{ inputs.library }}
+  cancel-in-progress: false
+
 jobs:
   resolve:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     outputs:
       lock-id: ${{ steps.lock.outputs.lock_id }}
       revision: ${{ steps.lock.outputs.revision }}
@@ -101,6 +106,7 @@ jobs:
           - os: macos-15
             platform: macos-arm64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v6
         with:
@@ -150,6 +156,7 @@ jobs:
   finalize:
     needs: [resolve, platform]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       publication-id: ${{ steps.finalize.outputs.publication_id }}
     steps:
@@ -205,6 +212,7 @@ jobs:
           - os: macos-15
             platform: macos-arm64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
         with:
