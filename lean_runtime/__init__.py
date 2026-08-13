@@ -13,6 +13,7 @@ from .environments import (
     InteractiveSession,
 )
 from .errors import (
+    DownloadLimitExceeded,
     DownloadUnavailable,
     EnvironmentError,
     LeanCheckError,
@@ -76,6 +77,7 @@ __all__ = [
     "ComparisonEntry",
     "PortableCopyInfo",
     "DownloadCleanupReport",
+    "DownloadLimitExceeded",
     "DEFAULT_ENVIRONMENT_LIBRARIES",
     "DependencyInput",
     "DiscoveredPackage",

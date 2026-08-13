@@ -64,6 +64,15 @@ class DownloadUnavailable(EnvironmentError):
     """A prebuilt cache had no usable artifact or could not be reached."""
 
 
+class DownloadLimitExceeded(EnvironmentError):
+    """An acquisition needs more bytes than the configured download limit.
+
+    Deliberately not a :class:`DownloadUnavailable`: exceeding a policy limit
+    must fail the operation instead of silently falling back to another
+    library or a source build.
+    """
+
+
 class MaterializationError(EnvironmentError):
     """Locked sources or build artifacts could not be materialized."""
 
