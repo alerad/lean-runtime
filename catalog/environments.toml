@@ -50,7 +50,10 @@ created_at = "2026-05-26T18:25:31Z"
 id = "leancert-v4.30.0.5"
 channel = "stable"
 lock = "locks/leancert-v4.30.0.5.lock.json"
-references = ["github:alerad/leancert@v4.30.0.5"]
+references = [
+  "github:alerad/leancert@v4.30.0.5",
+  "github:leanprover-community/mathlib4@v4.30.0",
+]
 inventory_packages = ["LeanCert", "mathlib"]
 library_hints = []
 created_at = "2026-06-14T03:06:27Z"
@@ -59,7 +62,10 @@ created_at = "2026-06-14T03:06:27Z"
 id = "leancert-v4.31.0"
 channel = "stable"
 lock = "locks/leancert-v4.31.0.lock.json"
-references = ["github:alerad/leancert@v4.31.0"]
+references = [
+  "github:alerad/leancert@v4.31.0",
+  "github:leanprover-community/mathlib4@v4.31.0",
+]
 inventory_packages = ["LeanCert", "mathlib"]
 library_hints = []
 created_at = "2026-06-18T16:14:44Z"
@@ -68,7 +74,10 @@ created_at = "2026-06-18T16:14:44Z"
 id = "leancert-v4.32.2.4"
 channel = "stable"
 lock = "locks/leancert-v4.32.2.4.lock.json"
-references = ["github:alerad/leancert@v4.32.2.4"]
+references = [
+  "github:alerad/leancert@v4.32.2.4",
+  "github:leanprover-community/mathlib4@v4.32.2",
+]
 inventory_packages = ["LeanCert", "mathlib"]
 library_hints = []
 created_at = "2026-08-01T10:49:16Z"
@@ -77,7 +86,10 @@ created_at = "2026-08-01T10:49:16Z"
 id = "leancert-v4.33.0"
 channel = "stable"
 lock = "locks/leancert-v4.33.0.lock.json"
-references = ["github:alerad/leancert@v4.33.0"]
+references = [
+  "github:alerad/leancert@v4.33.0",
+  "github:leanprover-community/mathlib4@v4.33.0",
+]
 inventory_packages = ["LeanCert", "mathlib"]
 library_hints = []
 created_at = "2026-08-10T22:05:27Z"
