@@ -37,7 +37,7 @@ from .oci import (
     OCIRepository,
     PublicationInfo,
 )
-from .policies import ExecutionPolicy
+from .policies import ExecutionPolicy, parse_byte_size
 from .profiling import ProfileReport, run_profile
 from .programs import ProgramInfo, ProgramLibrary, ProgramManager, ReadyProgram
 from .projects import (
@@ -142,6 +142,7 @@ class Runtime:
         on_event: EventCallback | None = None,
         availability: str | None = None,
         libraries: Sequence[str] | None = None,
+        max_download_bytes: int | None = None,
         publisher_verification: str = "ignore",
         trusted_publisher: str | None = None,
         trusted_issuer: str | None = None,
@@ -150,6 +151,12 @@ class Runtime:
         availability = availability or os.environ.get("LEAN_RUNTIME_AVAILABILITY", "auto")
         if availability not in {"auto", "required", "local"}:
             raise ValueError("availability must be 'auto', 'required', or 'local'")
+        if max_download_bytes is None:
+            configured_limit = os.environ.get("LEAN_RUNTIME_MAX_DOWNLOAD")
+            if configured_limit:
+                max_download_bytes = parse_byte_size(configured_limit)
+        if max_download_bytes is not None and max_download_bytes < 0:
+            raise ValueError("max_download_bytes must be nonnegative")
         if publisher_verification not in {"ignore", "required"}:
             raise ValueError("publisher_verification must be 'ignore' or 'required'")
         if publisher_verification == "required" and (not trusted_publisher or not trusted_issuer):
@@ -176,6 +183,7 @@ class Runtime:
                 else DEFAULT_ENVIRONMENT_LIBRARIES
             )
         self.availability = availability
+        self.max_download_bytes = max_download_bytes
         self.verification_executable = verification_tool
         self.signature_verifier = (
             CosignVerifier(trusted_publisher, trusted_issuer, executable=verification_tool)
@@ -189,6 +197,7 @@ class Runtime:
                 self.bundles,
                 self.events,
                 self.signature_verifier,
+                max_download_bytes=max_download_bytes,
             )
             for value in configured_libraries
         )
@@ -243,6 +252,13 @@ class Runtime:
                     "no compatible downloadable environment was found; availability=required "
                     "does not permit a source build." + nearest
                 )
+            if not imported:
+                self.events.emit(
+                    "capability.required",
+                    "No downloadable environment is available; building from source",
+                    capability="source_build",
+                    environment_id=environment_id,
+                )
         return self.environments.ensure(
             lock,
             name=name,
@@ -251,6 +267,51 @@ class Runtime:
             accelerate=accelerate,
             cancel=cancel,
         )
+
+    def plan_exact(
+        self, lock: EnvironmentLock, *, build_profile: str = "release"
+    ) -> dict[str, Any]:
+        """Report what opening a lock would cost, without acquiring anything."""
+        environment_id = environment_identity(lock, build_profile)
+        ready = self.store.environment_path(environment_id).is_dir()
+        libraries: list[dict[str, Any]] = []
+        download_bytes: int | None = 0 if ready else None
+        if not ready:
+            for library in self.libraries:
+                try:
+                    plan = dict(library.plan(lock))
+                except EnvironmentError as exc:
+                    libraries.append(
+                        {
+                            "library": library.repository.display,
+                            "available": False,
+                            "error": str(exc),
+                        }
+                    )
+                    continue
+                plan["available"] = True
+                libraries.append(plan)
+                if download_bytes is None:
+                    download_bytes = int(plan["download_bytes"])
+        return {
+            "lock_id": lock.lock_id,
+            "toolchain": lock.toolchain,
+            "environment_id": environment_id,
+            "environment_ready": ready,
+            "toolchain_installed": self._toolchain_installed(lock.toolchain),
+            "max_download_bytes": self.max_download_bytes,
+            "download_bytes": download_bytes,
+            "libraries": libraries,
+        }
+
+    def _toolchain_installed(self, toolchain: str) -> bool:
+        """Answer without bootstrapping Elan or installing anything."""
+        try:
+            self.toolchains.elan_path(bootstrap=False)
+            return self.toolchains.is_installed(toolchain)
+        except (AttributeError, ToolchainError):
+            # AttributeError: duck-typed toolchain managers without Elan.
+            return False
 
     def environment(self, identifier: str) -> Environment:
         """Open a published environment without resolution or network access."""

@@ -327,3 +327,97 @@ def test_lean_run_streams_json_events(monkeypatch, tmp_path: Path, capsys) -> No
     assert {event["kind"] for event in events} == {"package_reference.started"}
     assert events[0]["data"] == {"reference": "mathlib@v4.32.2"}
     assert json.loads(captured.out)["ok"] is True
+
+
+def _plan_report() -> dict:
+    return {
+        "lock_id": "lock_" + "a" * 64,
+        "toolchain": "leanprover/lean4:v4.32.0",
+        "environment_id": "env_" + "b" * 64,
+        "environment_ready": False,
+        "toolchain_installed": True,
+        "max_download_bytes": 500 * 2**20,
+        "download_bytes": 600 * 2**20,
+        "libraries": [
+            {
+                "library": "oci://ghcr.io/owner/cache",
+                "available": True,
+                "total_bytes": 700 * 2**20,
+                "cached_bytes": 100 * 2**20,
+                "download_bytes": 600 * 2**20,
+            }
+        ],
+    }
+
+
+class PlanningRuntime(FakeRuntime):
+    def plan_exact(self, lock) -> dict:
+        self.calls.append(("plan", lock))
+        return _plan_report()
+
+
+def test_lean_run_plan_reports_costs_without_checking(monkeypatch, tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text(
+        '-- /// lean-runtime\n-- lock = "environment.lock.json"\n-- ///\n'
+        "example : True := by trivial\n"
+    )
+    expected = object()
+    monkeypatch.setattr("lean_runtime.run_cli.EnvironmentLock.load", lambda _path: expected)
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", PlanningRuntime)
+    assert main([str(source), "--plan", "--max-download", "500MiB"]) == 0
+    output = capsys.readouterr().out
+    assert "Environment ready locally: no" in output
+    assert "Download required: 600 MiB (100 MiB already cached)" in output
+    assert "Library: oci://ghcr.io/owner/cache" in output
+    assert "Download limit: 500 MiB (exceeded)" in output
+    assert PlanningRuntime.instance.calls == [("plan", expected)]
+    assert PlanningRuntime.instance.kwargs["max_download_bytes"] == 500 * 2**20
+
+
+def test_lean_run_plan_emits_json_envelope(monkeypatch, tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text(
+        '-- /// lean-runtime\n-- lock = "environment.lock.json"\n-- ///\n'
+        "example : True := by trivial\n"
+    )
+    monkeypatch.setattr("lean_runtime.run_cli.EnvironmentLock.load", lambda _path: object())
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", PlanningRuntime)
+    assert main([str(source), "--plan", "--json"]) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["schema"] == "lean-runtime.plan/v1"
+    assert document["ok"] is True
+    assert document["data"]["download_bytes"] == 600 * 2**20
+
+
+def test_lean_run_plan_rejects_explicit_dependencies(monkeypatch, tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text(
+        '-- /// lean-runtime\n-- requires = ["mathlib@v4.32.2"]\n-- ///\nimport Mathlib\n'
+    )
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", PlanningRuntime)
+    assert main([str(source), "--plan"]) == 2
+    assert "--plan supports an exact lock" in capsys.readouterr().err
+
+
+def test_lean_run_passes_download_limit_to_runtime(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text(
+        '-- /// lean-runtime\n-- requires = ["mathlib@v4.32.2"]\n-- ///\nimport Mathlib\n'
+    )
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
+    assert main([str(source), "--max-download", "1GiB", "--quiet"]) == 0
+    assert FakeRuntime.instance.kwargs["max_download_bytes"] == 2**30
+
+
+def test_lean_run_rejects_invalid_download_limit(monkeypatch, tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := by trivial\n")
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
+    try:
+        main([str(source), "--max-download", "lots"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("argparse should reject an invalid size")
+    assert "--max-download" in capsys.readouterr().err

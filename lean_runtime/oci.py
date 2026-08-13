@@ -21,7 +21,7 @@ from .bundles import (
     MANIFEST_MEDIA_TYPE,
     EnvironmentBundles,
 )
-from .errors import DownloadUnavailable, EnvironmentError
+from .errors import DownloadLimitExceeded, DownloadUnavailable, EnvironmentError
 from .events import EventEmitter
 from .lockfiles import EnvironmentLock
 from .locking import FileLock
@@ -417,6 +417,13 @@ def _json_object(data: bytes, label: str) -> dict[str, Any]:
     return value
 
 
+def _manifest_descriptors(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    descriptors = [manifest.get("config"), *manifest.get("layers", [])]
+    if not all(isinstance(item, dict) for item in descriptors):
+        raise EnvironmentError("OCI platform manifest is incomplete")
+    return descriptors
+
+
 def _platform_matches(descriptor: dict[str, Any]) -> bool:
     platform = descriptor.get("platform")
     if not isinstance(platform, dict):
@@ -445,15 +452,21 @@ class OCIEnvironmentCache:
         bundles: EnvironmentBundles,
         events: EventEmitter,
         verifier: SignatureVerifier | None = None,
+        *,
+        max_download_bytes: int | None = None,
     ) -> None:
         self.repository = repository
         self.store = store
         self.bundles = bundles
         self.events = events
         self.verifier = verifier
+        self.max_download_bytes = max_download_bytes
         self.client = OCIRegistryClient(repository)
 
-    def pull(self, lock: EnvironmentLock, *, name: str | None = None) -> str:
+    def _platform_manifest(
+        self, lock: EnvironmentLock
+    ) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+        """Fetch, verify, and select this platform's manifest for a lock."""
         self.events.emit(
             "library.lookup",
             "Looking up a downloadable environment",
@@ -511,9 +524,23 @@ class OCIEnvironmentCache:
             }
         else:
             raise EnvironmentError("OCI registry returned an unsupported manifest media type")
-        descriptors = [manifest.get("config"), *manifest.get("layers", [])]
-        if not all(isinstance(item, dict) for item in descriptors):
-            raise EnvironmentError("OCI platform manifest is incomplete")
+        return manifest_descriptor, manifest, manifest_data
+
+    def plan(self, lock: EnvironmentLock) -> dict[str, Any]:
+        """Report the acquisition cost of a lock without downloading blobs."""
+        _descriptor, manifest, _data = self._platform_manifest(lock)
+        descriptors = _manifest_descriptors(manifest)
+        total_bytes, cached_bytes = self._acquisition_sizes(descriptors)
+        return {
+            "library": self.repository.display,
+            "total_bytes": total_bytes,
+            "cached_bytes": cached_bytes,
+            "download_bytes": total_bytes - cached_bytes,
+        }
+
+    def pull(self, lock: EnvironmentLock, *, name: str | None = None) -> str:
+        manifest_descriptor, manifest, manifest_data = self._platform_manifest(lock)
+        descriptors = _manifest_descriptors(manifest)
         total_bytes, cached_bytes = self._acquisition_sizes(descriptors)
         download_bytes = total_bytes - cached_bytes
         self.events.emit(
@@ -527,6 +554,13 @@ class OCIEnvironmentCache:
             download_bytes=download_bytes,
             cached_bytes=cached_bytes,
         )
+        if self.max_download_bytes is not None and download_bytes > self.max_download_bytes:
+            raise DownloadLimitExceeded(
+                f"acquiring this environment downloads {format_byte_size(download_bytes)}, "
+                f"above the configured limit of {format_byte_size(self.max_download_bytes)}; "
+                "raise --max-download (or LEAN_RUNTIME_MAX_DOWNLOAD), or inspect the cost "
+                "with lean-run --plan"
+            )
         lease_digests = [
             str(manifest_descriptor["digest"]),
             *(str(descriptor["digest"]) for descriptor in descriptors),
