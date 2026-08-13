@@ -4,6 +4,7 @@ from lean_runtime.discovery import (
     AvailabilityObservation,
     Discovery,
     DiscoveryPolicy,
+    default_catalog,
 )
 
 
@@ -122,3 +123,13 @@ example : True := trivial
 def test_plan_never_claims_compilation(sample_catalog) -> None:  # type: ignore[no-untyped-def]
     payload = Discovery(catalog=sample_catalog).plan("import Mathlib\n").to_dict()
     assert payload["confidence"] == "heuristic_only"
+
+
+def test_bundled_catalog_keeps_mathlib_and_leancert_discovery_distinct() -> None:
+    discovery = Discovery(catalog=default_catalog())
+
+    mathlib = discovery.plan("import Mathlib\n")
+    leancert = discovery.plan("import LeanCert\n")
+
+    assert mathlib.candidates[0].entry.id == "mathlib-v4.33.0"
+    assert leancert.candidates[0].entry.id == "leancert-v4.33.0"
