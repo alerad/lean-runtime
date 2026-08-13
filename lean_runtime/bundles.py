@@ -414,10 +414,11 @@ class EnvironmentBundles:
                 raise EnvironmentError(f"environment package is missing: {package.name}")
             _verify_package(package_root, package)
             package_roots.append((package, package_root))
+        if output.is_symlink() or (output.exists() and not output.is_dir()):
+            raise EnvironmentError(f"OCI layout destination is not a directory: {output}")
         if output.exists() and any(output.iterdir()):
             raise EnvironmentError(f"OCI layout destination is not empty: {output}")
         output.mkdir(parents=True, exist_ok=True)
-        temporary = output / ".unused-archive"
         try:
             with tempfile.TemporaryDirectory(prefix="lean-runtime-export-") as temporary_dir:
                 staging = Path(temporary_dir)
@@ -525,8 +526,9 @@ class EnvironmentBundles:
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     if path != destination:
                         path.replace(destination)
-        finally:
-            temporary.unlink(missing_ok=True)
+        except BaseException:
+            remove_tree(output)
+            raise
         self.events.emit(
             "bundle.layout_exported",
             "Exported deterministic environment OCI layout",
