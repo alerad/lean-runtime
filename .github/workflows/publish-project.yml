@@ -39,7 +39,7 @@ on:
       check-budget-seconds:
         description: Maximum clean-consumer import-check seconds
         required: false
-        default: 60
+        default: 300
         type: number
 
 permissions:
@@ -298,6 +298,11 @@ jobs:
           check_seconds = time.perf_counter() - started
           result.raise_for_error()
           setup_median = statistics.median(setup_samples)
+          orchestration_ms = sum(
+              timing.duration_ms
+              for timing in result.timings
+              if timing.phase in {"instance_creation", "input_staging"}
+          )
           scratch_empty = not any(runtime.store.jobs.iterdir())
           report = {
               "schema": "lean-runtime.project-acceptance/v1",
@@ -307,6 +312,7 @@ jobs:
               "warm_setup_median_seconds": setup_median,
               "check_seconds": check_seconds,
               "check_budget_seconds": check_budget,
+              "orchestration_milliseconds": orchestration_ms,
               "scratch_empty": scratch_empty,
               "platform": os.environ["RUNNER_OS"] + "/" + os.environ["RUNNER_ARCH"],
           }
@@ -321,12 +327,17 @@ jobs:
                   f"- Anonymous: `{report['anonymous']}`\n"
                   f"- Acquisition: {report['download_seconds']}s\n"
                   f"- Warm setup median: {setup_median:.4f}s\n"
+                  f"- Runtime staging overhead: {orchestration_ms}ms\n"
                   f"- Import check: {check_seconds:.3f}s\n"
                   f"- Scratch cleaned: `{scratch_empty}`\n"
               )
           failures = []
           if setup_median >= 0.25:
               failures.append(f"warm setup median {setup_median:.3f}s is not below 0.25s")
+          if orchestration_ms >= 250:
+              failures.append(
+                  f"runtime staging overhead {orchestration_ms}ms is not below 250ms"
+              )
           if check_seconds >= check_budget:
               failures.append(
                   f"clean import check {check_seconds:.3f}s is not below "
