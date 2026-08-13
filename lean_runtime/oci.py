@@ -606,22 +606,27 @@ class OCIEnvironmentPublisher:
     ) -> PublicationInfo:
         with tempfile.TemporaryDirectory(prefix="lean-runtime-publish-") as temporary:
             temporary_root = Path(temporary)
-            bundle_path = temporary_root / "environment.oci.tar.gz"
+            layout_root = temporary_root / "layout"
             self.events.emit(
                 "library.bundle_export_started",
-                "Exporting and verifying the environment bundle",
+                "Exporting and verifying the environment OCI layout",
                 environment_id=environment_id,
                 registry=self.repository.display,
             )
-            bundle_info = self.bundles.export(environment_id, bundle_path)
+            bundle_info = self.bundles.export_layout(environment_id, layout_root)
             self.events.emit(
                 "library.bundle_ready",
-                "Environment bundle is ready for publication",
+                "Environment OCI layout is ready for publication",
                 environment_id=environment_id,
-                compressed_bytes=bundle_path.stat().st_size,
+                blob_bytes=sum(
+                    path.stat().st_size for path in layout_root.rglob("*") if path.is_file()
+                ),
             )
-            layout_root = temporary_root / "layout"
-            entries = self.bundles._extract_oci_archive(bundle_path, layout_root)
+            entries = {
+                path.relative_to(layout_root).as_posix(): path
+                for path in layout_root.rglob("*")
+                if path.is_file()
+            }
             index_path = entries.get("index.json")
             if index_path is None:
                 raise EnvironmentError("exported OCI layout has no index")

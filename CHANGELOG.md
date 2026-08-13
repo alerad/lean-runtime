@@ -15,6 +15,8 @@
   percentage) in every environment publication result.
 - Emit visible progress for bundle export, blob upload/reuse, platform
   manifests, attestations, and final index signing during long publications.
+- Publish from the verified OCI layout directly, avoiding the redundant outer
+  gzip archive and immediate re-extraction previously performed before upload.
 
 ## 2.2.0 - 2026-08-12
 

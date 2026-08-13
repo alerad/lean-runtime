@@ -396,7 +396,8 @@ class EnvironmentBundles:
         self.backend = backend
         self.events = events
 
-    def export(self, environment_id: str, output: Path) -> PortableCopyInfo:
+    def export_layout(self, environment_id: str, output: Path) -> PortableCopyInfo:
+        """Write verified OCI layout files without wrapping them in a second archive."""
         root = self.store.environment_path(environment_id)
         metadata = _json_object((root / "metadata.json").read_bytes(), "metadata")
         lock = self.store.load_lock(str(metadata["lock_id"]))
@@ -413,8 +414,10 @@ class EnvironmentBundles:
                 raise EnvironmentError(f"environment package is missing: {package.name}")
             _verify_package(package_root, package)
             package_roots.append((package, package_root))
-        output.parent.mkdir(parents=True, exist_ok=True)
-        temporary = output.with_name(f".{output.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        if output.exists() and any(output.iterdir()):
+            raise EnvironmentError(f"OCI layout destination is not empty: {output}")
+        output.mkdir(parents=True, exist_ok=True)
+        temporary = output / ".unused-archive"
         try:
             with tempfile.TemporaryDirectory(prefix="lean-runtime-export-") as temporary_dir:
                 staging = Path(temporary_dir)
@@ -517,6 +520,35 @@ class EnvironmentBundles:
                 layout_path.write_bytes(b'{"imageLayoutVersion":"1.0.0"}')
                 entries["index.json"] = index_path
                 entries["oci-layout"] = layout_path
+                for name, path in entries.items():
+                    destination = output.joinpath(*PurePosixPath(name).parts)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if path != destination:
+                        path.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        self.events.emit(
+            "bundle.layout_exported",
+            "Exported deterministic environment OCI layout",
+            path=str(output),
+        )
+        return PortableCopyInfo(
+            environment_id, lock.lock_id, manifest_descriptor["digest"], str(output)
+        )
+
+    def export(self, environment_id: str, output: Path) -> PortableCopyInfo:
+        """Write a deterministic portable archive from a verified direct OCI layout."""
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_name(f".{output.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            with tempfile.TemporaryDirectory(prefix="lean-runtime-layout-") as raw:
+                layout = Path(raw)
+                info = self.export_layout(environment_id, layout)
+                entries = {
+                    path.relative_to(layout).as_posix(): path
+                    for path in layout.rglob("*")
+                    if path.is_file()
+                }
                 _write_oci_archive(entries, temporary)
             temporary.replace(output)
         finally:
@@ -525,7 +557,10 @@ class EnvironmentBundles:
             "bundle.exported", "Exported deterministic environment bundle", path=str(output)
         )
         return PortableCopyInfo(
-            environment_id, lock.lock_id, manifest_descriptor["digest"], str(output)
+            info.environment_id,
+            info.exact_environment_id,
+            info.copy_id,
+            str(output),
         )
 
     def import_bundle(
