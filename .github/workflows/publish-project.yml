@@ -37,9 +37,14 @@ on:
         default: 18000
         type: number
       check-budget-seconds:
-        description: Maximum clean-consumer import-check seconds
+        description: Maximum first clean-consumer import-check seconds
         required: false
         default: 300
+        type: number
+      warm-check-budget-seconds:
+        description: Maximum warm import-check seconds
+        required: false
+        default: 10
         type: number
 
 permissions:
@@ -256,6 +261,7 @@ jobs:
           AUTH_USERNAME: ${{ github.actor }}
           AUTH_PASSWORD: ${{ github.token }}
           CHECK_BUDGET_SECONDS: ${{ inputs.check-budget-seconds }}
+          WARM_CHECK_BUDGET_SECONDS: ${{ inputs.warm-check-budget-seconds }}
           ACCEPTANCE_RESULT: acceptance-${{ matrix.platform }}.json
         run: |
           if [[ "$REQUIRE_PUBLIC" == "true" ]]; then
@@ -289,18 +295,27 @@ jobs:
               setup_samples.append(time.perf_counter() - started)
           source = f"import {os.environ['PROJECT_MODULE']}\nexample : True := by trivial\n"
           check_budget = float(os.environ["CHECK_BUDGET_SECONDS"])
+          warm_check_budget = float(os.environ["WARM_CHECK_BUDGET_SECONDS"])
           started = time.perf_counter()
-          result = environment.check(
+          cold_result = environment.check(
               source,
               filename="Acceptance.lean",
               policy=ExecutionPolicy(timeout_seconds=check_budget),
           )
-          check_seconds = time.perf_counter() - started
-          result.raise_for_error()
+          cold_check_seconds = time.perf_counter() - started
+          cold_result.raise_for_error()
+          started = time.perf_counter()
+          warm_result = environment.check(
+              source,
+              filename="Acceptance.lean",
+              policy=ExecutionPolicy(timeout_seconds=warm_check_budget),
+          )
+          warm_check_seconds = time.perf_counter() - started
+          warm_result.raise_for_error()
           setup_median = statistics.median(setup_samples)
           orchestration_ms = sum(
               timing.duration_ms
-              for timing in result.timings
+              for timing in warm_result.timings
               if timing.phase in {"instance_creation", "input_staging"}
           )
           scratch_empty = not any(runtime.store.jobs.iterdir())
@@ -310,8 +325,10 @@ jobs:
               "lock_id": environment.lock.lock_id,
               "download_seconds": int(os.environ["DOWNLOAD_SECONDS"]),
               "warm_setup_median_seconds": setup_median,
-              "check_seconds": check_seconds,
-              "check_budget_seconds": check_budget,
+              "cold_check_seconds": cold_check_seconds,
+              "cold_check_budget_seconds": check_budget,
+              "warm_check_seconds": warm_check_seconds,
+              "warm_check_budget_seconds": warm_check_budget,
               "orchestration_milliseconds": orchestration_ms,
               "scratch_empty": scratch_empty,
               "platform": os.environ["RUNNER_OS"] + "/" + os.environ["RUNNER_ARCH"],
@@ -328,7 +345,8 @@ jobs:
                   f"- Acquisition: {report['download_seconds']}s\n"
                   f"- Warm setup median: {setup_median:.4f}s\n"
                   f"- Runtime staging overhead: {orchestration_ms}ms\n"
-                  f"- Import check: {check_seconds:.3f}s\n"
+                  f"- First import check: {cold_check_seconds:.3f}s\n"
+                  f"- Warm import check: {warm_check_seconds:.3f}s\n"
                   f"- Scratch cleaned: `{scratch_empty}`\n"
               )
           failures = []
@@ -338,10 +356,15 @@ jobs:
               failures.append(
                   f"runtime staging overhead {orchestration_ms}ms is not below 250ms"
               )
-          if check_seconds >= check_budget:
+          if cold_check_seconds >= check_budget:
               failures.append(
-                  f"clean import check {check_seconds:.3f}s is not below "
+                  f"first clean import check {cold_check_seconds:.3f}s is not below "
                   f"the {check_budget:g}s budget"
+              )
+          if warm_check_seconds >= warm_check_budget:
+              failures.append(
+                  f"warm import check {warm_check_seconds:.3f}s is not below "
+                  f"the {warm_check_budget:g}s budget"
               )
           if not scratch_empty:
               failures.append("execution scratch directory was not empty after the check")
