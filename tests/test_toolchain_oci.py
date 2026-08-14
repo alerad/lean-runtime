@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -53,3 +54,33 @@ def test_toolchain_extractor_rejects_non_zstd_input(tmp_path: Path) -> None:
     destination.mkdir()
     with pytest.raises(ToolchainError, match="could not extract"):
         _extract_layer(layer, destination)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows runners may not permit symlinks")
+def test_toolchain_layer_preserves_safe_internal_symlink(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    library = root / "lib" / "libLLVM.so.19"
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b"llvm")
+    (root / "lib" / "libLLVM-19.so").symlink_to("libLLVM.so.19")
+    layer = tmp_path / "layer.zst"
+
+    _write_layer(root, layer)
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    _extract_layer(layer, destination)
+
+    link = destination / "lib" / "libLLVM-19.so"
+    assert link.is_symlink()
+    assert os.readlink(link) == "libLLVM.so.19"
+    assert link.read_bytes() == b"llvm"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows runners may not permit symlinks")
+def test_toolchain_layer_rejects_escaping_symlink(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "lib").mkdir(parents=True)
+    (root / "lib" / "escape").symlink_to("../../outside")
+
+    with pytest.raises(ToolchainError, match="unsafe symlink"):
+        _write_layer(root, tmp_path / "layer.zst")
