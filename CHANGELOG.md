@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.6.0 - 2026-08-14
+
 - Make the local-project path a four-command workflow: `init`, `check`,
   `build`, and `update`. New projects use the newest stable cataloged Mathlib
   by default; `--core` opts out, while `--mathlib VERSION` selects a release.
