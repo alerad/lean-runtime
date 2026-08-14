@@ -9,12 +9,20 @@ its artifact cache without changing the public ``Runtime`` API.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import tempfile
 import threading
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover - exercised by the Python 3.10 CI job
+    import tomli as tomllib
+
+from .errors import ProjectError
 from .models import ExecutionResult
 from .policies import ExecutionPolicy
 from .project_sharing import project_sharing_enabled
@@ -110,6 +118,7 @@ class ProjectExecutor:
             else ("build", *targets)
         )
         command = self.runtime.toolchains.command(context.toolchain, "lake", *lake_arguments)
+        environment = self.runtime.lake_cache.environment(context)
 
         def run() -> ExecutionResult:
             return self.runtime._raw_result(
@@ -126,6 +135,7 @@ class ProjectExecutor:
                     *(("--shared",) if selected_shared else ()),
                     *targets,
                 ),
+                environment=environment,
                 cancel=cancel,
             )
 
@@ -133,3 +143,50 @@ class ProjectExecutor:
             return run()
         with self.runtime.shared_projects.build_lock(workspace, cancel=cancel):
             return run()
+
+    def check_project(
+        self,
+        context: ProjectContext,
+        *,
+        policy: ExecutionPolicy,
+        cancel: threading.Event | None = None,
+    ) -> ExecutionResult:
+        """Build local library oleans; Lake supplies ordering and module expansion."""
+        libraries = self._local_libraries(context)
+        if not libraries:
+            raise ProjectError("project declares no local Lean libraries to check")
+        targets = tuple(f"@/{name}:leanArts" for name in libraries)
+        return self.build(context, targets=targets, policy=policy, cancel=cancel)
+
+    def _local_libraries(self, context: ProjectContext) -> tuple[str, ...]:
+        """Ask Lake to normalize either configuration language, then read target names."""
+        self.runtime.home.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="lake-config-", dir=self.runtime.home) as raw:
+            output = Path(raw) / "lakefile.toml"
+            command = self.runtime.toolchains.command(
+                context.toolchain, "lake", "translate-config", "toml", str(output)
+            )
+            process = subprocess.run(
+                command,
+                cwd=context.root,
+                env=self.runtime.toolchains.environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=120,
+                check=False,
+            )
+            if process.returncode or not output.is_file():
+                detail = process.stdout.strip()
+                raise ProjectError(
+                    "Lake could not enumerate local libraries" + (f":\n{detail}" if detail else "")
+                )
+            with output.open("rb") as stream:
+                value = tomllib.load(stream)
+        libraries = value.get("lean_lib", [])
+        names = tuple(
+            str(library["name"])
+            for library in libraries
+            if isinstance(library, dict) and isinstance(library.get("name"), str)
+        )
+        return tuple(dict.fromkeys(names))

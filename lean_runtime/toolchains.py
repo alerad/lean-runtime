@@ -304,3 +304,22 @@ class ToolchainManager:
             return [str(binary), *args]
         name = self.ensure(name)
         return [str(self.elan_path()), "run", name, executable, *args]
+
+    def executable_digest(self, toolchain: str, executable: str) -> str:
+        """Hash the exact resolved executable for compatibility-cache identities."""
+        name = normalize_toolchain(toolchain)
+        full = self._elan_toolchain_dir(name)
+        if self.has_slim(name) and not full.is_dir():
+            binary = self.slim_path(name) / "bin" / executable
+        else:
+            self.ensure(name)
+            binary = full / "bin" / executable
+        if os.name == "nt" and not binary.is_file():
+            binary = binary.with_suffix(".exe")
+        if not binary.is_file():
+            raise ToolchainError(f"toolchain {name!r} does not provide {executable!r}")
+        digest = hashlib.sha256()
+        with binary.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return "sha256:" + digest.hexdigest()

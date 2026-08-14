@@ -2,8 +2,9 @@
 
 !!! note
 
-    This is an implementation design and performance gate, not a description
-    of functionality available in the current release.
+    The root-only local cache and project-wide check described below are
+    implemented. Remote mappings remain deliberately gated on strong artifact
+    verification and acquisition planning.
 
 ## Ownership
 
@@ -61,11 +62,11 @@ ProjectExecutor ─────► ordinary Lake target graph
 The cache directory must be keyed by the exact Lean toolchain identity and
 platform ABI. It must never mix artifacts across incompatible toolchains.
 
-## Experiment before implementation
+## Lake 4.33 experiment and decision
 
-Use one generated Mathlib 4.33 project and preserve the same source and shared
-dependency graph for every measurement. Measure preparation, Lake graph work,
-local compilation, and total wall time separately.
+The experiment used one generated Mathlib 4.33 project and preserved the same
+source and shared dependency graph for every measurement. The exact observed
+interface is checked into `compatibility/lake-artifact-cache-4.33.0.json`.
 
 Compare:
 
@@ -78,13 +79,21 @@ Compare:
    registered locally;
 5. warm process-cache and cold filesystem-cache runs.
 
-The experiment must use Lake commands from the resolved toolchain. It should
-record the precise target syntax that preserves all declared root outputs while
-avoiding unrelated dependency package defaults.
+The broad workspace cache was rejected: it copied about 6.5 GB of dependency
+artifacts into a second cache and an explicit `@/Library:leanArts` target still
+traversed 8,708 jobs. A root package with `enableArtifactCache = true`, combined
+with workspace-level `LAKE_ARTIFACT_CACHE=false`, cached only root artifacts
+(about 396 KB in the fixture) and restored them in about five seconds. This is
+the implemented mode.
+
+Support is detected from command behavior and help surfaces, not a parsed Lake
+version. The verdict is cached by exact toolchain identity and platform ABI.
+Verbose Lake output provides deterministic hit markers such as `restored
+artifact from cache`; timing alone is not treated as proof of a hit.
 
 ## Publication and acquisition
 
-If the experiment succeeds, environment publication should run the ordinary
+When the remaining integrity and performance gates succeed, environment publication should run the ordinary
 verified build with a Lake mappings output. Publication should bind the mapping
 digest to the same exact source revision, complete Lake graph, toolchain, and
 platform record as the capsule.
@@ -99,6 +108,14 @@ Acquisition should:
 4. fail explicitly on corrupt mappings or artifacts instead of silently
    treating them as verified environment content;
 5. permit an ordinary source build when policy allows it.
+
+Lake recomputes its artifact hash after a remote fetch, but that hash is not a
+cryptographic integrity boundary. Lean Runtime therefore does not currently
+register remote mappings. A future remote adapter must bind a SHA-256 artifact
+inventory into the verified OCI record, verify every restored artifact, emit
+`acquisition.planned`, and charge all bytes against `max_download_bytes` before
+registration. Until then, remote object storage would be inside the trust
+boundary and is rejected.
 
 OCI remains the environment and provenance distribution format. Lake's cache
 format remains the build-cache contract. Translation between them belongs in a
@@ -122,9 +139,16 @@ custom Lean options, Mathlib plus LeanCert, a supported custom facet, an
 unsupported cache entry, corrupted cache content, and concurrent projects using
 the same cache.
 
-If explicit targets and the native cache meet the budgets, no specialized
-builder should be added. If Lake still spends most of a minute traversing
-verified upstream artifacts, add project-wide `check` as the fast proof
-workflow and pursue an opaque-prebuilt-dependency optimization in Lake. A
-specialized local-module checker is a last resort and must be called `check`,
-not `build`.
+The scheduled compatibility workflow runs the root-cache correctness and
+timing gate on macOS ARM and Linux x86. It verifies a first check, a warm check,
+and restoration after removing the checkout-local build directory. Ordinary CI
+also exercises toolchain/ABI key separation on both platforms. The cache does
+not participate in the focused `lake env lean` path; that path consumes already
+available imports directly.
+
+Explicit targets and the native cache did not remove dependency-graph
+traversal. The implemented fileless `check` therefore asks Lake to build only
+local library `leanArts` facets, preserving correct intra-project ordering. The
+next performance step is an opaque-prebuilt-dependency optimization in Lake.
+A specialized local-module scheduler remains a last resort and would be called
+`check`, never `build`.

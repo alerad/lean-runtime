@@ -450,6 +450,15 @@ class ProjectEnvironment:
             cancel=cancel,
         )
 
+    def check_all(
+        self,
+        *,
+        timeout: float = 900,
+        cancel: threading.Event | None = None,
+    ) -> ExecutionResult:
+        """Check declared local libraries without building executables."""
+        return self.runtime.check_project(self.root, timeout=timeout, cancel=cancel)
+
     async def check_async(
         self,
         source: str,

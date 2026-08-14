@@ -1,0 +1,32 @@
+{
+  "schema": "lean-runtime.lake-cache-contract/v1",
+  "toolchain": "leanprover/lean4:v4.33.0",
+  "lake_version_observed": "5.0.0-src+d8b1897",
+  "capability_probes": {
+    "build_mappings": ["lake", "build", "--help"],
+    "cache_add": ["lake", "cache", "add", "--help"]
+  },
+  "configuration": {
+    "cache_root": "LAKE_CACHE_DIR",
+    "workspace_cache": "LAKE_ARTIFACT_CACHE",
+    "restore": "LAKE_RESTORE_ARTIFACTS",
+    "root_package_opt_in": "enableArtifactCache = true"
+  },
+  "observable_hit_signals": [
+    "found artifact in cache",
+    "restored artifact from cache",
+    "downloaded artifact"
+  ],
+  "experiment": {
+    "broad_cache_bytes": 6500000000,
+    "explicit_library_jobs": 8708,
+    "root_only_cache_bytes": 396000,
+    "root_restore_seconds": 5.17,
+    "dependency_heavy_fixture": "mathlib consumer",
+    "focused_lake_env_lean_uses_artifact_cache": false
+  },
+  "security": {
+    "lake_remote_hash_cryptographic": false,
+    "remote_registration": "disabled_pending_attested_sha256_inventory"
+  }
+}

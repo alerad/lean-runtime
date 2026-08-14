@@ -435,11 +435,11 @@ def parser() -> argparse.ArgumentParser:
     program_index.add_argument("--tag", action="append", default=[])
     program_index.add_argument("--sign", action="store_true")
 
-    check = commands.add_parser("check", help="check one Lean file in its exact context")
+    check = commands.add_parser("check", help="check one Lean file or all local libraries")
     check.add_argument(
         "inputs",
-        nargs="+",
-        help="FILE, or legacy ENVIRONMENT FILE; FILE may be - for stdin",
+        nargs="*",
+        help="FILE, legacy ENVIRONMENT FILE, or omit inside a Lake project; FILE may be -",
     )
     check.add_argument(
         "--with",
@@ -450,7 +450,9 @@ def parser() -> argparse.ArgumentParser:
         help="repeatable github:owner/repository@tag-or-commit package reference",
     )
     check.add_argument("--toolchain", help="override the discovered file or package toolchain")
-    check.add_argument("--project", type=Path, help="explicit Lake project for FILE")
+    check.add_argument(
+        "--project", type=Path, help="explicit Lake project for FILE or project-wide check"
+    )
     check.add_argument(
         "--include", action="append", default=[], type=Path, help="additional Lean source file"
     )
@@ -1195,7 +1197,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "check":
             if args.project is not None and args.package_refs:
                 raise ValueError("check cannot combine --project with --with")
-            if args.package_refs:
+            if not args.inputs:
+                if args.package_refs or args.include:
+                    raise ValueError("project-wide check does not accept --with or --include")
+                result = runtime.check_project(
+                    args.project or Path("."), toolchain=args.toolchain, policy=_policy(args)
+                )
+                source_file = None
+            elif args.package_refs:
                 if len(args.inputs) != 1:
                     raise ValueError("check with --with expects exactly one FILE")
                 environment = runtime.open_references(args.package_refs, toolchain=args.toolchain)

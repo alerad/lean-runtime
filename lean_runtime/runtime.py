@@ -38,6 +38,7 @@ from .errors import (
 )
 from .events import EventCallback, EventEmitter
 from .health import DoctorReport, diagnose
+from .lake_cache import LakeArtifactCache
 from .lockfiles import EnvironmentLock
 from .matrix import MatrixContext, MatrixResult, run_matrix
 from .models import (
@@ -115,6 +116,8 @@ through Lean Runtime. Read `lean-toolchain`, the Lake configuration, and
 
 - Use `lean-runtime build` for the normal full build.
 - Use `lean-runtime check PATH` for a focused source check.
+- Use `lean-runtime check` to check every declared local library without
+  building executables.
 - Ordinary `lake build` and editor tooling work, but `lean-runtime build` also
   serializes writes when another project uses the same shared dependencies.
 - Do not edit `.lake/packages` or files reached through its package links; they
@@ -225,6 +228,7 @@ class Runtime:
         self.backend = backend or LocalBackend()
         self.store = EnvironmentStore(self.home)
         self.shared_projects = SharedProjectManager(self.home, self.events)
+        self.lake_cache = LakeArtifactCache(self.home, self.toolchains, self.events)
         self.project_adopter = ProjectAdopter(self.shared_projects)
         self.project_executor = ProjectExecutor(self)
         self.resolver = EnvironmentResolver(self.toolchains, self.store, self.backend, self.events)
@@ -1152,6 +1156,31 @@ class Runtime:
             shared=selected_shared,
         )
 
+    def check_project(
+        self,
+        project: str | os.PathLike[str] = ".",
+        *,
+        toolchain: str | None = None,
+        timeout: float | None = None,
+        policy: ExecutionPolicy | None = None,
+        cancel: threading.Event | None = None,
+    ) -> ExecutionResult:
+        """Check all declared local libraries through Lake's dependency ordering."""
+        context = discover_project(project)
+        self.shared_projects.remember_project(context)
+        if toolchain is not None:
+            context = replace(context, toolchain=normalize_toolchain(toolchain))
+        selected_policy = policy or ExecutionPolicy(
+            timeout_seconds=timeout or 900, max_output_bytes=10_000_000
+        )
+        if timeout is not None and policy is not None:
+            selected_policy = replace(policy, timeout_seconds=timeout)
+        return self.project_executor.check_project(
+            context,
+            policy=selected_policy,
+            cancel=cancel,
+        )
+
     def prepare_shared_project(
         self,
         project: str | os.PathLike[str],
@@ -1832,6 +1861,12 @@ class Runtime:
                 raise ProjectError(
                     "Lake could not initialize the project" + (f":\n{detail}" if detail else "")
                 )
+            if self.lake_cache.capabilities(plan.toolchain).supported:
+                lakefile = staging / "lakefile.toml"
+                lakefile.write_text(
+                    "enableArtifactCache = true\n" + lakefile.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
             update_command = self.toolchains.command(
                 plan.toolchain, "lake", "--offline", f"--dir={staging}", "update"
             )
@@ -2181,6 +2216,7 @@ class Runtime:
         packages: Sequence[PackageProvenance] = (),
         logical_command: Sequence[str] | None = None,
         path_map: Mapping[str, str] | None = None,
+        environment: Mapping[str, str] | None = None,
         cancel: threading.Event | None = None,
     ) -> ExecutionResult:
         started_at = datetime.now(timezone.utc).isoformat()
@@ -2212,7 +2248,9 @@ class Runtime:
         raw = self.backend.execute(
             command,
             cwd=cwd,
-            environment=self.toolchains.environment,
+            environment=dict(environment)
+            if environment is not None
+            else self.toolchains.environment,
             policy=policy,
             cancel=cancel,
         )

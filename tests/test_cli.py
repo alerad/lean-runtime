@@ -59,8 +59,33 @@ def test_project_sharing_commands_have_safe_defaults() -> None:
     )
     assert policy.offline and policy.plan and policy.max_download == "500MiB"
     assert parser().parse_args(["scan"]).path == Path(".")
+    assert parser().parse_args(["check"]).inputs == []
     with pytest.raises(SystemExit):
         parser().parse_args(["build", "demo", "--shared", "--local"])
+
+
+def test_fileless_check_uses_the_current_project(monkeypatch, tmp_path: Path, capsys) -> None:
+    result = ExecutionResult(
+        ok=True,
+        exit_code=0,
+        toolchain="leanprover/lean4:v4.33.0",
+        command=("lake", "build", "@/Demo:leanArts"),
+        cwd=str(tmp_path),
+        stdout="",
+        stderr="",
+        elapsed_seconds=0.01,
+    )
+    observed: list[tuple[object, object, object]] = []
+
+    def check_project(_runtime, project, *, toolchain=None, policy=None, cancel=None):
+        observed.append((project, toolchain, policy.timeout_seconds))
+        return result
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.check_project", check_project)
+
+    assert main(["--home", str(tmp_path / "runtime"), "check", "--timeout", "15"]) == 0
+    assert observed == [(Path("."), None, 15.0)]
+    assert "accepted:" in capsys.readouterr().out
 
 
 def test_version_does_not_require_a_command(capsys) -> None:

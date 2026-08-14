@@ -21,6 +21,7 @@ shared exact dependencies:
 lean-runtime init MyProof
 cd MyProof
 lean-runtime check MyProof/Basic.lean
+lean-runtime check
 lean-runtime build
 ```
 

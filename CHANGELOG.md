@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Add fileless `lean-runtime check` and `ProjectEnvironment.check_all()` to
+  check every declared local library through Lake's `leanArts` facets, retaining
+  correct intra-project dependency ordering without building executables.
+- Integrate an ABI- and toolchain-isolated root-project Lake artifact cache for
+  projects created by `init`. Capability support is probed and persisted rather
+  than version-gated; dependencies remain in the verified shared workspace.
+- Keep remote Lake mappings fail-closed until artifacts have a verified SHA-256
+  inventory and lazy restoration participates in acquisition planning and
+  download limits.
+
 ## 2.6.2 - 2026-08-14
 
 - Keep an existing initialization target's directory inode alive, so running

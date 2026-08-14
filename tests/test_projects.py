@@ -55,6 +55,10 @@ class ProjectToolchains:
 
 class InitProjectToolchains(ProjectToolchains):
     def command(self, toolchain: str, executable: str, *args: str) -> list[str]:
+        if executable == "lake" and args == ("build", "--help"):
+            return [sys.executable, "-c", "print('-o mappings')"]
+        if executable == "lake" and args == ("cache", "add", "--help"):
+            return [sys.executable, "-c", "print('mappings --service URL')"]
         if executable == "lake" and "init" in args:
             directory = next(
                 value.removeprefix("--dir=") for value in args if value.startswith("--dir=")
@@ -172,6 +176,25 @@ def test_discover_project_requires_lakefile_and_toolchain(tmp_path: Path) -> Non
     source.write_text("example : True := by trivial\n")
     with pytest.raises(ProjectError, match="no pinned Lake project"):
         discover_project(source)
+
+
+def test_project_wide_check_builds_only_lake_declared_library_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _project(tmp_path / "project")
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(
+        runtime.project_executor, "_local_libraries", lambda _context: ("Alpha", "Beta")
+    )
+
+    result = runtime.check_project(source)
+
+    assert result.ok
+    assert result.command[-3:] == ("build", "@/Alpha:leanArts", "@/Beta:leanArts")
+    assert "lake" in result.command
 
 
 def test_shared_project_build_uses_exact_external_package_override(tmp_path: Path) -> None:
@@ -528,6 +551,7 @@ def test_init_core_creates_a_standard_project_atomically(tmp_path: Path) -> None
     result = runtime.init_project(tmp_path / "fresh", mathlib=None)
     assert result.action == "attached"
     assert (tmp_path / "fresh" / "lakefile.toml").is_file()
+    assert "enableArtifactCache = true" in (tmp_path / "fresh" / "lakefile.toml").read_text()
     assert (tmp_path / "fresh" / "lake-manifest.json").is_file()
     assert (tmp_path / "fresh" / "lean-runtime.toml").is_file()
     agents = (tmp_path / "fresh" / "AGENTS.md").read_text()
