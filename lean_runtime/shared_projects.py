@@ -546,6 +546,62 @@ class SharedProjectManager:
                     scores[name] = score
         return found
 
+    def reusable_packages(
+        self,
+        context: ProjectContext,
+        entries: list[dict[str, Any]],
+        *,
+        effective_entries: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, Path]:
+        """Return managed packages whose recorded graph exactly matches this project."""
+        if effective_entries is None:
+            identity_entries = _resolved_path_entries(context, entries)
+            effective_entries = {
+                str(entry["name"]): _entry_identity(identity_entry)
+                for entry, identity_entry in zip(entries, identity_entries, strict=True)
+            }
+        reusable: dict[str, Path] = {}
+        for name, package in self.graph_seeds(context.toolchain, entries).items():
+            package_id = package.name
+            if (
+                package.resolve().parent != self.packages.resolve()
+                or _PACKAGE_ID_PATTERN.fullmatch(package_id) is None
+                or not _valid_package_marker(package, package_id)
+            ):
+                continue
+            try:
+                marker = json.loads(
+                    (package / ".lean-runtime-package.json").read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                continue
+            normalized = _normalized_package_identity(marker) if isinstance(marker, dict) else None
+            entry = next((item for item in entries if str(item.get("name")) == name), None)
+            if normalized is None or entry is None:
+                continue
+            if (
+                normalized["toolchain"] != context.toolchain
+                or normalized["platform"] != platform_compatibility()
+                or normalized["package"] != _entry_identity(entry)
+            ):
+                continue
+            dependencies = normalized["effective_dependencies"]
+            if not isinstance(dependencies, list):
+                continue
+            compatible = True
+            for dependency in dependencies:
+                if not isinstance(dependency, dict):
+                    compatible = False
+                    break
+                dependency_name = dependency.get("name")
+                current = effective_entries.get(str(dependency_name))
+                if current is None or _entry_identity(current) != dependency:
+                    compatible = False
+                    break
+            if compatible:
+                reusable[name] = package
+        return reusable
+
     def has_built_graph(
         self,
         toolchain: str,
@@ -700,6 +756,13 @@ class SharedProjectManager:
                         _valid_package_marker(self.packages / package_id, package_id)
                         for package_id in ready_package_ids
                     ):
+                        self.events.emit(
+                            "project.shared.workspace_reused",
+                            f"Reusing shared dependency workspace for {context.root.name}",
+                            phase="shared-project",
+                            workspace_id=workspace_id,
+                            packages=len(packages),
+                        )
                         return SharedProjectWorkspace(
                             workspace_id,
                             destination,
@@ -728,6 +791,13 @@ class SharedProjectManager:
                     str(entry["name"]): _entry_identity(identity_entry)
                     for entry, identity_entry in zip(packages, identity_packages, strict=True)
                 }
+                reusable_packages = self.reusable_packages(
+                    context,
+                    packages,
+                    effective_entries=effective_entries,
+                )
+                git_packages = [entry for entry in packages if entry["type"] == "git"]
+                git_position = 0
                 for entry in packages:
                     override = {
                         key: entry[key]
@@ -740,12 +810,22 @@ class SharedProjectManager:
                             type="path", dir=str((context.root / str(entry["dir"])).resolve())
                         )
                     else:
+                        git_position += 1
                         url = entry.get("url")
                         revision = entry.get("rev")
                         if not isinstance(url, str) or not isinstance(revision, str):
                             raise ProjectError(
                                 f"git dependency {entry['name']!r} has no exact URL and revision"
                             )
+                        package_name = str(entry["name"])
+                        self.events.emit(
+                            "project.shared.package_started",
+                            f"Resolving {package_name} ({git_position}/{len(git_packages)})",
+                            phase="shared-project",
+                            package=package_name,
+                            current=git_position,
+                            total=len(git_packages),
+                        )
                         local = local_packages / str(entry["name"])
                         seed = (
                             seed_package_paths.get(str(entry["name"]), local)
@@ -756,22 +836,41 @@ class SharedProjectManager:
                         )
                         if seed.is_symlink():
                             seed = seed.resolve()
-                        source = self._source_checkout(
-                            url=url,
-                            revision=revision,
-                            seed=seed if seed.is_dir() else None,
-                            cancel=cancel,
-                        )
                         subdir = _package_subdir(entry)
-                        source_package = source / subdir if subdir is not None else source
-                        package_identity = _package_identity(
-                            context=context,
-                            entry=entry,
-                            source_package=source_package,
-                            effective_entries=effective_entries,
-                        )
-                        package_id = sha256_id("project_package", package_identity)
-                        final_target = self.packages / package_id
+                        reusable = reusable_packages.get(package_name)
+                        if reusable is not None:
+                            package_id = reusable.name
+                            final_target = reusable
+                            package_identity = json.loads(
+                                (reusable / ".lean-runtime-package.json").read_text(
+                                    encoding="utf-8"
+                                )
+                            )
+                            source = reusable
+                            self.events.emit(
+                                "project.shared.package_reused",
+                                f"Reusing {package_name} ({git_position}/{len(git_packages)})",
+                                phase="shared-project",
+                                package=package_name,
+                                current=git_position,
+                                total=len(git_packages),
+                            )
+                        else:
+                            source = self._source_checkout(
+                                url=url,
+                                revision=revision,
+                                seed=seed if seed.is_dir() else None,
+                                cancel=cancel,
+                            )
+                            source_package = source / subdir if subdir is not None else source
+                            package_identity = _package_identity(
+                                context=context,
+                                entry=entry,
+                                source_package=source_package,
+                                effective_entries=effective_entries,
+                            )
+                            package_id = sha256_id("project_package", package_identity)
+                            final_target = self.packages / package_id
                         # A marker created by an older schema may describe the exact same
                         # graph with cosmetic scope/URL differences. Reuse that managed
                         # path directly so its absolute-path Lake traces remain warm.
@@ -801,6 +900,15 @@ class SharedProjectManager:
                             ):
                                 remove_tree(final_target)
                             if not final_target.is_dir():
+                                self.events.emit(
+                                    "project.shared.package_import_started",
+                                    f"Importing {package_name} "
+                                    f"({git_position}/{len(git_packages)})",
+                                    phase="shared-project",
+                                    package=package_name,
+                                    current=git_position,
+                                    total=len(git_packages),
+                                )
                                 self.packages.mkdir(parents=True, exist_ok=True)
                                 package_staging = self.packages / (
                                     f".{package_id}.{os.getpid()}.{uuid.uuid4().hex}.tmp"

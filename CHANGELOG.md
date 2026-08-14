@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Keep an existing initialization target's directory inode alive, so running
+  `lean-runtime init .` no longer strands the invoking shell in an unlinked
+  working directory. Fully prepared staged children are published with rollback
+  while Git metadata, custom agent guidance, and index state remain in place.
+- Make attachment plans distinguish checkout bytes removed, compatible shared
+  bytes already available, new shared bytes required, and estimated machine
+  recovery. Exact managed packages now bypass redundant source resolution when
+  their toolchain, platform, revision, and effective dependency closure match.
+- Emit package-by-package shared-workspace resolution, reuse, and import events,
+  and add `lean-runtime --version`.
+
 ## 2.6.1 - 2026-08-14
 
 - Allow `lean-runtime init .` at an otherwise empty Git repository root while

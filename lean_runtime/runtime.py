@@ -1167,7 +1167,7 @@ class Runtime:
         self, path: str | os.PathLike[str], *, recursive: bool = False
     ) -> AdoptionPlan:
         """Inspect one project or a tree without changing it."""
-        return plan_adoption(Path(path), recursive=recursive)
+        return plan_adoption(Path(path), recursive=recursive, shared=self.shared_projects)
 
     def _probe_project_graph(
         self,
@@ -1211,12 +1211,20 @@ class Runtime:
         recursive: bool = False,
         seed_packages: Path | None = None,
         seed_package_paths: dict[str, Path] | None = None,
+        plan: AdoptionPlan | None = None,
     ) -> AdoptionBatchResult:
         """Adopt exact shared dependencies after a read-only plan."""
-        plan = self.plan_project_adoption(path, recursive=recursive)
+        if plan is not None:
+            requested_roots = discover_shareable_projects(Path(path), recursive=recursive)
+            planned_roots = tuple(project.root for project in plan.projects)
+            if requested_roots != planned_roots or plan.recursive != recursive:
+                raise ProjectError("adoption plan does not match the requested project scope")
+            selected_plan = plan
+        else:
+            selected_plan = self.plan_project_adoption(path, recursive=recursive)
         results: list[AdoptionResult] = []
         failures: list[tuple[Path, str]] = []
-        for project in plan.projects:
+        for project in selected_plan.projects:
             if project.attached:
                 workspace_id = discover_project(project.root).provenance().workspace_id
                 results.append(
@@ -1242,15 +1250,15 @@ class Runtime:
                     self.project_adopter.attach(
                         context,
                         probe=probe,
-                        seed_packages=seed_packages if len(plan.projects) == 1 else None,
+                        seed_packages=(seed_packages if len(selected_plan.projects) == 1 else None),
                         seed_package_paths=(
-                            seed_package_paths if len(plan.projects) == 1 else None
+                            seed_package_paths if len(selected_plan.projects) == 1 else None
                         ),
                     )
                 )
             except (OSError, ProjectError) as exc:
                 failures.append((project.root, str(exc)))
-        return AdoptionBatchResult(plan, tuple(results), tuple(failures))
+        return AdoptionBatchResult(selected_plan, tuple(results), tuple(failures))
 
     def scan_projects(
         self, path: str | os.PathLike[str], *, recursive: bool = True
@@ -1791,10 +1799,10 @@ class Runtime:
         staging = Path(
             tempfile.mkdtemp(prefix=f".{target.name}.lean-runtime-init-", dir=target.parent)
         )
-        backup: Path | None = None
         published = False
         original_git = next((entry for entry in existing_entries if entry.name == ".git"), None)
-        git_transferred = False
+        published_in_place = False
+        published_entries: list[Path] = []
         try:
             custom_agents = target / "AGENTS.md"
             if custom_agents.is_file():
@@ -1890,41 +1898,47 @@ class Runtime:
                     remove_tree(generated_git)
                 elif generated_git.exists() or generated_git.is_symlink():
                     generated_git.unlink()
-                original_git.replace(generated_git)
-                git_transferred = True
             if target.exists():
-                backup = target.parent / f".{target.name}.lean-runtime-backup-{os.getpid()}"
-                target.replace(backup)
-            staging.replace(target)
+                # Keep an existing directory inode alive. Replacing the directory itself
+                # leaves a shell that invoked `lean-runtime init .` inside an unlinked cwd.
+                # Staging has already been fully initialized, attached, and probed, so only
+                # its children need a small rollback-safe publication transaction here.
+                published_in_place = True
+                for entry in sorted(staging.iterdir(), key=lambda path: path.name):
+                    destination = target / entry.name
+                    if destination.exists() or destination.is_symlink():
+                        if entry.name == "AGENTS.md" and destination.is_file():
+                            if entry.is_symlink() or entry.is_file():
+                                entry.unlink()
+                            elif entry.exists():
+                                remove_tree(entry)
+                            continue
+                        raise ProjectError(
+                            f"initialization target changed while publishing: {destination}"
+                        )
+                    entry.replace(destination)
+                    published_entries.append(destination)
+            else:
+                staging.replace(target)
             published = True
-            if backup is not None:
-                remove_tree(backup)
-                backup = None
             context = discover_project(target)
             # Registry discovery is an optimization, not part of publishing the project.
             with suppress(OSError, EnvironmentError):
                 self.shared_projects.remember_project(context)
             return replace(result.results[0], root=target)
         except BaseException:
-            if git_transferred:
-                staged_git = (target if published else staging) / ".git"
-                restore_root = backup if backup is not None and backup.exists() else target
-                if staged_git.exists() or staged_git.is_symlink():
-                    restore_root.mkdir(parents=True, exist_ok=True)
-                    staged_git.replace(restore_root / ".git")
-                git_transferred = False
-            if published:
-                if target.exists():
-                    remove_tree(target)
-                if backup is not None and backup.exists():
-                    backup.replace(target)
-                    backup = None
+            if published_in_place:
+                for entry in reversed(published_entries):
+                    if entry.is_symlink() or entry.is_file():
+                        entry.unlink()
+                    elif entry.exists():
+                        remove_tree(entry)
+            elif published and target.exists():
+                remove_tree(target)
             raise
         finally:
             if staging.exists():
                 remove_tree(staging)
-            if backup is not None and backup.exists():
-                remove_tree(backup)
 
     def project(
         self,

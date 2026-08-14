@@ -176,11 +176,18 @@ recursive mode inventories a project tree, reports blockers and estimated disk
 recovery, and adopts each valid project transactionally. `detach` is likewise a
 preview unless `--execute` is present. Attached projects use shared mode by
 default in `lean-runtime build`; detach before requesting `--local`.
+The attachment preview separates bytes removed from each checkout, compatible
+bytes already present in the shared store, new shared bytes that must be
+imported, and estimated machine-level recovery. These quantities differ on a
+first attachment because copy-on-write migration can shrink the repository
+without immediately freeing the dependency blocks retained by the shared copy.
 
 A new `init` target may be absent, empty, or an otherwise empty Git root, with
 an optional existing `AGENTS.md`. Git metadata and the custom guide are
 preserved. Planning rejects any other existing contents using the same
 validation as execution.
+Existing target directories are populated in place after staging verifies, so
+`lean-runtime init .` keeps the caller's current working directory valid.
 `--name NAME` overrides the inferred Lake package/root module name for a new
 project, which is useful when a lowercase repository name needs internal
 capitalization such as `IntegralFramework`.

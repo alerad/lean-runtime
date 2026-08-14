@@ -48,6 +48,8 @@ empty Git repository root. In the Git case, `init` preserves the existing HEAD,
 index, remotes, and worktree metadata. It also preserves an existing
 `AGENTS.md`; any other non-project contents are rejected by both `--plan` and
 execution rather than overwritten.
+If the target already exists, initialization keeps that directory inode alive;
+the shell that runs `lean-runtime init .` can immediately continue using it.
 The directory name normally supplies the Lake package/root module name. Override
 it when capitalization matters, for example:
 

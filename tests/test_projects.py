@@ -261,6 +261,10 @@ def test_attach_replaces_only_packages_and_detach_materializes_them(tmp_path: Pa
     plan = runtime.plan_project_adoption(source)
     assert plan.ready == 1
     assert plan.current_dependency_bytes > 0
+    assert plan.checkout_bytes_removed == plan.current_dependency_bytes
+    assert plan.shared_bytes_reused == 0
+    assert plan.new_shared_bytes == plan.current_dependency_bytes
+    assert plan.estimated_machine_reclaimable_bytes == 0
     attached = runtime.attach_projects(source)
     assert attached.ok
     package = tmp_path / "project" / ".lake" / "packages" / "dep"
@@ -295,6 +299,57 @@ def test_attach_replaces_only_packages_and_detach_materializes_them(tmp_path: Pa
         ).stdout.strip()
         == revision
     )
+
+
+def test_second_graph_reuses_compatible_managed_package_without_source_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, _revision = _shared_project(tmp_path / "first", tmp_path / "dependency")
+    second_root = tmp_path / "second"
+    shutil.copytree(tmp_path / "first", second_root)
+    local_path = second_root / "vendor" / "local"
+    local_path.mkdir(parents=True)
+    (local_path / "lakefile.toml").write_text('name = "local"\n')
+    second_manifest = json.loads((second_root / "lake-manifest.json").read_text())
+    second_manifest["packages"].append(
+        {
+            "type": "path",
+            "name": "local",
+            "dir": "./vendor/local",
+            "inherited": False,
+            "configFile": "lakefile.toml",
+        }
+    )
+    (second_root / "lake-manifest.json").write_text(json.dumps(second_manifest))
+    events = []
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+        on_event=events.append,
+    )
+
+    assert runtime.attach_projects(first).ok
+    first_target = (tmp_path / "first" / ".lake" / "packages" / "dep").resolve()
+    plan = runtime.plan_project_adoption(second_root)
+    assert plan.shared_bytes_reused == plan.current_dependency_bytes
+    assert plan.new_shared_bytes == 0
+    assert plan.checkout_bytes_removed == plan.current_dependency_bytes
+    assert plan.estimated_machine_reclaimable_bytes == plan.current_dependency_bytes
+
+    def source_resolution_is_not_needed(**_kwargs):
+        raise AssertionError("compatible managed package should bypass source resolution")
+
+    monkeypatch.setattr(
+        runtime.shared_projects,
+        "_source_checkout",
+        source_resolution_is_not_needed,
+    )
+    attached = runtime.attach_projects(second_root)
+
+    assert attached.ok
+    assert (second_root / ".lake" / "packages" / "dep").resolve() == first_target
+    assert any(event.kind == "project.shared.package_reused" for event in events)
 
 
 def test_attach_preserves_repository_roots_for_subdir_packages(tmp_path: Path) -> None:
@@ -504,6 +559,7 @@ def test_init_can_skip_or_preserve_an_agents_guide(tmp_path: Path) -> None:
 
 def test_init_at_an_empty_git_root_preserves_repository_identity_and_index(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target = tmp_path / "project"
     target.mkdir()
@@ -537,12 +593,14 @@ def test_init_at_an_empty_git_root_preserves_repository_identity_and_index(
         toolchains=InitProjectToolchains(tmp_path / "runtime"),
         libraries=[],  # type: ignore[arg-type]
     )
+    monkeypatch.chdir(target)
 
     plan = runtime.plan_project_init(target, mathlib=None)
     result = runtime.init_project(target, mathlib=None)
 
     assert plan.action == "create"
     assert result.action == "attached"
+    assert Path.cwd() == target
     observed_revision = subprocess.run(
         git_command("-C", str(target), "rev-parse", "HEAD"),
         check=True,
