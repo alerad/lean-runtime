@@ -22,10 +22,10 @@ managed environment, dependency list, or explicit toolchain is supplied:
 result = Runtime().check_file("./my-project/MyProject/Main.lean")
 ```
 
-The CLI equivalent is:
+The primary CLI equivalent is:
 
 ```bash
-lean-runtime check-file ./my-project/MyProject/Main.lean
+lean-runtime check ./my-project/MyProject/Main.lean
 ```
 
 The actual project-relative file is passed to `lake env lean`, so imports of
@@ -43,19 +43,46 @@ Ordinary Lake workspaces put remote dependencies and their build artifacts in
 each repository's `.lake/packages`. New projects can start in shared mode:
 
 ```bash
-lean-runtime init MyProof --mathlib
+lean-runtime init MyProof
 cd MyProof
-lean-runtime build .
+lean-runtime check MyProof/Basic.lean
+lean-runtime build
 ```
 
 The generated files are a standard Lake project plus a small
 `lean-runtime.toml`. Root build outputs stay local; exact dependencies are
-shared. Select a cataloged release with `--mathlib 4.33.0`, or omit `--mathlib`
-for a core-only library. `init` also creates an `AGENTS.md` describing the safe
+shared. The newest stable cataloged Mathlib is selected by default. Select a
+release with `--mathlib 4.33.0`, or use `--core` for a core-only library.
+`init` also creates an `AGENTS.md` describing the safe
 build and dependency workflow unless `--no-agents` is passed; it never
 overwrites an existing guide.
 
-For one existing project, preview before changing anything:
+Initialization acquires and verifies the exact graph before publishing the
+target directory. Use `--plan` for a side-effect-free cost report, `--offline`
+to require local data, `--max-download SIZE` to enforce a transfer ceiling, or
+`--seed-from PROJECT` to name an exact local donor.
+The plan separately reports whether the full Lake-capable toolchain is already
+installed. Because Elan does not publish a preflight byte count, a missing full
+toolchain is rejected under `--offline` or `--max-download` rather than silently
+bypassing the policy.
+
+For an existing pinned project, `lean-runtime init .` adopts its current
+manifest without changing versions. Register a collection once with
+`lean-runtime scan ~/research`; future exact matches are preferred over
+downloads automatically.
+
+Move an adopted TOML project to the newest cataloged Mathlib explicitly:
+
+```bash
+lean-runtime update --plan
+lean-runtime update
+```
+
+The plan reports old and new release, commit, toolchain, local donor, and known
+download bytes. Acquisition happens before metadata changes, and failures
+restore the prior Lake files and attachment metadata.
+
+For advanced bulk onboarding, preview before changing anything:
 
 ```bash
 lean-runtime attach .

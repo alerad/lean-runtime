@@ -18,33 +18,50 @@ Create a standard Lake library with the newest cataloged Mathlib release and
 shared exact dependencies:
 
 ```bash
-lean-runtime init MyProof --mathlib
+lean-runtime init MyProof
 cd MyProof
-lean-runtime build .
+lean-runtime check MyProof/Basic.lean
+lean-runtime build
 ```
 
 By default, `init` writes an `AGENTS.md` explaining the project workflow and
 shared-dependency safety rules to coding agents. Pass `--no-agents` to omit it.
 An existing file is preserved.
 
-Use `--mathlib 4.33.0` to select that release explicitly. Omit `--mathlib` for
-a core-only library. The root project remains an ordinary mutable Lake project;
+Use `--mathlib 4.33.0` to select that release explicitly, or `--core` for a
+core-only library. The root project remains an ordinary mutable Lake project;
 its dependency sources and build artifacts are reused by other projects with
 the same exact graph.
 
-For an existing project or a directory containing many projects, preview the
-migration before applying it:
+Before doing any work, `init --plan` reports the exact release, local reuse, and
+known download size. `--max-download 500MiB` refuses a larger transfer and
+`--offline` requires a matching local graph. Initialization is transactional:
+the target appears only after Lake and the shared dependency graph both verify.
+Project development requires one full Lake-capable Lean toolchain per Lean
+version. When it is absent, the plan says its Elan download size is unknown;
+`--offline` and `--max-download` fail closed instead of silently installing it.
+
+Dependency upgrades are explicit:
 
 ```bash
-lean-runtime attach .
-lean-runtime attach ~/research --recursive
-lean-runtime attach ~/research --recursive --execute
+lean-runtime update --plan
+lean-runtime update
 ```
 
-The first two commands are read-only. Execution verifies the shared graph,
-replaces only generated package copies, and rolls back the swap if ordinary
-Lake cannot load the result. See [Local Lake projects](local-projects.md) for
-detachment, storage estimates, and the complete safety model.
+The update preview names both exact Mathlib revisions and toolchains. In a
+terminal, the second command asks for confirmation; use `--yes` in automation.
+
+For one existing pinned Lake project, preserve and adopt its current exact graph:
+
+```bash
+lean-runtime init .
+lean-runtime scan ~/research
+```
+
+`scan` only records exact local graphs as possible future zero-download seeds.
+Advanced bulk migration remains available through `attach`. See [Local Lake
+projects](local-projects.md) for detachment, storage estimates, and the complete
+safety model.
 
 ## Run a file
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -23,7 +24,7 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
 
 from ._git import git_command
 from .errors import ProjectError
-from .models import ExecutionResult, ProjectProvenance
+from .models import ExecutionResult, PackageProvenance, ProjectProvenance
 from .policies import ExecutionPolicy
 from .store import source_snapshot_digest
 from .toolchains import normalize_toolchain
@@ -316,6 +317,15 @@ class ProjectContext:
         manifest = self.current_manifest()
         revision = _git(self.root, "rev-parse", "HEAD")
         status = _git(self.root, "status", "--porcelain", "--untracked-files=normal")
+        workspace_id: str | None = None
+        attachment = self.root / ".lake" / "lean-runtime-attachment.json"
+        try:
+            attachment_value = json.loads(attachment.read_text(encoding="utf-8"))
+            raw_workspace_id = attachment_value.get("workspace_id")
+            if isinstance(raw_workspace_id, str):
+                workspace_id = raw_workspace_id
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
         return ProjectProvenance(
             root=str(self.root),
             workspace_digest=source_snapshot_digest(self.root),
@@ -323,7 +333,42 @@ class ProjectContext:
             manifest_digest=_file_digest(manifest) if manifest is not None else None,
             git_revision=revision,
             git_dirty=bool(status) if status is not None else None,
+            workspace_id=workspace_id,
         )
+
+    def package_provenance(self) -> tuple[PackageProvenance, ...]:
+        """Return the exact Git package graph used by a local project."""
+        manifest = self.current_manifest()
+        if manifest is None:
+            return ()
+        try:
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            entries = value.get("packages")
+            packages_dir = value.get("packagesDir", ".lake/packages")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return ()
+        if not isinstance(entries, list) or not isinstance(packages_dir, str):
+            return ()
+        result: list[PackageProvenance] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("type") != "git":
+                continue
+            name = entry.get("name")
+            url = entry.get("url")
+            revision = entry.get("rev")
+            if not all(isinstance(item, str) for item in (name, url, revision)):
+                continue
+            package = self.root / packages_dir / str(name)
+            tree_hash = _git(package, "rev-parse", f"{revision}^{{tree}}") or ""
+            result.append(
+                PackageProvenance(
+                    name=str(name),
+                    url=str(url),
+                    revision=str(revision),
+                    tree_hash=tree_hash,
+                )
+            )
+        return tuple(result)
 
 
 def discover_project(path: str | os.PathLike[str]) -> ProjectContext:

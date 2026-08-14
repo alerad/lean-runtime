@@ -18,11 +18,12 @@ from ._paths import remove_tree
 from .errors import ProjectError
 from .events import EventEmitter
 from .locking import FileLock
-from .projects import ProjectContext
+from .projects import ProjectContext, discover_project
 from .serialization import sha256_id, write_json_atomic
 from .store import clone_tree, platform_compatibility, source_snapshot_digest
 
 SHARED_PROJECT_SCHEMA = "lean-runtime-shared-project/2"
+PROJECT_SEED_REGISTRY_SCHEMA = "lean-runtime-project-seeds/1"
 _PACKAGE_ID_PATTERN = re.compile(r"project_package_[0-9a-f]{64}\Z")
 
 
@@ -305,6 +306,133 @@ class SharedProjectManager:
         self.packages = home / "project-packages"
         self.sources = home / "project-sources"
         self.locks = home / "locks"
+        self.seed_registry = home / "project-seeds.json"
+
+    def remember_project(self, context: ProjectContext) -> None:
+        """Remember a Lake project as a future exact dependency seed."""
+        manifest = context.current_manifest()
+        if manifest is None:
+            return
+        self.home.mkdir(parents=True, exist_ok=True)
+        with FileLock(self.locks / "project-seeds.lock", timeout=30):
+            roots: list[str] = []
+            try:
+                value = json.loads(self.seed_registry.read_text(encoding="utf-8"))
+                if (
+                    isinstance(value, dict)
+                    and value.get("schema") == PROJECT_SEED_REGISTRY_SCHEMA
+                    and isinstance(value.get("roots"), list)
+                ):
+                    roots = [str(item) for item in value["roots"] if isinstance(item, str)]
+            except (OSError, json.JSONDecodeError):
+                pass
+            selected = str(context.root.resolve())
+            roots = [root for root in roots if root != selected and Path(root).is_dir()]
+            roots.append(selected)
+            write_json_atomic(
+                self.seed_registry,
+                {"schema": PROJECT_SEED_REGISTRY_SCHEMA, "roots": roots},
+            )
+
+    def remembered_roots(self) -> tuple[Path, ...]:
+        """Return live project roots in most-recently-used order."""
+        try:
+            value = json.loads(self.seed_registry.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return ()
+        if (
+            not isinstance(value, dict)
+            or value.get("schema") != PROJECT_SEED_REGISTRY_SCHEMA
+            or not isinstance(value.get("roots"), list)
+        ):
+            return ()
+        return tuple(
+            Path(item)
+            for item in reversed(value["roots"])
+            if isinstance(item, str) and Path(item).is_dir()
+        )
+
+    def registered_graph_seeds(
+        self,
+        toolchain: str,
+        entries: list[dict[str, Any]],
+        *,
+        roots: tuple[Path, ...] = (),
+    ) -> tuple[dict[str, Path], Path | None]:
+        """Find one exact complete graph in registered or explicitly supplied projects."""
+        required = {
+            str(entry.get("name")): (
+                str(entry.get("rev")),
+                str(entry.get("subDir") or ""),
+                _canonical_git_url(str(entry.get("url"))),
+            )
+            for entry in entries
+            if entry.get("type") == "git"
+        }
+        candidates = tuple(dict.fromkeys((*roots, *self.remembered_roots())))
+        best: dict[str, Path] | None = None
+        best_root: Path | None = None
+        best_score: tuple[int, int, int] = (-1, -1, -1)
+        for root in candidates:
+            try:
+                context = discover_project(root)
+                if context.toolchain != toolchain:
+                    continue
+                manifest = _load_manifest(context)
+            except ProjectError:
+                continue
+            raw_entries = manifest.get("packages")
+            raw_packages_dir = manifest.get("packagesDir", ".lake/packages")
+            if not isinstance(raw_entries, list) or not isinstance(raw_packages_dir, str):
+                continue
+            available = {
+                str(entry.get("name")): (
+                    str(entry.get("rev")),
+                    str(entry.get("subDir") or ""),
+                    _canonical_git_url(str(entry.get("url"))),
+                )
+                for entry in raw_entries
+                if isinstance(entry, dict) and entry.get("type") == "git"
+            }
+            if available != required:
+                continue
+            package_root = context.root / raw_packages_dir
+            selected: dict[str, Path] = {}
+            built = 0
+            roots_built = 0
+            modified = 0
+            valid = True
+            for name, (revision, subdir, _url) in required.items():
+                package = package_root / name
+                if package.is_symlink():
+                    package = package.resolve()
+                marker_id = package.name
+                managed = _PACKAGE_ID_PATTERN.fullmatch(
+                    marker_id
+                ) is not None and _valid_package_marker(package, marker_id)
+                if (
+                    not package.is_dir()
+                    or _git_head(package) != revision
+                    or (not managed and not _git_clean(package))
+                ):
+                    valid = False
+                    break
+                selected[name] = package
+                build = (
+                    package / subdir / ".lake" / "build" if subdir else package / ".lake" / "build"
+                )
+                if build.is_dir():
+                    built += 1
+                    if _has_root_olean(build, name):
+                        roots_built += 1
+                    with suppress(OSError):
+                        modified = max(modified, build.stat().st_mtime_ns)
+            score = (roots_built, built, modified)
+            if valid and set(selected) == set(required) and score > best_score:
+                best = selected
+                best_root = context.root
+                best_score = score
+        return (best or {}, best_root)
 
     def graph_seeds(
         self,
@@ -688,6 +816,23 @@ class SharedProjectManager:
                                         else source
                                     )
                                     clone_tree(donor, package_staging)
+                                    # A verified sparse environment carries compiled package
+                                    # artifacts but intentionally omits Git sources. Graft those
+                                    # artifacts onto the independently verified exact checkout so
+                                    # project onboarding does not discard the capsule and rebuild
+                                    # the dependency graph from scratch.
+                                    if seed.is_dir() and donor.resolve() != seed.resolve():
+                                        seed_package = seed / subdir if subdir is not None else seed
+                                        staged_package = (
+                                            package_staging / subdir
+                                            if subdir is not None
+                                            else package_staging
+                                        )
+                                        seed_build = seed_package / ".lake" / "build"
+                                        staged_build = staged_package / ".lake" / "build"
+                                        if seed_build.is_dir() and not staged_build.exists():
+                                            staged_build.parent.mkdir(parents=True, exist_ok=True)
+                                            clone_tree(seed_build, staged_build)
                                     write_json_atomic(
                                         package_staging / ".lean-runtime-package.json",
                                         package_identity,

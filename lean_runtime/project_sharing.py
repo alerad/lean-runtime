@@ -219,6 +219,97 @@ class AdoptionBatchResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectInitPlan:
+    """Read-only plan for creating or adopting a Lean Runtime project."""
+
+    root: Path
+    action: str
+    toolchain: str
+    mathlib_version: str | None
+    packages: tuple[str, ...]
+    seed_root: Path | None
+    download_bytes: int | None
+    download_bytes_complete: bool
+    already_attached: bool = False
+    toolchain_installed: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "root": str(self.root),
+            "action": self.action,
+            "toolchain": self.toolchain,
+            "mathlib_version": self.mathlib_version,
+            "packages": list(self.packages),
+            "seed_root": str(self.seed_root) if self.seed_root is not None else None,
+            "download_bytes": self.download_bytes,
+            "download_bytes_complete": self.download_bytes_complete,
+            "already_attached": self.already_attached,
+            "toolchain_installed": self.toolchain_installed,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectScanResult:
+    """Projects registered as future exact dependency seeds."""
+
+    root: Path
+    projects: tuple[Path, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"root": str(self.root), "projects": [str(path) for path in self.projects]}
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectUpdatePlan:
+    """Read-only latest-Mathlib update plan for one project."""
+
+    root: Path
+    current_version: str
+    target_version: str
+    current_revision: str
+    target_revision: str
+    current_toolchain: str
+    target_toolchain: str
+    packages: tuple[str, ...]
+    seed_root: Path | None
+    download_bytes: int | None
+    download_bytes_complete: bool
+    blockers: tuple[str, ...] = ()
+    toolchain_installed: bool = False
+
+    @property
+    def changed(self) -> bool:
+        return (
+            self.current_version != self.target_version
+            or self.current_revision != self.target_revision
+            or self.current_toolchain != self.target_toolchain
+        )
+
+    @property
+    def ready(self) -> bool:
+        return not self.blockers
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "root": str(self.root),
+            "current_version": self.current_version,
+            "target_version": self.target_version,
+            "current_revision": self.current_revision,
+            "target_revision": self.target_revision,
+            "current_toolchain": self.current_toolchain,
+            "target_toolchain": self.target_toolchain,
+            "packages": list(self.packages),
+            "seed_root": str(self.seed_root) if self.seed_root is not None else None,
+            "download_bytes": self.download_bytes,
+            "download_bytes_complete": self.download_bytes_complete,
+            "changed": self.changed,
+            "ready": self.ready,
+            "blockers": list(self.blockers),
+            "toolchain_installed": self.toolchain_installed,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class DetachmentPlan:
     root: Path
     packages: tuple[str, ...]

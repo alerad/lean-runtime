@@ -18,8 +18,8 @@ from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock
 from .matrix import load_matrix
 from .models import ExecutionResult, PhaseTiming
-from .policies import ExecutionPolicy, format_byte_size
-from .project_sharing import AdoptionPlan
+from .policies import ExecutionPolicy, format_byte_size, parse_byte_size
+from .project_sharing import AdoptionPlan, ProjectInitPlan, ProjectUpdatePlan
 from .projects import discover_project, project_publication_workflow
 from .runtime import Runtime
 from .specs import EnvironmentSpec
@@ -175,6 +175,46 @@ def _render_adoption_plan(plan: AdoptionPlan) -> None:
     print(f"Current dependency copies: {format_byte_size(plan.current_dependency_bytes)}")
     print(f"Estimated shared copies:   {format_byte_size(plan.estimated_shared_bytes)}")
     print(f"Potential recovery:        {format_byte_size(plan.estimated_reclaimable_bytes)}")
+
+
+def _render_init_plan(plan: ProjectInitPlan) -> None:
+    if plan.action == "adopt":
+        state = "already attached" if plan.already_attached else "ready to attach"
+        print(f"Existing Lake project · {plan.toolchain} · {state}")
+        print(f"Exact dependencies: {len(plan.packages)} package(s); versions unchanged")
+        return
+    context = f"Mathlib {plan.mathlib_version}" if plan.mathlib_version else "core Lean"
+    print(f"Create {plan.root.name} · {context} · {plan.toolchain}")
+    if not plan.toolchain_installed:
+        print("Full Lake toolchain: download required (size not published by Elan)")
+    if plan.seed_root is not None:
+        print(f"Reuse exact local graph: {plan.seed_root}")
+        print("Download: 0 B")
+    elif plan.download_bytes is not None:
+        print(f"Download: {format_byte_size(plan.download_bytes)}")
+    else:
+        print("Download: unknown (no compatible published artifact could be priced)")
+
+
+def _render_update_plan(plan: ProjectUpdatePlan) -> None:
+    if not plan.changed:
+        print(f"Already current: Mathlib {plan.target_version} · {plan.target_toolchain}")
+        return
+    print(
+        f"Mathlib {plan.current_version} → {plan.target_version} · "
+        f"{plan.current_toolchain} → {plan.target_toolchain}"
+    )
+    if not plan.toolchain_installed:
+        print("Full Lake toolchain: download required (size not published by Elan)")
+    if plan.seed_root is not None:
+        print(f"Reuse exact local graph: {plan.seed_root}")
+        print("Download: 0 B")
+    elif plan.download_bytes is not None:
+        print(f"Download: {format_byte_size(plan.download_bytes)}")
+    else:
+        print("Download: unknown")
+    for blocker in plan.blockers:
+        print(f"Blocker: {blocker}")
 
 
 def _progress(event: RuntimeEvent) -> None:
@@ -383,13 +423,11 @@ def parser() -> argparse.ArgumentParser:
     program_index.add_argument("--tag", action="append", default=[])
     program_index.add_argument("--sign", action="store_true")
 
-    check = commands.add_parser(
-        "check", help="check with --with packages or in a published environment"
-    )
+    check = commands.add_parser("check", help="check one Lean file in its exact context")
     check.add_argument(
         "inputs",
         nargs="+",
-        help="FILE with --with, otherwise ENVIRONMENT FILE; FILE may be - for stdin",
+        help="FILE, or legacy ENVIRONMENT FILE; FILE may be - for stdin",
     )
     check.add_argument(
         "--with",
@@ -399,7 +437,8 @@ def parser() -> argparse.ArgumentParser:
         metavar="REFERENCE",
         help="repeatable github:owner/repository@tag-or-commit package reference",
     )
-    check.add_argument("--toolchain", help="override the toolchain discovered from --with packages")
+    check.add_argument("--toolchain", help="override the discovered file or package toolchain")
+    check.add_argument("--project", type=Path, help="explicit Lake project for FILE")
     check.add_argument(
         "--include", action="append", default=[], type=Path, help="additional Lean source file"
     )
@@ -475,7 +514,7 @@ def parser() -> argparse.ArgumentParser:
     _add_policy(raw)
 
     build = commands.add_parser("build", help="build an existing Lake project")
-    build.add_argument("project", type=Path)
+    build.add_argument("project", type=Path, nargs="?", default=Path("."))
     build.add_argument("targets", nargs="*")
     build.add_argument("--toolchain")
     build.add_argument("--timeout", type=float, default=900)
@@ -495,15 +534,30 @@ def parser() -> argparse.ArgumentParser:
     )
     build.add_argument("--json", action="store_true")
 
-    init = commands.add_parser("init", help="create a standard Lake project in shared mode")
-    init.add_argument("path", type=Path)
-    init.add_argument(
+    init = commands.add_parser(
+        "init", help="create a latest-Mathlib project or adopt an existing Lake project"
+    )
+    init.add_argument("path", type=Path, nargs="?", default=Path("."))
+    init_context = init.add_mutually_exclusive_group()
+    init_context.add_argument(
         "--mathlib",
         nargs="?",
         const="latest",
+        default="latest",
         help="use the newest cataloged Mathlib, or select a version such as 4.33.0",
     )
+    init_context.add_argument(
+        "--core",
+        dest="mathlib",
+        action="store_const",
+        const=None,
+        help="create a core-only project",
+    )
     init.add_argument("--toolchain")
+    init.add_argument("--seed-from", type=Path, help="reuse an exact local project or project tree")
+    init.add_argument("--plan", action="store_true", help="show cost and reuse without changes")
+    init.add_argument("--offline", action="store_true", help="require exact local dependencies")
+    init.add_argument("--max-download", metavar="SIZE", help="fail above SIZE, e.g. 500MiB")
     init.add_argument(
         "--no-agents",
         dest="agents",
@@ -511,6 +565,22 @@ def parser() -> argparse.ArgumentParser:
         help="do not create the default AGENTS.md project guide",
     )
     init.add_argument("--json", action="store_true")
+
+    scan = commands.add_parser(
+        "scan", help="register local Lake projects as reusable exact dependency seeds"
+    )
+    scan.add_argument("path", type=Path, nargs="?", default=Path("."))
+    scan.add_argument("--no-recursive", dest="recursive", action="store_false")
+    scan.add_argument("--json", action="store_true")
+
+    update = commands.add_parser("update", help="move this project to the latest stable Mathlib")
+    update.add_argument("path", type=Path, nargs="?", default=Path("."))
+    update.add_argument("--seed-from", type=Path, help="reuse an exact local project or tree")
+    update.add_argument("--plan", action="store_true", help="show the update without changes")
+    update.add_argument("--yes", action="store_true", help="apply without an interactive prompt")
+    update.add_argument("--offline", action="store_true", help="require exact local dependencies")
+    update.add_argument("--max-download", metavar="SIZE", help="fail above SIZE, e.g. 500MiB")
+    update.add_argument("--json", action="store_true")
 
     attach = commands.add_parser(
         "attach", help="plan or adopt shared dependencies for existing Lake projects"
@@ -574,31 +644,89 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     operation_started = time.monotonic()
     try:
+        selected_availability = (
+            "local" if args.command in {"init", "update"} and args.offline else args.availability
+        )
+        selected_download_limit = (
+            parse_byte_size(args.max_download)
+            if args.command in {"init", "update"} and args.max_download is not None
+            else None
+        )
         runtime = Runtime(
             home=args.home,
             on_event=None if args.quiet else _progress,
-            availability=args.availability,
+            availability=selected_availability,
             libraries=args.libraries,
+            max_download_bytes=selected_download_limit,
             publisher_verification=args.publisher_verification,
             trusted_publisher=args.trusted_publisher,
             trusted_issuer=args.trusted_issuer,
             verification_tool=args.verification_tool,
         )
         if args.command == "init":
+            init_plan = runtime.plan_project_init(
+                args.path,
+                mathlib=args.mathlib,
+                toolchain=args.toolchain,
+                seed_from=args.seed_from,
+            )
+            if args.plan:
+                if args.json:
+                    _json(init_plan.to_dict())
+                else:
+                    _render_init_plan(init_plan)
+                return 0
+            if not args.json:
+                _render_init_plan(init_plan)
             init_result = runtime.init_project(
                 args.path,
                 mathlib=args.mathlib,
                 toolchain=args.toolchain,
                 agents=args.agents,
+                seed_from=args.seed_from,
             )
             if args.json:
                 _json(init_result.to_dict())
             else:
-                print(f"Created and attached {init_result.root}")
+                verb = "Ready" if init_plan.action == "create" else "Attached"
+                print(f"{verb}: {init_result.root}")
                 print(f"Shared packages: {init_result.packages}")
                 if args.agents:
                     print(f"Agent guide: {init_result.root / 'AGENTS.md'}")
-                print(f"Next: cd {init_result.root} && lean-runtime build .")
+                print(f"Next: cd {init_result.root} && lean-runtime build")
+            return 0
+        if args.command == "scan":
+            scan_result = runtime.scan_projects(args.path, recursive=args.recursive)
+            if args.json:
+                _json(scan_result.to_dict())
+            else:
+                print(f"Registered {len(scan_result.projects)} Lake project(s)")
+                for project_root in scan_result.projects:
+                    print(f"  {project_root}")
+            return 0
+        if args.command == "update":
+            update_plan = runtime.plan_project_update(args.path, seed_from=args.seed_from)
+            if not args.json:
+                _render_update_plan(update_plan)
+            if args.plan or not update_plan.changed or not update_plan.ready:
+                if args.json:
+                    _json({**update_plan.to_dict(), "applied": False})
+                return 0 if update_plan.ready else 1
+            apply_update = args.yes
+            if not apply_update and sys.stdin.isatty() and not args.json:
+                answer = input("Apply this update? [Y/n] ").strip().lower()
+                apply_update = answer in {"", "y", "yes"}
+            if not apply_update:
+                if args.json:
+                    _json({**update_plan.to_dict(), "applied": False})
+                else:
+                    print("No changes made. Re-run with --yes to apply noninteractively.")
+                return 0
+            runtime.update_project(args.path, seed_from=args.seed_from)
+            if args.json:
+                _json({**update_plan.to_dict(), "applied": True})
+            else:
+                print(f"Updated and attached: {update_plan.root}")
             return 0
         if args.command == "attach":
             adoption_plan = runtime.plan_project_adoption(args.path, recursive=args.recursive)
@@ -1042,19 +1170,44 @@ def main(argv: list[str] | None = None) -> int:
                 _render_cleanup(gc_report, gc_downloads)
             return 0
         if args.command == "check":
+            if args.project is not None and args.package_refs:
+                raise ValueError("check cannot combine --project with --with")
             if args.package_refs:
                 if len(args.inputs) != 1:
                     raise ValueError("check with --with expects exactly one FILE")
                 environment = runtime.open_references(args.package_refs, toolchain=args.toolchain)
                 source_file = Path(args.inputs[0])
+            elif len(args.inputs) == 1:
+                if args.include:
+                    raise ValueError("local project checks do not accept --include")
+                source_file = Path(args.inputs[0])
+                if str(source_file) == "-":
+                    result = runtime.check(
+                        sys.stdin.read(),
+                        toolchain=args.toolchain,
+                        project=args.project,
+                        policy=_policy(args),
+                    )
+                else:
+                    result = runtime.check_file(
+                        source_file,
+                        toolchain=args.toolchain,
+                        project=args.project,
+                        policy=_policy(args),
+                    )
+                source_file = None
             else:
                 if len(args.inputs) != 2:
-                    raise ValueError("check expects ENVIRONMENT FILE, or FILE with --with")
+                    raise ValueError("check expects FILE, ENVIRONMENT FILE, or FILE with --with")
                 if args.toolchain:
                     raise ValueError("check --toolchain is only valid with --with")
+                if args.project:
+                    raise ValueError("check --project is only valid with a single FILE")
                 environment = runtime.environment(args.inputs[0])
                 source_file = Path(args.inputs[1])
-            if str(source_file) == "-":
+            if source_file is None:
+                pass
+            elif str(source_file) == "-":
                 if args.include:
                     raise ValueError("stdin entrypoints cannot be combined with --include")
                 result = environment.check(sys.stdin.read(), policy=_policy(args))

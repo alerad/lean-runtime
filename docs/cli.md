@@ -146,25 +146,32 @@ environment can replay offline.
 ## Existing projects and core Lean
 
 ```bash
-lean-runtime check-file Main.lean --toolchain 4.32.2
-lean-runtime check-file ./existing-project/MyProject/Main.lean
-lean-runtime build ./existing-project MyLibrary
-lean-runtime init MyProof --mathlib
-lean-runtime init MyProof --mathlib --no-agents
+lean-runtime check Main.lean --toolchain 4.32.2
+lean-runtime check ./existing-project/MyProject/Main.lean
+lean-runtime build
+lean-runtime init MyProof
+lean-runtime init MyProof --core
+lean-runtime init --plan --max-download 500MiB
+lean-runtime update --plan
+lean-runtime scan ~/research
 lean-runtime attach ~/research --recursive
 lean-runtime attach ~/research --recursive --execute
 lean-runtime detach ./existing-project --execute
 lean-runtime install 4.32.2
 ```
 
-Without `--with`, the environment-aware `check` command requires an environment
-identifier. `check-file` is the direct local-project route. When no
+`check FILE` is the direct standalone/local-project route; the legacy
+`check ENVIRONMENT FILE` spelling remains accepted. When no
 `--project` or `--toolchain` is supplied, it discovers the nearest directory
 containing a Lake configuration and `lean-toolchain`, then passes the actual
 project-relative file to `lake env lean`.
 
-`init` creates a standard core or Mathlib Lake library and attaches its exact
-cataloged dependencies. `attach` is read-only unless `--execute` is present;
+`init` defaults to the newest stable cataloged Mathlib, or adopts an existing
+pinned Lake project without changing its graph. `--core` opts out of Mathlib.
+It prepares dependencies before atomically publishing a new project. `update`
+is the explicit transactional move to the newest cataloged Mathlib; `scan`
+records exact existing graphs as future local seeds. `attach` is read-only
+unless `--execute` is present;
 recursive mode inventories a project tree, reports blockers and estimated disk
 recovery, and adopts each valid project transactionally. `detach` is likewise a
 preview unless `--execute` is present. Attached projects use shared mode by

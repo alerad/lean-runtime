@@ -106,6 +106,7 @@ class ProjectProvenance:
     manifest_digest: str | None
     git_revision: str | None
     git_dirty: bool | None
+    workspace_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
