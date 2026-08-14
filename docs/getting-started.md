@@ -23,6 +23,10 @@ cd MyProof
 lean-runtime build .
 ```
 
+By default, `init` writes an `AGENTS.md` explaining the project workflow and
+shared-dependency safety rules to coding agents. Pass `--no-agents` to omit it.
+An existing file is preserved.
+
 Use `--mathlib 4.33.0` to select that release explicitly. Omit `--mathlib` for
 a core-only library. The root project remains an ordinary mutable Lake project;
 its dependency sources and build artifacts are reused by other projects with

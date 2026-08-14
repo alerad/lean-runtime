@@ -86,6 +86,29 @@ from .verification import (
 
 EnvironmentReference = Environment | EnvironmentSpec | EnvironmentLock | str
 
+_DEFAULT_AGENTS_GUIDE = """# AGENTS.md
+
+## Project workflow
+
+This is a standard Lean 4 and Lake project whose exact dependencies are shared
+through Lean Runtime. Read `lean-toolchain`, the Lake configuration, and
+`lake-manifest.json` before changing the project.
+
+- Use `lean-runtime build .` for the normal full build.
+- Use `lean-runtime check-file PATH` for a focused source check.
+- Ordinary `lake build` and editor tooling work, but `lean-runtime build` also
+  serializes writes when another project uses the same shared dependencies.
+- Do not edit `.lake/packages` or files reached through its package links; they
+  are generated shared dependencies. Keep project changes outside `.lake`.
+- Treat `lake-manifest.json` as authoritative. Do not run `lake update` or change
+  dependency revisions unless the task explicitly requires it.
+- For an intentional dependency update, first run
+  `lean-runtime detach . --execute`, update the ordinary Lake project, then run
+  `lean-runtime attach .` and review the plan before adding `--execute`.
+- Before finishing, check the changed Lean files and run the smallest relevant
+  build; use `lean-runtime build .` when practical.
+"""
+
 
 def _bundled_lock_for_references(
     packages: Sequence[str | PackageReference], toolchain: str | None
@@ -1221,6 +1244,7 @@ class Runtime:
         *,
         mathlib: str | None = None,
         toolchain: str | None = None,
+        agents: bool = True,
     ) -> AdoptionResult:
         """Create a standard Lake library and attach its exact dependencies."""
         from .discovery.defaults import default_catalog
@@ -1367,6 +1391,9 @@ class Runtime:
         if result.failures or not result.results:
             detail = result.failures[0][1] if result.failures else "project was not attachable"
             raise ProjectError(f"project was created but shared setup failed: {detail}")
+        agents_file = target / "AGENTS.md"
+        if agents and not agents_file.exists():
+            agents_file.write_text(_DEFAULT_AGENTS_GUIDE, encoding="utf-8")
         return result.results[0]
 
     def project(

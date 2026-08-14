@@ -504,6 +504,12 @@ def parser() -> argparse.ArgumentParser:
         help="use the newest cataloged Mathlib, or select a version such as 4.33.0",
     )
     init.add_argument("--toolchain")
+    init.add_argument(
+        "--no-agents",
+        dest="agents",
+        action="store_false",
+        help="do not create the default AGENTS.md project guide",
+    )
     init.add_argument("--json", action="store_true")
 
     attach = commands.add_parser(
@@ -580,13 +586,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.command == "init":
             init_result = runtime.init_project(
-                args.path, mathlib=args.mathlib, toolchain=args.toolchain
+                args.path,
+                mathlib=args.mathlib,
+                toolchain=args.toolchain,
+                agents=args.agents,
             )
             if args.json:
                 _json(init_result.to_dict())
             else:
                 print(f"Created and attached {init_result.root}")
                 print(f"Shared packages: {init_result.packages}")
+                if args.agents:
+                    print(f"Agent guide: {init_result.root / 'AGENTS.md'}")
                 print(f"Next: cd {init_result.root} && lean-runtime build .")
             return 0
         if args.command == "attach":
