@@ -61,10 +61,20 @@ Initialization acquires and verifies the exact graph before publishing the
 target directory. Use `--plan` for a side-effect-free cost report, `--offline`
 to require local data, `--max-download SIZE` to enforce a transfer ceiling, or
 `--seed-from PROJECT` to name an exact local donor.
+Offline planning never queries configured registries. A missing exact local
+graph appears as a blocker and makes the planning command fail.
 The plan separately reports whether the full Lake-capable toolchain is already
 installed. Because Elan does not publish a preflight byte count, a missing full
 toolchain is rejected under `--offline` or `--max-download` rather than silently
 bypassing the policy.
+
+An otherwise empty Git root is a valid new-project target. The original `.git`
+directory—or `.git` worktree file—is transferred through the atomic publication
+without changing HEAD, the index, or remotes. A pre-existing `AGENTS.md` is also
+preserved. Other contents must be moved first or represented by an existing
+pinned Lake project; the read-only plan enforces the same rule as execution.
+Use `--name NAME` when creating inside a lowercase or otherwise differently
+named repository and the Lean root module needs an explicit spelling.
 
 For an existing pinned project, `lean-runtime init .` adopts its current
 manifest without changing versions. Register a collection once with

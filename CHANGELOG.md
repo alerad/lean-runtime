@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Allow `lean-runtime init .` at an otherwise empty Git repository root while
+  preserving its original `.git` directory or worktree file, HEAD, and index.
+  Planning and execution now share target validation, so `init --plan` rejects
+  unsupported existing contents before reporting an acquisition-ready plan.
+- Add `init --name NAME` for repository directories whose filesystem spelling
+  should not determine the Lake package and Lean root module name. Repeating
+  the same named initialization is idempotent; a conflicting name is rejected.
+- Make `init --plan --offline` and `update --plan --offline` genuinely
+  network-free. Plans now report explicit blockers and return a failing status
+  when an exact local graph or required full toolchain is unavailable.
+
 ## 2.6.0 - 2026-08-14
 
 - Make the local-project path a four-command workflow: `init`, `check`,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 from collections.abc import Mapping, Sequence
@@ -13,6 +14,11 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover - exercised by the Python 3.10 CI job
+    import tomli as tomllib
 
 from ._paths import remove_tree
 from .backends import Backend, LocalBackend
@@ -1302,6 +1308,18 @@ class Runtime:
             )
         self.toolchains.ensure(toolchain)
 
+    def _project_toolchain_blockers(self, toolchain: str, *, installed: bool) -> tuple[str, ...]:
+        if installed:
+            return ()
+        if self.availability == "local":
+            return (f"offline setup requires the full {toolchain} toolchain locally",)
+        if self.max_download_bytes is not None:
+            return (
+                "the full Lake-capable Lean toolchain is missing and its Elan download "
+                "cannot be preflighted under --max-download",
+            )
+        return ()
+
     def plan_project_update(
         self,
         path: str | os.PathLike[str] = ".",
@@ -1370,16 +1388,24 @@ class Runtime:
         download_bytes: int | None = 0
         complete = True
         if changed:
+            blockers.extend(
+                self._project_toolchain_blockers(latest.toolchain, installed=toolchain_installed)
+            )
             seeds, seed_root = self._project_seed_paths(
                 latest.toolchain,
                 latest_packages,
                 seed_from=Path(seed_from) if seed_from is not None else None,
             )
             if not seeds:
-                acquisition = self.plan_exact(latest.lock, import_roots=("Mathlib",))
-                raw_download = acquisition.get("download_bytes")
-                download_bytes = raw_download if isinstance(raw_download, int) else None
-                complete = acquisition.get("download_bytes_complete") is True
+                if self.availability == "local":
+                    download_bytes = None
+                    complete = False
+                    blockers.append("offline update has no exact local Mathlib dependency graph")
+                else:
+                    acquisition = self.plan_exact(latest.lock, import_roots=("Mathlib",))
+                    raw_download = acquisition.get("download_bytes")
+                    download_bytes = raw_download if isinstance(raw_download, int) else None
+                    complete = acquisition.get("download_bytes_complete") is True
         if not toolchain_installed:
             download_bytes = None
             complete = False
@@ -1564,10 +1590,29 @@ class Runtime:
             return registered, root
         return {}, None
 
+    @staticmethod
+    def _validate_new_project_target(target: Path) -> tuple[Path, ...]:
+        """Validate metadata that can be preserved around an atomic project init."""
+        if not target.exists():
+            return ()
+        if not target.is_dir():
+            raise ProjectError(f"initialization target is not a directory: {target}")
+        entries = tuple(target.iterdir())
+        allowed = {".git", "AGENTS.md"}
+        unsupported = [entry for entry in entries if entry.name not in allowed]
+        if unsupported:
+            names = ", ".join(sorted(entry.name for entry in unsupported))
+            raise ProjectError(
+                f"initialization target is not empty: {target} ({names}); choose an empty "
+                "directory or run `lean-runtime init .` inside an existing Lake project"
+            )
+        return entries
+
     def plan_project_init(
         self,
         path: str | os.PathLike[str] = ".",
         *,
+        name: str | None = None,
         mathlib: str | None = "latest",
         toolchain: str | None = None,
         seed_from: str | os.PathLike[str] | None = None,
@@ -1575,11 +1620,29 @@ class Runtime:
         """Plan project creation or adoption without changing the target."""
         target = Path(path).expanduser().resolve()
         if (target / "lakefile.toml").is_file() or (target / "lakefile.lean").is_file():
+            if name is not None:
+                lakefile = target / "lakefile.toml"
+                if not lakefile.is_file():
+                    raise ProjectError(
+                        "cannot verify --name for an existing lakefile.lean project; omit it"
+                    )
+                try:
+                    with lakefile.open("rb") as stream:
+                        configured_name = tomllib.load(stream).get("name")
+                except (OSError, tomllib.TOMLDecodeError) as exc:
+                    raise ProjectError(f"could not verify existing project --name: {exc}") from exc
+                if configured_name != name:
+                    raise ProjectError(
+                        f"existing project is named {configured_name!r}, not {name!r}"
+                    )
             adoption = self.plan_project_adoption(target).projects[0]
             installed = (
                 self._toolchain_installed(adoption.toolchain)
                 if adoption.toolchain is not None
                 else False
+            )
+            blockers = tuple(adoption.blockers) + self._project_toolchain_blockers(
+                adoption.toolchain or "unknown", installed=installed
             )
             return ProjectInitPlan(
                 target,
@@ -1592,7 +1655,17 @@ class Runtime:
                 True,
                 adoption.attached,
                 installed,
+                None,
+                blockers,
             )
+        self._validate_new_project_target(target)
+        project_name = name or target.name
+        if name is not None and (
+            not name
+            or not (name[0].isalpha() or name[0] == "_")
+            or any(not (character.isalnum() or character == "_") for character in name)
+        ):
+            raise ProjectError("project --name must be a Lean identifier")
         selected = self._mathlib_catalog_entry(mathlib or "latest")
         selected_toolchain = normalize_toolchain(toolchain or selected.toolchain)
         if mathlib is not None and selected_toolchain != selected.toolchain:
@@ -1602,6 +1675,7 @@ class Runtime:
             )
         if mathlib is None:
             installed = self._toolchain_installed(selected_toolchain)
+            blockers = self._project_toolchain_blockers(selected_toolchain, installed=installed)
             return ProjectInitPlan(
                 target,
                 "create",
@@ -1613,6 +1687,8 @@ class Runtime:
                 installed,
                 False,
                 installed,
+                project_name,
+                blockers,
             )
         selected_packages = selected.lock.manifest["packages"]
         assert isinstance(selected_packages, list)
@@ -1621,15 +1697,25 @@ class Runtime:
             selected_packages,
             seed_from=Path(seed_from) if seed_from is not None else None,
         )
+        toolchain_installed = self._toolchain_installed(selected_toolchain)
+        init_blockers = list(
+            self._project_toolchain_blockers(
+                selected_toolchain,
+                installed=toolchain_installed,
+            )
+        )
         if seed_paths:
             download_bytes: int | None = 0
             complete = True
+        elif self.availability == "local":
+            download_bytes = None
+            complete = False
+            init_blockers.append("offline setup has no exact local Mathlib dependency graph")
         else:
             acquisition = self.plan_exact(selected.lock, import_roots=("Mathlib",))
             raw_download = acquisition.get("download_bytes")
             download_bytes = raw_download if isinstance(raw_download, int) else None
             complete = acquisition.get("download_bytes_complete") is True
-        toolchain_installed = self._toolchain_installed(selected_toolchain)
         if not toolchain_installed:
             download_bytes = None
             complete = False
@@ -1644,12 +1730,15 @@ class Runtime:
             complete,
             False,
             toolchain_installed,
+            project_name,
+            tuple(init_blockers),
         )
 
     def init_project(
         self,
         path: str | os.PathLike[str] = ".",
         *,
+        name: str | None = None,
         mathlib: str | None = "latest",
         toolchain: str | None = None,
         agents: bool = True,
@@ -1670,6 +1759,7 @@ class Runtime:
 
         plan = self.plan_project_init(
             target,
+            name=name,
             mathlib=mathlib,
             toolchain=toolchain,
             seed_from=seed_from,
@@ -1697,18 +1787,14 @@ class Runtime:
                 seed_packages = environment.workspace / str(raw_packages)
                 seed_package_paths = None
         target.parent.mkdir(parents=True, exist_ok=True)
-        existing_entries = tuple(target.iterdir()) if target.is_dir() else ()
-        unsupported = [entry for entry in existing_entries if entry.name != "AGENTS.md"]
-        if unsupported:
-            raise ProjectError(
-                f"initialization target is not empty: {target}; use `lean-runtime init .` "
-                "inside an existing Lake project to adopt it"
-            )
+        existing_entries = self._validate_new_project_target(target)
         staging = Path(
             tempfile.mkdtemp(prefix=f".{target.name}.lean-runtime-init-", dir=target.parent)
         )
         backup: Path | None = None
         published = False
+        original_git = next((entry for entry in existing_entries if entry.name == ".git"), None)
+        git_transferred = False
         try:
             custom_agents = target / "AGENTS.md"
             if custom_agents.is_file():
@@ -1719,7 +1805,7 @@ class Runtime:
                 "--offline",
                 f"--dir={staging}",
                 "init",
-                target.name,
+                plan.project_name or target.name,
                 "lib",
             )
             process = subprocess.run(
@@ -1798,6 +1884,14 @@ class Runtime:
             agents_file = staging / "AGENTS.md"
             if agents and not agents_file.exists():
                 agents_file.write_text(_DEFAULT_AGENTS_GUIDE, encoding="utf-8")
+            if original_git is not None:
+                generated_git = staging / ".git"
+                if generated_git.is_dir() and not generated_git.is_symlink():
+                    remove_tree(generated_git)
+                elif generated_git.exists() or generated_git.is_symlink():
+                    generated_git.unlink()
+                original_git.replace(generated_git)
+                git_transferred = True
             if target.exists():
                 backup = target.parent / f".{target.name}.lean-runtime-backup-{os.getpid()}"
                 target.replace(backup)
@@ -1812,6 +1906,13 @@ class Runtime:
                 self.shared_projects.remember_project(context)
             return replace(result.results[0], root=target)
         except BaseException:
+            if git_transferred:
+                staged_git = (target if published else staging) / ".git"
+                restore_root = backup if backup is not None and backup.exists() else target
+                if staged_git.exists() or staged_git.is_symlink():
+                    restore_root.mkdir(parents=True, exist_ok=True)
+                    staged_git.replace(restore_root / ".git")
+                git_transferred = False
             if published:
                 if target.exists():
                     remove_tree(target)

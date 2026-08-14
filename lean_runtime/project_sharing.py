@@ -232,6 +232,12 @@ class ProjectInitPlan:
     download_bytes_complete: bool
     already_attached: bool = False
     toolchain_installed: bool = False
+    project_name: str | None = None
+    blockers: tuple[str, ...] = ()
+
+    @property
+    def ready(self) -> bool:
+        return not self.blockers
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -245,6 +251,9 @@ class ProjectInitPlan:
             "download_bytes_complete": self.download_bytes_complete,
             "already_attached": self.already_attached,
             "toolchain_installed": self.toolchain_installed,
+            "project_name": self.project_name,
+            "ready": self.ready,
+            "blockers": list(self.blockers),
         }
 
 
