@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.6.1 - 2026-08-14
+
 - Allow `lean-runtime init .` at an otherwise empty Git repository root while
   preserving its original `.git` directory or worktree file, HEAD, and index.
   Planning and execution now share target validation, so `init --plan` rejects
