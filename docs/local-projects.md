@@ -69,10 +69,12 @@ toolchain is rejected under `--offline` or `--max-download` rather than silently
 bypassing the policy.
 
 An otherwise empty Git root is a valid new-project target. The original `.git`
-directory—or `.git` worktree file—is transferred through the atomic publication
-without changing HEAD, the index, or remotes. A pre-existing `AGENTS.md` is also
-preserved. Other contents must be moved first or represented by an existing
-pinned Lake project; the read-only plan enforces the same rule as execution.
+directory—or `.git` worktree file—stays in place without changing HEAD, the
+index, or remotes. The existing directory inode also stays live, so invoking
+`lean-runtime init .` does not strand the shell in an unlinked working
+directory. A pre-existing `AGENTS.md` is preserved. Other contents must be moved
+first or represented by an existing pinned Lake project; the read-only plan
+enforces the same rule as execution.
 Use `--name NAME` when creating inside a lowercase or otherwise differently
 named repository and the Lean root module needs an explicit spelling.
 
@@ -106,13 +108,15 @@ lean-runtime attach ~/research --recursive
 lean-runtime attach ~/research --recursive --execute
 ```
 
-The preview groups exact graphs, reports current and estimated shared storage,
-and identifies missing local paths, dirty dependencies, and revision
-mismatches. Execution continues through independent projects while reporting
-per-project failures. It first prepares the exact shared workspace and probes it
-through Lake. Only then does it atomically replace `.lake/packages` with package
-links, probe the resulting project through ordinary Lake, and discard the old
-generated copies. Any failure restores the original package directory.
+The preview groups exact graphs and separately reports checkout bytes removed,
+compatible shared bytes already ready, new shared bytes required, and estimated
+machine-level recovery. It also identifies missing local paths, dirty
+dependencies, and revision mismatches. Execution continues through independent
+projects while reporting per-project failures. It first prepares the exact
+shared workspace and probes it through Lake. Only then does it atomically
+replace `.lake/packages` with package links, probe the resulting project through
+ordinary Lake, and discard the old generated copies. Any failure restores the
+original package directory.
 
 The project itself remains portable. To return to independent package copies:
 
@@ -151,11 +155,19 @@ their artifacts.
 
 The first shared build imports a clean, revision-matching local dependency copy
 when one exists, using copy-on-write filesystem clones where supported. Missing
-sources are fetched at the exact manifest commit. A plain shared build never
+sources are fetched at the exact manifest commit. A later project bypasses
+source resolution when a managed package marker proves that its toolchain,
+platform, revision, and effective dependency closure already match. A plain shared build never
 deletes the old `.lake/packages`; only an explicit `attach --execute` replaces
 those generated copies after verification. `lean-runtime storage` reports
 shared project package usage; automatic cleanup of those packages is not yet
 implemented.
+
+Check capsules and mutable shared packages are intentionally separate storage
+tiers. Capsules are source-free and trimmed for checking; ordinary Lake
+development needs source-shaped packages and build metadata. A capsule can seed
+compatible build artifacts while the exact source workspace is materialized,
+but attached projects ultimately link to the mutable shared-project store.
 
 This mode requires a manifest and never runs `lake update`, so it cannot silently
 change dependency revisions. It also reuses an existing local Git object database

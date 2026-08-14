@@ -7,6 +7,7 @@ import json
 import sys
 import time
 from datetime import datetime
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import Any
 
@@ -172,9 +173,12 @@ def _render_adoption_plan(plan: AdoptionPlan) -> None:
         for warning in project.warnings:
             print(f"           note: {warning}")
     print()
-    print(f"Current dependency copies: {format_byte_size(plan.current_dependency_bytes)}")
-    print(f"Estimated shared copies:   {format_byte_size(plan.estimated_shared_bytes)}")
-    print(f"Potential recovery:        {format_byte_size(plan.estimated_reclaimable_bytes)}")
+    print(f"Checkout bytes removed:    {format_byte_size(plan.checkout_bytes_removed)}")
+    print(f"Shared bytes already ready:{format_byte_size(plan.shared_bytes_reused):>10}")
+    print(f"New shared bytes needed:   {format_byte_size(plan.new_shared_bytes)}")
+    print(
+        f"Estimated machine recovery: {format_byte_size(plan.estimated_machine_reclaimable_bytes)}"
+    )
 
 
 def _render_init_plan(plan: ProjectInitPlan) -> None:
@@ -280,6 +284,11 @@ def _add_policy(parser: argparse.ArgumentParser, *, timeout: float = 120) -> Non
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="lean-runtime")
+    root.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {distribution_version('lean-runtime')}",
+    )
     root.add_argument("--home", help="runtime store root")
     root.add_argument("--quiet", action="store_true", help="suppress progress events")
     root.add_argument("--verbose", action="store_true", help="show detailed decisions and checks")
@@ -747,7 +756,11 @@ def main(argv: list[str] | None = None) -> int:
                     _render_adoption_plan(adoption_plan)
                     print("No changes made. Re-run with --execute to adopt shared packages.")
                 return 0 if adoption_plan.blocked == 0 else 1
-            adoption_result = runtime.attach_projects(args.path, recursive=args.recursive)
+            adoption_result = runtime.attach_projects(
+                args.path,
+                recursive=args.recursive,
+                plan=adoption_plan,
+            )
             if args.json:
                 _json(adoption_result.to_dict())
             else:

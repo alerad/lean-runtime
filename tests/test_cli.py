@@ -63,6 +63,13 @@ def test_project_sharing_commands_have_safe_defaults() -> None:
         parser().parse_args(["build", "demo", "--shared", "--local"])
 
 
+def test_version_does_not_require_a_command(capsys) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        parser().parse_args(["--version"])
+    assert stopped.value.code == 0
+    assert capsys.readouterr().out.startswith("lean-runtime 2.")
+
+
 def test_attach_plan_is_read_only(tmp_path: Path, capsys) -> None:
     project = tmp_path / "project"
     project.mkdir()

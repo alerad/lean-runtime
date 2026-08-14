@@ -177,6 +177,8 @@ For a new project, the target may be absent, empty, or an otherwise empty Git
 repository root; existing Git identity and index state are preserved. A custom
 `AGENTS.md` is also allowed and retained. Other existing contents are rejected
 before acquisition rather than overwritten.
+An existing target directory remains the same live directory, so `init .` does
+not invalidate the invoking shell's working directory.
 When the directory spelling is not the intended Lean module capitalization,
 set it explicitly, for example `lean-runtime init . --name IntegralFramework`.
 

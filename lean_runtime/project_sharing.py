@@ -156,6 +156,8 @@ class AdoptionPlan:
     recursive: bool
     current_dependency_bytes: int
     estimated_shared_bytes: int
+    shared_bytes_reused: int = 0
+    new_shared_bytes: int = 0
 
     @property
     def ready(self) -> int:
@@ -167,7 +169,16 @@ class AdoptionPlan:
 
     @property
     def estimated_reclaimable_bytes(self) -> int:
-        return max(0, self.current_dependency_bytes - self.estimated_shared_bytes)
+        """Compatibility alias for estimated machine-level recovery."""
+        return self.estimated_machine_reclaimable_bytes
+
+    @property
+    def checkout_bytes_removed(self) -> int:
+        return self.current_dependency_bytes
+
+    @property
+    def estimated_machine_reclaimable_bytes(self) -> int:
+        return max(0, self.current_dependency_bytes - self.new_shared_bytes)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -177,6 +188,10 @@ class AdoptionPlan:
             "blocked": self.blocked,
             "current_dependency_bytes": self.current_dependency_bytes,
             "estimated_shared_bytes": self.estimated_shared_bytes,
+            "checkout_bytes_removed": self.checkout_bytes_removed,
+            "shared_bytes_reused": self.shared_bytes_reused,
+            "new_shared_bytes": self.new_shared_bytes,
+            "estimated_machine_reclaimable_bytes": (self.estimated_machine_reclaimable_bytes),
             "estimated_reclaimable_bytes": self.estimated_reclaimable_bytes,
         }
 
@@ -402,10 +417,16 @@ def inspect_adoption(root: Path) -> ProjectAdoption:
     )
 
 
-def plan_adoption(path: Path, *, recursive: bool) -> AdoptionPlan:
+def plan_adoption(
+    path: Path,
+    *,
+    recursive: bool,
+    shared: SharedProjectManager | None = None,
+) -> AdoptionPlan:
     roots = discover_shareable_projects(path, recursive=recursive)
     projects = tuple(inspect_adoption(root) for root in roots)
     groups: dict[str, int] = {}
+    reused_groups: set[str] = set()
     for project in projects:
         if not project.ready or project.attached:
             continue
@@ -417,6 +438,15 @@ def plan_adoption(path: Path, *, recursive: bool) -> AdoptionPlan:
             str(entry["name"]): _entry_identity(identity_entry)
             for entry, identity_entry in zip(entries, identity_entries, strict=True)
         }
+        reusable = (
+            shared.reusable_packages(
+                context,
+                entries,
+                effective_entries=effective_entries,
+            )
+            if shared is not None
+            else {}
+        )
         package_dir = _packages_directory(context)
         for entry in entries:
             if entry["type"] != "git":
@@ -425,23 +455,30 @@ def plan_adoption(path: Path, *, recursive: bool) -> AdoptionPlan:
             local_bytes = _tree_bytes(local)
             subdir = entry.get("subDir")
             source_package = local / subdir if isinstance(subdir, str) and subdir else local
-            if _git_head(local) == entry.get("rev") and source_package.is_dir():
+            reusable_package = reusable.get(str(entry["name"]))
+            if reusable_package is not None:
+                key = reusable_package.name
+                reused_groups.add(key)
+            elif _git_head(local) == entry.get("rev") and source_package.is_dir():
                 identity = _package_identity(
                     context=context,
                     entry=entry,
                     source_package=source_package,
                     effective_entries=effective_entries,
                 )
+                key = sha256_id("project_package", identity)
             else:
                 identity = {
                     "toolchain": context.toolchain,
                     "manifest": manifest,
                     "package": entry,
                 }
-            key = sha256_id("project_adoption_estimate", identity)
+                key = sha256_id("project_adoption_estimate", identity)
             groups[key] = max(groups.get(key, 0), local_bytes)
     current = sum(project.dependency_bytes for project in projects if not project.attached)
-    return AdoptionPlan(projects, recursive, current, sum(groups.values()))
+    reused = sum(size for key, size in groups.items() if key in reused_groups)
+    new = sum(size for key, size in groups.items() if key not in reused_groups)
+    return AdoptionPlan(projects, recursive, current, sum(groups.values()), reused, new)
 
 
 def plan_detachment(root: Path) -> DetachmentPlan:
@@ -499,6 +536,12 @@ class ProjectAdopter:
             seed_packages=seed_packages,
             seed_package_paths=seed_package_paths,
         )
+        self.shared.events.emit(
+            "project.attach.shared_probe_started",
+            f"Verifying shared graph for {context.root.name}",
+            phase="project-attach",
+            packages=len(workspace.package_ids),
+        )
         probe(workspace.overrides_file)
         manifest_packages = _manifest_packages(context)
         override_value = json.loads(workspace.overrides_file.read_text(encoding="utf-8"))
@@ -525,6 +568,13 @@ class ProjectAdopter:
         marker = lake_dir / ATTACHMENT_RECORD
         config = context.root / PROJECT_CONFIG
         try:
+            self.shared.events.emit(
+                "project.attach.swap_started",
+                f"Replacing local dependency copies for {context.root.name}",
+                phase="project-attach",
+                packages=len(workspace.package_ids),
+                checkout_bytes=reclaimed,
+            )
             for entry in manifest_packages:
                 if entry["type"] != "git":
                     continue
@@ -544,6 +594,12 @@ class ProjectAdopter:
                 packages_dir.replace(backup)
             staging.replace(packages_dir)
             swapped = True
+            self.shared.events.emit(
+                "project.attach.attached_probe_started",
+                f"Verifying attached graph for {context.root.name}",
+                phase="project-attach",
+                packages=len(workspace.package_ids),
+            )
             probe(None)
             record = {
                 "schema": ATTACHMENT_SCHEMA,
@@ -556,6 +612,13 @@ class ProjectAdopter:
             write_json_atomic(marker, record)
             config.write_text(_CONFIG_CONTENT, encoding="utf-8")
             _remove_path(backup)
+            self.shared.events.emit(
+                "project.attach.completed",
+                f"Attached shared dependencies for {context.root.name}",
+                phase="project-attach",
+                packages=len(workspace.package_ids),
+                checkout_bytes=reclaimed,
+            )
         except BaseException:
             _remove_path(staging)
             if swapped:
