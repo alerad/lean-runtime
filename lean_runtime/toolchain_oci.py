@@ -16,7 +16,6 @@ from typing import Any
 
 import zstandard
 
-from .bundles import INDEX_MEDIA_TYPE, MANIFEST_MEDIA_TYPE
 from .errors import DownloadUnavailable, EnvironmentError, ToolchainError
 from .events import EventEmitter
 from .locking import FileLock
@@ -24,8 +23,25 @@ from .oci import (
     OCIRegistryClient,
     OCIRepository,
     SignatureVerifier,
-    _json_object,
-    _platform_matches,
+)
+from .oci_protocol import (
+    INDEX_MEDIA_TYPE,
+    MANIFEST_MEDIA_TYPE,
+)
+from .oci_protocol import (
+    blob_descriptor_path as _descriptor,
+)
+from .oci_protocol import (
+    digest_bytes as _digest,
+)
+from .oci_protocol import (
+    digest_path as _digest_path,
+)
+from .oci_protocol import (
+    json_object as _parse_json_object,
+)
+from .oci_protocol import (
+    platform_matches as _platform_matches,
 )
 from .serialization import canonical_json_bytes
 from .store import EnvironmentStore, platform_compatibility
@@ -50,25 +66,8 @@ def toolchain_reference(toolchain: str) -> str:
     return "toolchain-" + hashlib.sha256(identity).hexdigest()
 
 
-def _digest(data: bytes) -> str:
-    return "sha256:" + hashlib.sha256(data).hexdigest()
-
-
-def _digest_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
-
-
-def _descriptor(path: Path, media_type: str, **extra: Any) -> dict[str, Any]:
-    return {
-        "mediaType": media_type,
-        "digest": _digest_path(path),
-        "size": path.stat().st_size,
-        **extra,
-    }
+def _json_object(data: bytes, label: str) -> dict[str, Any]:
+    return _parse_json_object(data, label, subject="OCI")
 
 
 def _write_layer(root: Path, output: Path) -> None:

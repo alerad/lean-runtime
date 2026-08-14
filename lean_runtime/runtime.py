@@ -57,6 +57,7 @@ from .oci import (
 from .policies import ExecutionPolicy, parse_byte_size
 from .profiling import ProfileReport, run_profile
 from .programs import ProgramInfo, ProgramLibrary, ProgramManager, ReadyProgram
+from .project_execution import ProjectExecutor
 from .project_sharing import (
     AdoptionBatchResult,
     AdoptionPlan,
@@ -225,6 +226,7 @@ class Runtime:
         self.store = EnvironmentStore(self.home)
         self.shared_projects = SharedProjectManager(self.home, self.events)
         self.project_adopter = ProjectAdopter(self.shared_projects)
+        self.project_executor = ProjectExecutor(self)
         self.resolver = EnvironmentResolver(self.toolchains, self.store, self.backend, self.events)
         self.environments = EnvironmentManager(
             self.store, self.toolchains, self.backend, self.events
@@ -2131,19 +2133,7 @@ class Runtime:
         policy: ExecutionPolicy,
         cancel: threading.Event | None = None,
     ) -> ExecutionResult:
-        relative = source.relative_to(context.root).as_posix()
-        command = self.toolchains.command(context.toolchain, "lake", "env", "lean", relative)
-        return self._raw_result(
-            command,
-            cwd=context.root,
-            toolchain=context.toolchain,
-            source_digest=sha256_text(source.read_text(encoding="utf-8")),
-            policy=policy,
-            project=context.provenance(),
-            packages=context.package_provenance(),
-            logical_command=("lake", "env", "lean", relative),
-            cancel=cancel,
-        )
+        return self.project_executor.check_file(context, source, policy=policy, cancel=cancel)
 
     def _check_project_source(
         self,
@@ -2154,29 +2144,13 @@ class Runtime:
         policy: ExecutionPolicy,
         cancel: threading.Event | None = None,
     ) -> ExecutionResult:
-        safe_filename = Path(filename).name
-        if not safe_filename.endswith(".lean"):
-            safe_filename += ".lean"
-        jobs = context.root / ".lake" / "lean-runtime"
-        jobs.mkdir(parents=True, exist_ok=True)
-        provenance = context.provenance()
-        with tempfile.TemporaryDirectory(prefix="check-", dir=jobs) as temporary:
-            source_path = Path(temporary) / safe_filename
-            source_path.write_text(source, encoding="utf-8")
-            relative = source_path.relative_to(context.root).as_posix()
-            command = self.toolchains.command(context.toolchain, "lake", "env", "lean", relative)
-            return self._raw_result(
-                command,
-                cwd=context.root,
-                toolchain=context.toolchain,
-                source_digest=sha256_text(source),
-                policy=policy,
-                project=provenance,
-                packages=context.package_provenance(),
-                logical_command=("lake", "env", "lean", safe_filename),
-                path_map={relative: safe_filename, str(source_path): safe_filename},
-                cancel=cancel,
-            )
+        return self.project_executor.check_source(
+            context,
+            source,
+            filename=filename,
+            policy=policy,
+            cancel=cancel,
+        )
 
     def _build_project(
         self,
@@ -2187,39 +2161,13 @@ class Runtime:
         cancel: threading.Event | None = None,
         shared: bool | None = None,
     ) -> ExecutionResult:
-        selected_shared = project_sharing_enabled(context.root) if shared is None else shared
-        workspace = (
-            self.shared_projects.prepare(context, cancel=cancel) if selected_shared else None
+        return self.project_executor.build(
+            context,
+            targets=targets,
+            policy=policy,
+            cancel=cancel,
+            shared=shared,
         )
-        lake_arguments = (
-            (f"--packages={workspace.overrides_file}", "build", *targets)
-            if workspace is not None
-            else ("build", *targets)
-        )
-        command = self.toolchains.command(context.toolchain, "lake", *lake_arguments)
-
-        def run() -> ExecutionResult:
-            return self._raw_result(
-                command,
-                cwd=context.root,
-                toolchain=context.toolchain,
-                source_digest=sha256_text(""),
-                policy=policy,
-                project=context.provenance(),
-                packages=context.package_provenance(),
-                logical_command=(
-                    "lake",
-                    "build",
-                    *(("--shared",) if selected_shared else ()),
-                    *targets,
-                ),
-                cancel=cancel,
-            )
-
-        if workspace is None:
-            return run()
-        with self.shared_projects.build_lock(workspace, cancel=cancel):
-            return run()
 
     def _raw_result(
         self,

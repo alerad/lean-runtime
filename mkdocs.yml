@@ -44,6 +44,7 @@ nav:
       - V1 release case study: case-study-v1.md
   - Concepts:
       - Architecture: architecture.md
+      - Lake artifact-cache design: lake-artifact-cache-design.md
       - Trust and limitations: trust-and-limitations.md
   - Development: development.md
 

@@ -21,8 +21,6 @@ from typing import Any, Protocol
 from .bundles import (
     CAPSULE_BUNDLE_SCHEMA,
     CAPSULE_CONFIG_MEDIA_TYPE,
-    INDEX_MEDIA_TYPE,
-    MANIFEST_MEDIA_TYPE,
     EnvironmentBundles,
     _capsule_config_object,
 )
@@ -31,6 +29,19 @@ from .errors import DownloadLimitExceeded, DownloadUnavailable, EnvironmentError
 from .events import EventEmitter
 from .lockfiles import EnvironmentLock
 from .locking import FileLock
+from .oci_protocol import (
+    INDEX_MEDIA_TYPE,
+    MANIFEST_MEDIA_TYPE,
+)
+from .oci_protocol import (
+    digest_path as _digest_path,
+)
+from .oci_protocol import (
+    json_object as _parse_json_object,
+)
+from .oci_protocol import (
+    platform_matches as _platform_matches,
+)
 from .packs import PACK_MEDIA_TYPE, PackFrame, SparsePack, project_artifacts, unpack_frame
 from .policies import format_byte_size
 from .serialization import canonical_json_bytes
@@ -547,22 +558,8 @@ class OCIRegistryClient:
         return digest
 
 
-def _digest_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
-
-
 def _json_object(data: bytes, label: str) -> dict[str, Any]:
-    try:
-        value = json.loads(data)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise EnvironmentError(f"OCI {label} is not valid JSON") from exc
-    if not isinstance(value, dict):
-        raise EnvironmentError(f"OCI {label} must be a JSON object")
-    return value
+    return _parse_json_object(data, label, subject="OCI")
 
 
 def _manifest_descriptors(manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -570,26 +567,6 @@ def _manifest_descriptors(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     if not all(isinstance(item, dict) for item in descriptors):
         raise EnvironmentError("OCI platform manifest is incomplete")
     return descriptors
-
-
-def _platform_matches(descriptor: dict[str, Any]) -> bool:
-    platform = descriptor.get("platform")
-    if not isinstance(platform, dict):
-        return False
-    compatibility = platform_compatibility()
-    annotations = descriptor.get("annotations")
-    if (
-        not isinstance(annotations, dict)
-        or annotations.get("org.lean-runtime.platform.abi") != compatibility["abi"]
-    ):
-        return False
-    architecture = {"x86_64": "amd64", "arm64": "arm64"}.get(
-        compatibility["machine"], compatibility["machine"]
-    )
-    return (
-        platform.get("os") == compatibility["system"]
-        and platform.get("architecture") == architecture
-    )
 
 
 class OCIEnvironmentCache:
