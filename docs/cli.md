@@ -149,6 +149,10 @@ environment can replay offline.
 lean-runtime check-file Main.lean --toolchain 4.32.2
 lean-runtime check-file ./existing-project/MyProject/Main.lean
 lean-runtime build ./existing-project MyLibrary
+lean-runtime init MyProof --mathlib
+lean-runtime attach ~/research --recursive
+lean-runtime attach ~/research --recursive --execute
+lean-runtime detach ./existing-project --execute
 lean-runtime install 4.32.2
 ```
 
@@ -157,6 +161,13 @@ identifier. `check-file` is the direct local-project route. When no
 `--project` or `--toolchain` is supplied, it discovers the nearest directory
 containing a Lake configuration and `lean-toolchain`, then passes the actual
 project-relative file to `lake env lean`.
+
+`init` creates a standard core or Mathlib Lake library and attaches its exact
+cataloged dependencies. `attach` is read-only unless `--execute` is present;
+recursive mode inventories a project tree, reports blockers and estimated disk
+recovery, and adopts each valid project transactionally. `detach` is likewise a
+preview unless `--execute` is present. Attached projects use shared mode by
+default in `lean-runtime build`; detach before requesting `--local`.
 
 Add supporting source files with repeatable `--include` options:
 

@@ -53,6 +53,13 @@ from .oci import DEFAULT_ENVIRONMENT_LIBRARIES, PublicationInfo
 from .policies import ExecutionPolicy
 from .profiling import ProfileReport
 from .programs import ProgramDescription, ProgramInfo, ReadyProgram
+from .project_sharing import (
+    AdoptionBatchResult,
+    AdoptionPlan,
+    AdoptionResult,
+    DetachmentPlan,
+    ProjectAdoption,
+)
 from .projects import (
     ProjectContext,
     ProjectEnvironment,
@@ -74,6 +81,10 @@ __version__ = _distribution_version("lean-runtime")
 __all__ = [
     "Diagnostic",
     "Decision",
+    "AdoptionBatchResult",
+    "AdoptionPlan",
+    "AdoptionResult",
+    "DetachmentPlan",
     "EnvironmentComparison",
     "ComparisonEntry",
     "PortableCopyInfo",
@@ -112,6 +123,7 @@ __all__ = [
     "PackageProvenance",
     "PhaseTiming",
     "ProjectContext",
+    "ProjectAdoption",
     "ProjectEnvironment",
     "SharedProjectWorkspace",
     "ProjectPublicationPlan",

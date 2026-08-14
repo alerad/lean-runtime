@@ -40,8 +40,55 @@ result = project.check("import MyProject\nexample : True := by trivial")
 ## Reusing dependencies across projects
 
 Ordinary Lake workspaces put remote dependencies and their build artifacts in
-each repository's `.lake/packages`. If many projects pin the same graph, use a
-shared build instead:
+each repository's `.lake/packages`. New projects can start in shared mode:
+
+```bash
+lean-runtime init MyProof --mathlib
+cd MyProof
+lean-runtime build .
+```
+
+The generated files are a standard Lake project plus a small
+`lean-runtime.toml`. Root build outputs stay local; exact dependencies are
+shared. Select a cataloged release with `--mathlib 4.33.0`, or omit `--mathlib`
+for a core-only library.
+
+For one existing project, preview before changing anything:
+
+```bash
+lean-runtime attach .
+lean-runtime attach . --execute
+```
+
+For a directory containing many projects:
+
+```bash
+lean-runtime attach ~/research --recursive
+lean-runtime attach ~/research --recursive --execute
+```
+
+The preview groups exact graphs, reports current and estimated shared storage,
+and identifies missing local paths, dirty dependencies, and revision
+mismatches. Execution continues through independent projects while reporting
+per-project failures. It first prepares the exact shared workspace and probes it
+through Lake. Only then does it atomically replace `.lake/packages` with package
+links, probe the resulting project through ordinary Lake, and discard the old
+generated copies. Any failure restores the original package directory.
+
+The project itself remains portable. To return to independent package copies:
+
+```bash
+lean-runtime detach .
+lean-runtime detach . --execute
+```
+
+Detachment copy-on-write clones the exact packages where the filesystem allows,
+probes the standalone graph, and only then removes the attachment metadata. The
+preview reports the maximum independent-copy size and available disk space;
+execution refuses to rely on copy-on-write support when there is not enough
+space for a full fallback copy.
+
+The lower-level opt-in remains available without changing project layout:
 
 ```bash
 lean-runtime build . --shared
@@ -65,23 +112,30 @@ their artifacts.
 
 The first shared build imports a clean, revision-matching local dependency copy
 when one exists, using copy-on-write filesystem clones where supported. Missing
-sources are fetched at the exact manifest commit. Lean Runtime does not delete
-the old `.lake/packages`; after verifying the shared build, those old copies can
-be removed separately if desired. `lean-runtime storage` reports shared project
-package usage; automatic cleanup of those packages is not yet implemented.
+sources are fetched at the exact manifest commit. A plain shared build never
+deletes the old `.lake/packages`; only an explicit `attach --execute` replaces
+those generated copies after verification. `lean-runtime storage` reports
+shared project package usage; automatic cleanup of those packages is not yet
+implemented.
 
 This mode requires a manifest and never runs `lake update`, so it cannot silently
 change dependency revisions. It also reuses an existing local Git object database
 when that database contains another requested revision, avoiding redundant Git
 downloads. Local `path` dependencies remain at their declared locations and are
-included in the workspace identity. Use `lean-runtime build . --shared` after
-changing the manifest or a local path dependency.
+included in the workspace identity. Attached projects automatically use shared
+mode when run through `lean-runtime build`; `--local` is an explicit escape
+hatch for unattached checkouts. An attached project must be detached before a
+local build, so `--local` cannot silently continue using shared links. After
+changing the manifest or a local path dependency, rerun `lean-runtime attach .
+--execute` to refresh the ordinary-Lake links.
 
 This differs from `lake env lean File.lean`: that command only constructs the
 current workspace's environment and checks one file; it neither builds missing
 imports nor shares dependencies with another checkout. The shared build still
 uses Lake's real build graph and project targets—it only changes where locked
-dependencies come from.
+dependencies come from. Attached links also let ordinary `lake build` and the
+editor load the graph; prefer `lean-runtime build` when several projects may
+build concurrently, because it serializes writes to shared artifacts.
 
 ## Mutable-project provenance
 

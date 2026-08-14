@@ -19,6 +19,7 @@ from .lockfiles import EnvironmentLock
 from .matrix import load_matrix
 from .models import ExecutionResult, PhaseTiming
 from .policies import ExecutionPolicy, format_byte_size
+from .project_sharing import AdoptionPlan
 from .projects import discover_project, project_publication_workflow
 from .runtime import Runtime
 from .specs import EnvironmentSpec
@@ -153,6 +154,27 @@ def _render_cleanup(environments: CleanupReport, downloads: DownloadCleanupRepor
     else:
         print("Nothing needed cleaning.")
     print(retained_note)
+
+
+def _render_adoption_plan(plan: AdoptionPlan) -> None:
+    print(
+        f"Found {len(plan.projects)} Lake project(s): "
+        f"{plan.ready} ready, {plan.blocked} requiring attention"
+    )
+    for project in plan.projects:
+        state = "attached" if project.attached else "ready" if project.ready else "blocked"
+        print(
+            f"  {state:8} {project.root} · {len(project.packages)} packages · "
+            f"{format_byte_size(project.dependency_bytes)}"
+        )
+        for blocker in project.blockers:
+            print(f"           blocker: {blocker}")
+        for warning in project.warnings:
+            print(f"           note: {warning}")
+    print()
+    print(f"Current dependency copies: {format_byte_size(plan.current_dependency_bytes)}")
+    print(f"Estimated shared copies:   {format_byte_size(plan.estimated_shared_bytes)}")
+    print(f"Potential recovery:        {format_byte_size(plan.estimated_reclaimable_bytes)}")
 
 
 def _progress(event: RuntimeEvent) -> None:
@@ -457,12 +479,47 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("targets", nargs="*")
     build.add_argument("--toolchain")
     build.add_argument("--timeout", type=float, default=900)
-    build.add_argument(
+    build_storage = build.add_mutually_exclusive_group()
+    build_storage.add_argument(
         "--shared",
+        dest="shared",
         action="store_true",
+        default=None,
         help="reuse an exact dependency workspace managed by lean-runtime",
     )
+    build_storage.add_argument(
+        "--local",
+        dest="shared",
+        action="store_false",
+        help="use checkout-local packages (detach an attached project first)",
+    )
     build.add_argument("--json", action="store_true")
+
+    init = commands.add_parser("init", help="create a standard Lake project in shared mode")
+    init.add_argument("path", type=Path)
+    init.add_argument(
+        "--mathlib",
+        nargs="?",
+        const="latest",
+        help="use the newest cataloged Mathlib, or select a version such as 4.33.0",
+    )
+    init.add_argument("--toolchain")
+    init.add_argument("--json", action="store_true")
+
+    attach = commands.add_parser(
+        "attach", help="plan or adopt shared dependencies for existing Lake projects"
+    )
+    attach.add_argument("path", type=Path, nargs="?", default=Path("."))
+    attach.add_argument("--recursive", action="store_true")
+    attach.add_argument("--execute", action="store_true", help="apply the displayed plan")
+    attach.add_argument("--json", action="store_true")
+
+    detach = commands.add_parser(
+        "detach", help="plan or materialize independent dependencies for one project"
+    )
+    detach.add_argument("path", type=Path, nargs="?", default=Path("."))
+    detach.add_argument("--execute", action="store_true", help="copy dependencies locally")
+    detach.add_argument("--json", action="store_true")
 
     install = commands.add_parser("install", help="install a Lean toolchain")
     install.add_argument("toolchain")
@@ -521,6 +578,67 @@ def main(argv: list[str] | None = None) -> int:
             trusted_issuer=args.trusted_issuer,
             verification_tool=args.verification_tool,
         )
+        if args.command == "init":
+            init_result = runtime.init_project(
+                args.path, mathlib=args.mathlib, toolchain=args.toolchain
+            )
+            if args.json:
+                _json(init_result.to_dict())
+            else:
+                print(f"Created and attached {init_result.root}")
+                print(f"Shared packages: {init_result.packages}")
+                print(f"Next: cd {init_result.root} && lean-runtime build .")
+            return 0
+        if args.command == "attach":
+            adoption_plan = runtime.plan_project_adoption(args.path, recursive=args.recursive)
+            if not args.execute:
+                if args.json:
+                    _json(adoption_plan.to_dict())
+                else:
+                    _render_adoption_plan(adoption_plan)
+                    print("No changes made. Re-run with --execute to adopt shared packages.")
+                return 0 if adoption_plan.blocked == 0 else 1
+            adoption_result = runtime.attach_projects(args.path, recursive=args.recursive)
+            if args.json:
+                _json(adoption_result.to_dict())
+            else:
+                _render_adoption_plan(adoption_result.plan)
+                for attached in adoption_result.results:
+                    print(
+                        f"{attached.action}: {attached.root} · "
+                        f"{format_byte_size(attached.reclaimed_bytes)} replaced"
+                    )
+                for root, message in adoption_result.failures:
+                    print(f"failed: {root}: {message}", file=sys.stderr)
+            return 0 if adoption_result.ok else 1
+        if args.command == "detach":
+            detachment_plan = runtime.plan_project_detachment(args.path)
+            if not args.execute:
+                if args.json:
+                    _json(detachment_plan.to_dict())
+                else:
+                    print(
+                        f"Would materialize {len(detachment_plan.packages)} independent "
+                        f"package copy/copies for {detachment_plan.root}"
+                    )
+                    print(
+                        f"Maximum additional space: "
+                        f"{format_byte_size(detachment_plan.materialize_bytes)} · "
+                        f"{format_byte_size(detachment_plan.bytes_free)} free"
+                    )
+                    for blocker in detachment_plan.blockers:
+                        print(f"  blocker: {blocker}")
+                    print("No changes made. Re-run with --execute to detach.")
+                return 0 if detachment_plan.ready else 1
+            detach_result = runtime.detach_project(args.path)
+            if args.json:
+                _json(detach_result.to_dict())
+            else:
+                print(
+                    f"Detached {detach_result.root}; "
+                    f"materialized {detach_result.packages} package(s)"
+                )
+            return 0
         if args.command == "project":
             if args.project_command == "inspect":
                 plan = runtime.inspect_project_publication(
@@ -960,6 +1078,9 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
                 shared=args.shared,
             )
+    except KeyboardInterrupt:
+        print("lean-runtime: interrupted", file=sys.stderr)
+        return 130
     except (ResolutionError, MaterializationError) as exc:
         details = {
             "phase": exc.phase,

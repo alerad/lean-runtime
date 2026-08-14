@@ -466,7 +466,7 @@ class ProjectEnvironment:
         *,
         policy: ExecutionPolicy | None = None,
         cancel: threading.Event | None = None,
-        shared: bool = False,
+        shared: bool | None = None,
     ) -> ExecutionResult:
         return self.runtime._build_project(
             self.context,

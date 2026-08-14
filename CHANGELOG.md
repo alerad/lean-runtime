@@ -2,12 +2,20 @@
 
 ## Unreleased
 
-- Add opt-in shared Lake dependency workspaces. `lean-runtime build PROJECT
-  --shared` runs the pinned project's normal targets while reusing each exact
-  package across different root manifests when its effective transitive
-  closure, toolchain, and platform match. Existing `.lake/packages` are never
-  deleted, concurrent writers are serialized, and local Git object databases
-  seed other revisions without another network clone.
+- Add shared Lake project onboarding and migration. `lean-runtime init` creates
+  a standard core or cataloged-Mathlib project; `attach` previews or
+  transactionally adopts one project or an entire recursive tree; and `detach`
+  materializes independent copies again. Adoption preserves root build output,
+  rejects dirty or mismatched dependencies, verifies both generated overrides
+  and ordinary Lake package links, and rolls back failed swaps. Attached
+  projects automatically use shared mode in `lean-runtime build`.
+- Add content-addressed Lake dependency workspaces. Each exact package is reused
+  across root manifests when its effective transitive closure, toolchain, and
+  platform match. Concurrent runtime builds are serialized, existing clean
+  artifacts seed the store with copy-on-write clones, and local Git object
+  databases seed other revisions without another network clone. Plain
+  `build --shared` never modifies the checkout; only explicit
+  `attach --execute` removes verified generated duplicates.
 
 - Add versioned check capsules: publisher-built manifests record every retained
   module facet, exact import edges, content digest, package owner, and
