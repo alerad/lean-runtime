@@ -9,6 +9,27 @@ permissions:
   contents: read
 
 jobs:
+  lake-artifact-cache:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/lean-runtime-gate
+          key: lean-runtime-lake-cache-${{ runner.os }}-v4.33.0
+      - run: python -m pip install -e .
+      - run: python scripts/lake_cache_gate.py
+        env:
+          LEAN_RUNTIME_CACHE_GATE_HOME: ~/.cache/lean-runtime-gate
+
   mathlib:
     strategy:
       fail-fast: false

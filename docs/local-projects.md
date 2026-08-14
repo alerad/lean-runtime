@@ -46,8 +46,23 @@ each repository's `.lake/packages`. New projects can start in shared mode:
 lean-runtime init MyProof
 cd MyProof
 lean-runtime check MyProof/Basic.lean
+lean-runtime check
 lean-runtime build
 ```
+
+The fileless form asks Lake for the project's declared local libraries and
+builds their `leanArts` facets. Lake therefore expands roots and submodules,
+orders local imports, and creates any intermediate local `.olean` files; Lean
+Runtime does not parse module globs or implement a second build scheduler. It
+does not request executable or native-library targets. The Python equivalent is
+`Runtime().project(".").check_all()`.
+
+Projects created by `init` on a supported Lake also opt their root package into
+Lake's native artifact cache. Lean Runtime capability-probes the resolved Lake executable
+once, stores the result per exact toolchain and platform ABI, and otherwise
+stays silent. Only root-project outputs enter this cache: locked dependencies
+continue to use the verified shared workspace, avoiding a second multi-gigabyte
+copy. `build` retains Lake's complete target semantics.
 
 The generated files are a standard Lake project plus a small
 `lean-runtime.toml`. Root build outputs stay local; exact dependencies are

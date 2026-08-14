@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import subprocess
@@ -85,3 +86,47 @@ def test_is_installed_lists_toolchains_without_running_lean(
     assert manager.is_installed("4.32.0")
     assert not manager.is_installed("4.30.0")
     assert all(command[1:] == ["toolchain", "list"] for command in calls)
+
+
+def test_executable_digest_identifies_the_exact_toolchain_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = ToolchainManager(tmp_path / "runtime")
+    toolchain = "leanprover/lean4:v4.33.0"
+    binary = manager._elan_toolchain_dir(toolchain) / "bin" / "lake"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"exact lake binary")
+    monkeypatch.setattr(manager, "ensure", lambda _toolchain: toolchain)
+
+    assert manager.executable_digest(toolchain, "lake") == (
+        "sha256:" + hashlib.sha256(b"exact lake binary").hexdigest()
+    )
+
+
+def test_ensure_full_does_not_accept_a_slim_toolchain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = ToolchainManager(tmp_path / "runtime")
+    toolchain = "leanprover/lean4:v4.33.0"
+    slim = manager.slim_path(toolchain)
+    (slim / "bin").mkdir(parents=True)
+    (slim / "bin" / "lean").write_text("")
+    calls: list[list[str]] = []
+
+    def execute(_backend, command, **_kwargs):
+        calls.append(list(command))
+        full = manager._elan_toolchain_dir(toolchain) / "bin"
+        full.mkdir(parents=True)
+        (full / "lean").write_text("")
+        (full / "lake").write_text("")
+        from lean_runtime.backends import BackendResult
+
+        return BackendResult(0, "", "", 0.01, False, False, False, ())
+
+    elan = tmp_path / "elan"
+    elan.write_text("")
+    monkeypatch.setenv("LEAN_RUNTIME_ELAN", str(elan))
+    monkeypatch.setattr("lean_runtime.toolchains.LocalBackend.execute", execute)
+
+    assert manager.ensure_full(toolchain) == toolchain
+    assert calls and calls[0][-3:] == ["toolchain", "install", toolchain]

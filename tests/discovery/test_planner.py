@@ -133,3 +133,16 @@ def test_bundled_catalog_keeps_mathlib_and_leancert_discovery_distinct() -> None
 
     assert mathlib.candidates[0].entry.id == "mathlib-v4.33.0"
     assert leancert.candidates[0].entry.id == "leancert-v4.33.0"
+
+
+def test_compatibility_profiles_only_check_advertised_catalog_roots() -> None:
+    import json
+    from pathlib import Path
+
+    catalog = default_catalog()
+    entries = {entry.id: entry for entry in catalog.entries}
+    root = Path(__file__).parents[2] / "compatibility"
+    for version in ("4.32.2", "4.33.0"):
+        profile = json.loads((root / f"mathlib-{version}.json").read_text())
+        entry = entries[f"mathlib-v{version}"]
+        assert set(profile["imports"]) <= set(entry.modules)

@@ -152,6 +152,8 @@ default, and exact dependencies are shared automatically:
 lean-runtime init MyProof
 cd MyProof
 lean-runtime check MyProof/Basic.lean
+# Check every declared local library, in Lake dependency order:
+lean-runtime check
 lean-runtime build
 ```
 
