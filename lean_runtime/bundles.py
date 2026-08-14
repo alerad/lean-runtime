@@ -5,7 +5,6 @@ from __future__ import annotations
 import gzip
 import hashlib
 import io
-import json
 import os
 import re
 import shutil
@@ -38,6 +37,22 @@ from .events import EventEmitter
 from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock, LockedPackage
 from .locking import FileLock
+from .oci_protocol import (
+    INDEX_MEDIA_TYPE,
+    MANIFEST_MEDIA_TYPE,
+)
+from .oci_protocol import (
+    blob_descriptor_path as _blob_descriptor_path,
+)
+from .oci_protocol import (
+    descriptor_blob_path as _descriptor_blob_path,
+)
+from .oci_protocol import (
+    json_object as _json_object,
+)
+from .oci_protocol import (
+    require_media_type as _require_media_type,
+)
 from .packs import (
     PACK_MEDIA_TYPE,
     SparsePack,
@@ -60,8 +75,6 @@ CAPSULE_BUNDLE_SCHEMA = "lean-runtime-oci-capsule/1"
 CONFIG_MEDIA_TYPE = "application/vnd.lean-runtime.environment.config.v1+json"
 CAPSULE_CONFIG_MEDIA_TYPE = "application/vnd.lean-runtime.capsule.config.v1+json+zstd"
 LAYER_MEDIA_TYPE = "application/vnd.lean-runtime.environment.layer.v1.tar+gzip"
-MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
-INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 MAX_BUNDLE_BYTES = 20 * 1024**3
 MAX_FILES = 2_000_000
 SOURCE_TREE_INVENTORY = ".lean-runtime-source-tree.json"
@@ -84,18 +97,6 @@ class PortableCopyInfo:
         }
 
 
-def _digest(data: bytes) -> str:
-    return "sha256:" + hashlib.sha256(data).hexdigest()
-
-
-def _digest_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
-
-
 def _capsule_config_bytes(value: Mapping[str, Any]) -> bytes:
     return zstandard.ZstdCompressor(level=10, write_checksum=True).compress(
         canonical_json_bytes(dict(value))
@@ -110,19 +111,6 @@ def _capsule_config_object(data: bytes) -> dict[str, Any]:
     except zstandard.ZstdError as exc:
         raise EnvironmentError("OCI capsule config is not valid zstd data") from exc
     return _json_object(decoded, "capsule config")
-
-
-def _blob_descriptor(data: bytes, media_type: str, **extra: Any) -> dict[str, Any]:
-    return {"mediaType": media_type, "digest": _digest(data), "size": len(data), **extra}
-
-
-def _blob_descriptor_path(path: Path, media_type: str, **extra: Any) -> dict[str, Any]:
-    return {
-        "mediaType": media_type,
-        "digest": _digest_path(path),
-        "size": path.stat().st_size,
-        **extra,
-    }
 
 
 def _normalized_info(name: str, *, mode: int, kind: bytes = tarfile.REGTYPE) -> tarfile.TarInfo:
@@ -243,43 +231,6 @@ def _write_oci_archive(entries: dict[str, Path], output: Path) -> None:
             info.size = path.stat().st_size
             with path.open("rb") as handle:
                 archive.addfile(info, handle)
-
-
-def _json_object(data: bytes, label: str) -> dict[str, Any]:
-    try:
-        value = json.loads(data)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise EnvironmentError(f"bundle {label} is not valid JSON") from exc
-    if not isinstance(value, dict):
-        raise EnvironmentError(f"bundle {label} must be a JSON object")
-    return value
-
-
-def _descriptor_blob(entries: dict[str, bytes], descriptor: dict[str, Any], label: str) -> bytes:
-    digest = descriptor.get("digest")
-    size = descriptor.get("size")
-    if not isinstance(digest, str) or not digest.startswith("sha256:"):
-        raise EnvironmentError(f"bundle {label} has an invalid digest")
-    data = entries.get("blobs/sha256/" + digest.removeprefix("sha256:"))
-    if data is None or len(data) != size or _digest(data) != digest:
-        raise EnvironmentError(f"bundle {label} digest mismatch")
-    return data
-
-
-def _descriptor_blob_path(entries: dict[str, Path], descriptor: dict[str, Any], label: str) -> Path:
-    digest = descriptor.get("digest")
-    size = descriptor.get("size")
-    if not isinstance(digest, str) or not digest.startswith("sha256:"):
-        raise EnvironmentError(f"bundle {label} has an invalid digest")
-    path = entries.get("blobs/sha256/" + digest.removeprefix("sha256:"))
-    if path is None or path.stat().st_size != size or _digest_path(path) != digest:
-        raise EnvironmentError(f"bundle {label} digest mismatch")
-    return path
-
-
-def _require_media_type(descriptor: dict[str, Any], expected: str, label: str) -> None:
-    if descriptor.get("mediaType") != expected:
-        raise EnvironmentError(f"bundle {label} has an unsupported media type")
 
 
 def _safe_name(name: str) -> PurePosixPath:

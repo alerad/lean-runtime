@@ -23,13 +23,7 @@ from typing import Any, cast
 from ._paths import remove_tree
 from .backends import Backend, BackendResult, InteractiveProcess
 from .bundles import (
-    INDEX_MEDIA_TYPE,
-    MANIFEST_MEDIA_TYPE,
-    _blob_descriptor_path,
-    _descriptor_blob_path,
     _extract_layer,
-    _json_object,
-    _require_media_type,
     _safe_name,
     _write_tar_gzip,
 )
@@ -43,6 +37,23 @@ from .oci import (
     OCIRegistryClient,
     OCIRepository,
     SignatureVerifier,
+)
+from .oci_protocol import (
+    INDEX_MEDIA_TYPE,
+    MANIFEST_MEDIA_TYPE,
+    platform_matches,
+)
+from .oci_protocol import (
+    blob_descriptor_path as _blob_descriptor_path,
+)
+from .oci_protocol import (
+    descriptor_blob_path as _descriptor_blob_path,
+)
+from .oci_protocol import (
+    json_object as _json_object,
+)
+from .oci_protocol import (
+    require_media_type as _require_media_type,
 )
 from .policies import ExecutionPolicy
 from .serialization import canonical_json_bytes, sha256_id, write_json_atomic
@@ -576,20 +587,7 @@ class ProgramManager:
 
 
 def _platform_matches(descriptor: Mapping[str, Any]) -> bool:
-    platform = descriptor.get("platform")
-    annotations = descriptor.get("annotations")
-    compatibility = platform_compatibility()
-    architecture = {"x86_64": "amd64", "arm64": "arm64"}.get(
-        compatibility["machine"], compatibility["machine"]
-    )
-    return (
-        isinstance(platform, dict)
-        and isinstance(annotations, dict)
-        and platform.get("os") == compatibility["system"]
-        and platform.get("architecture") == architecture
-        and annotations.get("org.lean-runtime.platform.abi") == compatibility["abi"]
-        and annotations.get("org.lean-runtime.artifact.kind") == "execution-program"
-    )
+    return platform_matches(descriptor, artifact_kind="execution-program")
 
 
 class ProgramLibrary:
