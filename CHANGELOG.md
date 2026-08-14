@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.5.0 - 2026-08-14
+
 - Make `lean-runtime init` create a concise `AGENTS.md` with build, checking,
   and shared-dependency safety instructions by default. `--no-agents` opts out,
   and existing guides are preserved.
