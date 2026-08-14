@@ -1,7 +1,7 @@
 # Lean Runtime
 
 Lean Runtime runs Lean proofs from Python or a single `.lean` file. It discovers
-local Lake projects or compiles friendly exact dependencies into a
+local Lake projects or compiles friendly exact dependencies into an
 exact reusable environment, then returns structured results and a record of what
 was used.
 
@@ -28,9 +28,12 @@ It deliberately does not replace the official tools:
 
 The front-facing API supports setup-once Python environments, one-shot helpers,
 friendly exact package references, standalone TOML frontmatter, local-project
-discovery, exact lock output, batch checking, and asyncio. The explicit runtime
-also exposes environment libraries, portable copies, trusted publishers,
-verification, captures, policies, and storage lifecycle operations.
+discovery, shared Lake dependencies, exact lock output, batch checking, and
+asyncio. New projects can begin with a shared catalog-pinned Mathlib graph;
+existing project trees can preview and transactionally adopt the same layout.
+The explicit runtime also exposes environment libraries, portable copies,
+trusted publishers, verification, captures, policies, and storage lifecycle
+operations.
 
 The local backend executes **trusted inputs only**. Lean packages and Lake
 configuration can run native programs and arbitrary build commands; the local

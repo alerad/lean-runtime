@@ -6,10 +6,41 @@
 python -m pip install lean-runtime
 ```
 
-On macOS and Linux, Lean Runtime installs requested Lean versions through its
+On macOS and Linux, Lean Runtime first uses a published slim check toolchain when
+one is available and otherwise installs the requested Lean version through its
 private, checksum-verified Elan installation. It does not change the user's
 default toolchain or shell profile. Windows currently requires an existing Elan
 executable through `LEAN_RUNTIME_ELAN`.
+
+## Start a Lake project
+
+Create a standard Lake library with the newest cataloged Mathlib release and
+shared exact dependencies:
+
+```bash
+lean-runtime init MyProof --mathlib
+cd MyProof
+lean-runtime build .
+```
+
+Use `--mathlib 4.33.0` to select that release explicitly. Omit `--mathlib` for
+a core-only library. The root project remains an ordinary mutable Lake project;
+its dependency sources and build artifacts are reused by other projects with
+the same exact graph.
+
+For an existing project or a directory containing many projects, preview the
+migration before applying it:
+
+```bash
+lean-runtime attach .
+lean-runtime attach ~/research --recursive
+lean-runtime attach ~/research --recursive --execute
+```
+
+The first two commands are read-only. Execution verifies the shared graph,
+replaces only generated package copies, and rolls back the swap if ordinary
+Lake cannot load the result. See [Local Lake projects](local-projects.md) for
+detachment, storage estimates, and the complete safety model.
 
 ## Run a file
 
