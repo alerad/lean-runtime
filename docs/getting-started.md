@@ -27,7 +27,9 @@ lean-runtime build
 
 By default, `init` writes an `AGENTS.md` explaining the project workflow and
 shared-dependency safety rules to coding agents. Pass `--no-agents` to omit it.
-An existing file is preserved.
+An existing file is preserved. The generated root imports only the project's
+local `Basic` module; add the narrow Mathlib imports each implementation file
+needs rather than paying for the all-Mathlib umbrella on every root import.
 
 Use `--mathlib 4.33.0` to select that release explicitly, or `--core` for a
 core-only library. The root project remains an ordinary mutable Lake project;
