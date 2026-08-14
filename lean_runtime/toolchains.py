@@ -287,6 +287,35 @@ class ToolchainManager:
             )
         return name
 
+    def ensure_full(self, toolchain: str, *, cancel: threading.Event | None = None) -> str:
+        """Install the full Lake-capable toolchain even when a slim copy exists."""
+        name = normalize_toolchain(toolchain)
+        directory = self._elan_toolchain_dir(name)
+        if (directory / "bin" / "lean").is_file() and (directory / "bin" / "lake").is_file():
+            return name
+        self.events.emit(
+            "toolchain.install_started",
+            f"Installing full Lean toolchain {name}",
+            toolchain=name,
+            capability="lake",
+        )
+        process = LocalBackend().execute(
+            [str(self.elan_path()), "toolchain", "install", name],
+            cwd=self.home,
+            environment=self.environment,
+            policy=ExecutionPolicy(timeout_seconds=1800, max_output_bytes=10_000_000),
+            cancel=cancel,
+        )
+        if process.cancelled:
+            raise ToolchainError(f"Lean toolchain installation was cancelled: {name!r}")
+        if process.exit_code:
+            raise ToolchainError(
+                f"could not install full Lean toolchain {name!r}:\n{process.stdout}{process.stderr}"
+            )
+        if not (directory / "bin" / "lake").is_file():
+            raise ToolchainError(f"installed toolchain {name!r} does not provide 'lake'")
+        return name
+
     def command(self, toolchain: str, executable: str, *args: str) -> list[str]:
         """Construct a command pinned to one toolchain.
 

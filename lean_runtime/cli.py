@@ -861,7 +861,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Created {output}")
             return 0
         if args.command == "install":
-            print(runtime.toolchains.ensure(args.toolchain))
+            print(runtime.toolchains.ensure_full(args.toolchain))
             return 0
         if args.command == "prepare":
             lock = runtime.prepare(EnvironmentSpec.load(args.spec), timeout=args.timeout)

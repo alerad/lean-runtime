@@ -1345,7 +1345,8 @@ class Runtime:
                 "size cannot be preflighted; refusing under --max-download; install the "
                 "toolchain first with `lean-runtime install VERSION`"
             )
-        self.toolchains.ensure(toolchain)
+        ensure_full = getattr(self.toolchains, "ensure_full", self.toolchains.ensure)
+        ensure_full(toolchain)
 
     def _project_toolchain_blockers(self, toolchain: str, *, installed: bool) -> tuple[str, ...]:
         if installed:
