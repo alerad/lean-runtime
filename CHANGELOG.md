@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add opt-in shared Lake dependency workspaces. `lean-runtime build PROJECT
+  --shared` runs the pinned project's normal targets while reusing each exact
+  package across different root manifests when its effective transitive
+  closure, toolchain, and platform match. Existing `.lake/packages` are never
+  deleted, concurrent writers are serialized, and local Git object databases
+  seed other revisions without another network clone.
+
 - Add versioned check capsules: publisher-built manifests record every retained
   module facet, exact import edges, content digest, package owner, and
   capability. Publication now fails unless the full environment and a
