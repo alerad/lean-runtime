@@ -18,18 +18,26 @@ fi
 
 release_work="$(mktemp -d)"
 release_commit_ready=false
+cp pyproject.toml "$release_work/pyproject.toml.before"
+cp CHANGELOG.md "$release_work/CHANGELOG.md.before"
 cleanup() {
-  rm -rf "$release_work"
   if [[ "$release_commit_ready" != true ]]; then
-    git restore --staged -- pyproject.toml CHANGELOG.md 2>/dev/null || true
-    git restore -- pyproject.toml CHANGELOG.md
+    cp "$release_work/pyproject.toml.before" pyproject.toml
+    cp "$release_work/CHANGELOG.md.before" CHANGELOG.md
   fi
+  rm -rf "$release_work"
 }
 trap cleanup EXIT
 python -m venv "$release_work/venv"
 release_python="$release_work/venv/bin/python"
 "$release_python" -m pip install --quiet --upgrade pip
 "$release_python" -m pip install --quiet -e '.[dev,docs]' build twine
+
+"$release_python" -m ruff check .
+"$release_python" -m ruff format --check .
+"$release_python" -m mypy --strict --cache-dir "$release_work/mypy-cache" lean_runtime
+"$release_python" -m pytest
+"$release_python" -m mkdocs build --strict
 
 RELEASE_VERSION="$VERSION" "$release_python" - <<'PY'
 import datetime
@@ -61,11 +69,6 @@ changelog.write_text(text)
 PY
 
 "$release_python" -m pip install --quiet --no-deps -e .
-"$release_python" -m ruff check .
-"$release_python" -m ruff format --check .
-"$release_python" -m mypy --strict lean_runtime
-"$release_python" -m pytest
-"$release_python" -m mkdocs build --strict
 release_dist="$release_work/dist"
 mkdir "$release_dist"
 "$release_python" -m build --outdir "$release_dist"
