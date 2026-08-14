@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.6.2 - 2026-08-14
+
 - Keep an existing initialization target's directory inode alive, so running
   `lean-runtime init .` no longer strands the invoking shell in an unlinked
   working directory. Fully prepared staged children are published with rollback
