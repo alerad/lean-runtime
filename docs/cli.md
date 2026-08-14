@@ -150,6 +150,7 @@ lean-runtime check-file Main.lean --toolchain 4.32.2
 lean-runtime check-file ./existing-project/MyProject/Main.lean
 lean-runtime build ./existing-project MyLibrary
 lean-runtime init MyProof --mathlib
+lean-runtime init MyProof --mathlib --no-agents
 lean-runtime attach ~/research --recursive
 lean-runtime attach ~/research --recursive --execute
 lean-runtime detach ./existing-project --execute

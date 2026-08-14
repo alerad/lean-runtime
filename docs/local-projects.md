@@ -51,7 +51,9 @@ lean-runtime build .
 The generated files are a standard Lake project plus a small
 `lean-runtime.toml`. Root build outputs stay local; exact dependencies are
 shared. Select a cataloged release with `--mathlib 4.33.0`, or omit `--mathlib`
-for a core-only library.
+for a core-only library. `init` also creates an `AGENTS.md` describing the safe
+build and dependency workflow unless `--no-agents` is passed; it never
+overwrites an existing guide.
 
 For one existing project, preview before changing anything:
 

@@ -153,6 +153,10 @@ cd MyProof
 lean-runtime build .
 ```
 
+`init` also writes an `AGENTS.md` with the project build, checking, dependency,
+and shared-package rules for coding agents. Pass `--no-agents` to omit it; an
+existing `AGENTS.md` is never overwritten.
+
 Existing repositories can preview and adopt the same layout individually or in
 bulk:
 

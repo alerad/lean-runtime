@@ -436,8 +436,27 @@ def test_init_creates_a_standard_core_project_already_attached(tmp_path: Path) -
     assert (tmp_path / "fresh" / "lakefile.toml").is_file()
     assert (tmp_path / "fresh" / "lake-manifest.json").is_file()
     assert (tmp_path / "fresh" / "lean-runtime.toml").is_file()
+    agents = (tmp_path / "fresh" / "AGENTS.md").read_text()
+    assert "lean-runtime build ." in agents
+    assert "Do not edit `.lake/packages`" in agents
     assert (tmp_path / "fresh" / ".lake" / "packages").is_dir()
     assert runtime.build(tmp_path / "fresh").command[-2].startswith("--packages=")
+
+
+def test_init_can_skip_or_preserve_an_agents_guide(tmp_path: Path) -> None:
+    runtime = Runtime(
+        toolchains=InitProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    runtime.init_project(tmp_path / "without-guide", agents=False)
+    assert not (tmp_path / "without-guide" / "AGENTS.md").exists()
+
+    custom = tmp_path / "with-custom-guide" / "AGENTS.md"
+    custom.parent.mkdir()
+    custom.write_text("# Custom instructions\n")
+    runtime.init_project(custom.parent)
+    assert custom.read_text() == "# Custom instructions\n"
 
 
 def test_shared_project_reuses_local_git_objects_for_another_revision(tmp_path: Path) -> None:

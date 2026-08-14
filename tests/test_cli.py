@@ -41,6 +41,8 @@ def test_removed_v1_commands_are_absent() -> None:
 def test_project_sharing_commands_have_safe_defaults() -> None:
     init = parser().parse_args(["init", "demo", "--mathlib", "4.33.0"])
     assert init.mathlib == "4.33.0"
+    assert init.agents
+    assert not parser().parse_args(["init", "demo", "--no-agents"]).agents
     attach = parser().parse_args(["attach", "projects", "--recursive"])
     assert attach.recursive and not attach.execute
     detach = parser().parse_args(["detach", "demo"])

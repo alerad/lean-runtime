@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Make `lean-runtime init` create a concise `AGENTS.md` with build, checking,
+  and shared-dependency safety instructions by default. `--no-agents` opts out,
+  and existing guides are preserved.
+- Make `scripts/release.sh` provision an isolated release environment and allow
+  safe retries after a pre-tag failure instead of depending on undeclared
+  packages in the invoking Python environment.
+
 - Add shared Lake project onboarding and migration. `lean-runtime init` creates
   a standard core or cataloged-Mathlib project; `attach` previews or
   transactionally adopts one project or an entire recursive tree; and `detach`

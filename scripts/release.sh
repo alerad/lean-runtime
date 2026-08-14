@@ -16,9 +16,25 @@ if git rev-parse "v$VERSION" >/dev/null 2>&1; then
   exit 1
 fi
 
-RELEASE_VERSION="$VERSION" python - <<'PY'
+release_work="$(mktemp -d)"
+release_commit_ready=false
+cleanup() {
+  rm -rf "$release_work"
+  if [[ "$release_commit_ready" != true ]]; then
+    git restore --staged -- pyproject.toml CHANGELOG.md 2>/dev/null || true
+    git restore -- pyproject.toml CHANGELOG.md
+  fi
+}
+trap cleanup EXIT
+python -m venv "$release_work/venv"
+release_python="$release_work/venv/bin/python"
+"$release_python" -m pip install --quiet --upgrade pip
+"$release_python" -m pip install --quiet -e '.[dev,docs]' build twine
+
+RELEASE_VERSION="$VERSION" "$release_python" - <<'PY'
 import datetime
 import os
+import re
 from pathlib import Path
 
 version = os.environ["RELEASE_VERSION"]
@@ -39,23 +55,29 @@ heading = "## Unreleased"
 if heading not in text:
     raise SystemExit("CHANGELOG.md has no Unreleased section")
 dated = f"## {version} - {datetime.date.today().isoformat()}"
-changelog.write_text(text.replace(heading, f"{heading}\n\n{dated}", 1))
+if re.search(rf"^## {re.escape(version)} - \d{{4}}-\d{{2}}-\d{{2}}$", text, re.M) is None:
+    text = text.replace(heading, f"{heading}\n\n{dated}", 1)
+changelog.write_text(text)
 PY
 
-python -m ruff check .
-python -m ruff format --check .
-python -m mypy --strict lean_runtime
-python -m pytest
-python -m mkdocs build --strict
-release_dist="$(mktemp -d)"
-trap 'rm -rf "$release_dist"' EXIT
-python -m build --outdir "$release_dist"
-python -m twine check "$release_dist"/*
-python scripts/smoke_wheel.py "$release_dist"/*.whl
+"$release_python" -m pip install --quiet --no-deps -e .
+"$release_python" -m ruff check .
+"$release_python" -m ruff format --check .
+"$release_python" -m mypy --strict lean_runtime
+"$release_python" -m pytest
+"$release_python" -m mkdocs build --strict
+release_dist="$release_work/dist"
+mkdir "$release_dist"
+"$release_python" -m build --outdir "$release_dist"
+"$release_python" -m twine check "$release_dist"/*
+"$release_python" scripts/smoke_wheel.py "$release_dist"/*.whl
 
-git add pyproject.toml CHANGELOG.md
-git commit -m "chore: release $VERSION"
+if ! git diff --quiet -- pyproject.toml CHANGELOG.md; then
+  git add pyproject.toml CHANGELOG.md
+  git commit -m "chore: release $VERSION"
+fi
 release_sha="$(git rev-parse HEAD)"
+release_commit_ready=true
 git push origin main
 
 run_id=""
