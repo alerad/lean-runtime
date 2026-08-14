@@ -466,10 +466,12 @@ class ProjectEnvironment:
         *,
         policy: ExecutionPolicy | None = None,
         cancel: threading.Event | None = None,
+        shared: bool = False,
     ) -> ExecutionResult:
         return self.runtime._build_project(
             self.context,
             targets=targets,
             policy=policy or ExecutionPolicy(timeout_seconds=900, max_output_bytes=10_000_000),
             cancel=cancel,
+            shared=shared,
         )

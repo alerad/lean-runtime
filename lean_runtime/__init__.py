@@ -63,6 +63,7 @@ from .projects import (
 from .references import PACKAGE_ALIASES, DiscoveredPackage, PackageReference
 from .runtime import Runtime, project_toolchain
 from .schema_resources import SCHEMA_NAMES, schema_path
+from .shared_projects import SharedProjectWorkspace
 from .specs import EnvironmentSpec, GitPackage, Package
 from .store import CleanupReport, DownloadCleanupReport, StoreStatus
 from .toolchains import ToolchainManager, normalize_toolchain
@@ -112,6 +113,7 @@ __all__ = [
     "PhaseTiming",
     "ProjectContext",
     "ProjectEnvironment",
+    "SharedProjectWorkspace",
     "ProjectPublicationPlan",
     "project_publication_workflow",
     "ProjectProvenance",

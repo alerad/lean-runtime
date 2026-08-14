@@ -114,7 +114,9 @@ def clone_tree(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if platform.system() == "Darwin":
         result = subprocess.run(
-            ["cp", "-cR", str(source), str(destination)],
+            # Lake traces are metadata-sensitive: preserve mtimes or a CoW clone of a warm
+            # package is interpreted as a cold tree and needlessly rebuilt in full.
+            ["cp", "-cRp", str(source), str(destination)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -223,6 +225,8 @@ class StoreStatus:
     sources_bytes: int = 0
     oci_blobs_bytes: int = 0
     cas_artifacts_bytes: int = 0
+    project_packages: int = 0
+    project_packages_bytes: int = 0
     toolchains_bytes: int = 0
     executions_bytes: int = 0
     environment_usage: tuple[EnvironmentUsage, ...] = ()
@@ -243,6 +247,8 @@ class StoreStatus:
             "sources_bytes": self.sources_bytes,
             "oci_blobs_bytes": self.oci_blobs_bytes,
             "cas_artifacts_bytes": self.cas_artifacts_bytes,
+            "project_packages": self.project_packages,
+            "project_packages_bytes": self.project_packages_bytes,
             "toolchains_bytes": self.toolchains_bytes,
             "executions_bytes": self.executions_bytes,
             "environment_usage": [usage.to_dict() for usage in self.environment_usage],
@@ -624,6 +630,9 @@ class EnvironmentStore:
                 )
             )
         usage.sort(key=lambda item: item.bytes_used, reverse=True)
+        project_packages = self.home / "project-packages"
+        project_sources = self.home / "project-sources"
+        project_workspaces = self.home / "project-workspaces"
         return StoreStatus(
             home=str(self.home),
             environments=len(usage),
@@ -641,6 +650,12 @@ class EnvironmentStore:
             sources_bytes=_tree_bytes(self.sources),
             oci_blobs_bytes=_tree_bytes(self.oci_blobs),
             cas_artifacts_bytes=_tree_bytes(self.cas_artifacts),
+            project_packages=sum(
+                1 for path in project_packages.glob("project_package_*") if path.is_dir()
+            ),
+            project_packages_bytes=_tree_bytes(project_packages)
+            + _tree_bytes(project_sources)
+            + _tree_bytes(project_workspaces),
             toolchains_bytes=_tree_bytes(self.home / "elan")
             + _tree_bytes(self.home / "toolchains"),
             executions_bytes=_tree_bytes(self.executions),

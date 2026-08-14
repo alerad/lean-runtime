@@ -145,6 +145,16 @@ project = lean.setup(project="./my-project")
 result = project.check_file("./my-project/MyProject/Main.lean")
 ```
 
+Repositories that pin the same Lake graph can also share one dependency build
+instead of keeping another Mathlib checkout under every `.lake/packages`:
+
+```bash
+lean-runtime build ./my-project --shared
+```
+
+The project itself stays mutable and keeps its own build output; exact manifest
+dependencies are sourced from a content-addressed runtime workspace.
+
 One-shot helpers are available when setup reuse is unnecessary:
 
 ```python

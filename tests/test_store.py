@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 from lean_runtime import EnvironmentError, EnvironmentLock, LockedPackage
-from lean_runtime.store import EnvironmentStore, environment_identity, platform_compatibility
+from lean_runtime.store import (
+    EnvironmentStore,
+    clone_tree,
+    environment_identity,
+    platform_compatibility,
+)
 
 RETAINED = "env_" + "a" * 64
 CANDIDATE = "env_" + "b" * 64
@@ -33,6 +38,19 @@ def _sample_lock() -> EnvironmentLock:
             ),
         ),
     )
+
+
+def test_clone_tree_preserves_file_timestamps(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    artifact = source / "artifact.olean"
+    artifact.write_bytes(b"compiled")
+    timestamp_ns = 1_700_000_000_123_456_789
+    os.utime(artifact, ns=(timestamp_ns, timestamp_ns))
+
+    destination = tmp_path / "destination"
+    clone_tree(source, destination)
+    assert (destination / artifact.name).stat().st_mtime_ns == timestamp_ns
 
 
 def test_aliases_and_garbage_collection(tmp_path: Path) -> None:

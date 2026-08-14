@@ -73,6 +73,7 @@ def _render_storage(status: StoreStatus) -> None:
         ("Sources", status.sources, status.sources_bytes),
         ("Download cache", status.oci_blobs, status.oci_blobs_bytes),
         ("Shared module CAS", status.cas_artifacts, status.cas_artifacts_bytes),
+        ("Project packages", status.project_packages, status.project_packages_bytes),
         ("Toolchains", None, status.toolchains_bytes),
         ("Executions", status.executions, status.executions_bytes),
     )
@@ -99,6 +100,10 @@ def _render_storage(status: StoreStatus) -> None:
     print()
     print(style.dim("Reclaim space: lean-runtime clean            (preview, keeps recent/named)"))
     print(style.dim("               lean-runtime clean --execute --include-downloads"))
+    if status.project_packages:
+        print(
+            style.dim("Shared project packages are retained for reuse; cleanup is not automatic.")
+        )
 
 
 def _render_cleanup(environments: CleanupReport, downloads: DownloadCleanupReport | None) -> None:
@@ -452,6 +457,11 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("targets", nargs="*")
     build.add_argument("--toolchain")
     build.add_argument("--timeout", type=float, default=900)
+    build.add_argument(
+        "--shared",
+        action="store_true",
+        help="reuse an exact dependency workspace managed by lean-runtime",
+    )
     build.add_argument("--json", action="store_true")
 
     install = commands.add_parser("install", help="install a Lean toolchain")
@@ -948,6 +958,7 @@ def main(argv: list[str] | None = None) -> int:
                 targets=args.targets,
                 toolchain=args.toolchain,
                 timeout=args.timeout,
+                shared=args.shared,
             )
     except (ResolutionError, MaterializationError) as exc:
         details = {

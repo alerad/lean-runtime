@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -9,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from lean_runtime import ProjectError, Runtime, discover_project
+from lean_runtime._git import git_command
 
 
 class ProjectToolchains:
@@ -29,7 +32,7 @@ class ProjectToolchains:
                 "raise SystemExit(1 if 'BAD' in text else 0)"
             )
             return [sys.executable, "-c", script, args[-1]]
-        return [sys.executable, "-c", "raise SystemExit(0)"]
+        return [sys.executable, "-c", "raise SystemExit(0)", executable, *args]
 
 
 def _project(root: Path, *, name: str = "sample") -> Path:
@@ -40,6 +43,65 @@ def _project(root: Path, *, name: str = "sample") -> Path:
     source.parent.mkdir()
     source.write_text("example : True := by trivial\n")
     return source
+
+
+def _shared_project(root: Path, dependency: Path) -> tuple[Path, str]:
+    source = _project(root)
+    subprocess.run(git_command("init", "--quiet", str(dependency)), check=True)
+    (dependency / "lakefile.toml").write_text('name = "dep"\n')
+    (dependency / "lake-manifest.json").write_text(json.dumps({"version": "1.2.0", "packages": []}))
+    (dependency / "Dep.lean").write_text("def sharedValue := 1\n")
+    subprocess.run(git_command("-C", str(dependency), "add", "."), check=True)
+    subprocess.run(
+        git_command(
+            "-C",
+            str(dependency),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ),
+        check=True,
+    )
+    revision = subprocess.run(
+        git_command("-C", str(dependency), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    local = root / ".lake" / "packages" / "dep"
+    local.parent.mkdir(parents=True)
+    subprocess.run(git_command("clone", "--quiet", str(dependency), str(local)), check=True)
+    subprocess.run(
+        git_command(
+            "-C", str(local), "remote", "set-url", "origin", "https://example.invalid/dep.git"
+        ),
+        check=True,
+    )
+    (root / "lake-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": "1.2.0",
+                "packagesDir": ".lake/packages",
+                "packages": [
+                    {
+                        "url": "https://example.invalid/dep.git",
+                        "type": "git",
+                        "scope": "",
+                        "rev": revision,
+                        "name": "dep",
+                        "inherited": False,
+                        "configFile": "lakefile.toml",
+                    }
+                ],
+            }
+        )
+    )
+    return source, revision
 
 
 def test_discover_project_walks_up_from_a_lean_file(tmp_path: Path) -> None:
@@ -62,6 +124,168 @@ def test_discover_project_requires_lakefile_and_toolchain(tmp_path: Path) -> Non
     source.write_text("example : True := by trivial\n")
     with pytest.raises(ProjectError, match="no pinned Lake project"):
         discover_project(source)
+
+
+def test_shared_project_build_uses_exact_external_package_override(tmp_path: Path) -> None:
+    source, revision = _shared_project(tmp_path / "project", tmp_path / "dependency")
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    workspace = runtime.prepare_shared_project(source)
+    override = json.loads(workspace.overrides_file.read_text())
+    shared_dependency = Path(override["packages"][0]["dir"])
+    assert shared_dependency != source.parents[1] / ".lake" / "packages" / "dep"
+    assert shared_dependency.is_dir()
+    assert (
+        subprocess.run(
+            git_command("-C", str(shared_dependency), "rev-parse", "HEAD"),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == revision
+    )
+
+    result = runtime.build(source, shared=True)
+    assert result.ok
+    assert result.command[-2] == f"--packages={workspace.overrides_file}"
+    assert result.command[-1] == "build"
+    assert runtime.prepare_shared_project(source).reused
+
+    marker = shared_dependency / ".lean-runtime-package.json"
+    marker.unlink()
+    repaired = runtime.prepare_shared_project(source)
+    assert not repaired.reused
+    assert marker.is_file()
+
+    marker.write_text("{}")
+    repaired_corruption = runtime.prepare_shared_project(source)
+    assert not repaired_corruption.reused
+    assert marker.is_file()
+
+    record_path = repaired_corruption.root / "workspace.json"
+    record = json.loads(record_path.read_text())
+    record["package_ids"] = ["../../outside"]
+    record_path.write_text(json.dumps(record))
+    repaired_again = runtime.prepare_shared_project(source)
+    assert not repaired_again.reused
+    assert all(
+        package_id.startswith("project_package_") for package_id in repaired_again.package_ids
+    )
+
+
+def test_shared_project_requires_a_lock_manifest(tmp_path: Path) -> None:
+    source = _project(tmp_path / "project")
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+    with pytest.raises(ProjectError, match="lake-manifest.json"):
+        runtime.build(source, shared=True)
+
+
+def test_shared_project_with_no_dependencies_reuses_its_workspace(tmp_path: Path) -> None:
+    source = _project(tmp_path / "project")
+    (tmp_path / "project" / "lake-manifest.json").write_text(
+        json.dumps({"version": "1.2.0", "packages": []})
+    )
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    assert not runtime.prepare_shared_project(source).reused
+    assert runtime.prepare_shared_project(source).reused
+
+
+def test_shared_project_reuses_local_git_objects_for_another_revision(tmp_path: Path) -> None:
+    source, locked_revision = _shared_project(tmp_path / "project", tmp_path / "dependency")
+    dependency = tmp_path / "dependency"
+    (dependency / "Dep.lean").write_text("def sharedValue := 2\n")
+    subprocess.run(git_command("-C", str(dependency), "add", "."), check=True)
+    subprocess.run(
+        git_command(
+            "-C",
+            str(dependency),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            "newer",
+        ),
+        check=True,
+    )
+    local = tmp_path / "project" / ".lake" / "packages" / "dep"
+    subprocess.run(git_command("-C", str(local), "fetch", "--quiet", str(dependency)), check=True)
+    subprocess.run(
+        git_command("-C", str(local), "checkout", "--quiet", "--detach", "FETCH_HEAD"),
+        check=True,
+    )
+    assert (
+        subprocess.run(
+            git_command("-C", str(local), "rev-parse", "HEAD"),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        != locked_revision
+    )
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    workspace = runtime.prepare_shared_project(source)
+    shared = Path(json.loads(workspace.overrides_file.read_text())["packages"][0]["dir"])
+    assert (
+        subprocess.run(
+            git_command("-C", str(shared), "rev-parse", "HEAD"),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == locked_revision
+    )
+
+
+def test_shared_packages_reuse_only_their_effective_dependency_closure(tmp_path: Path) -> None:
+    first_source, _revision = _shared_project(tmp_path / "first", tmp_path / "dependency")
+    second_source = _project(tmp_path / "second")
+    second_local = tmp_path / "second" / ".lake" / "packages" / "dep"
+    second_local.parent.mkdir(parents=True)
+    subprocess.run(
+        git_command("clone", "--quiet", str(tmp_path / "dependency"), str(second_local)),
+        check=True,
+    )
+    manifest = json.loads((tmp_path / "first" / "lake-manifest.json").read_text())
+    local_dependency = tmp_path / "local-dependency"
+    local_dependency.mkdir()
+    (local_dependency / "Local.lean").write_text("def localValue := 2\n")
+    manifest["packages"].append(
+        {
+            "type": "path",
+            "name": "localDependency",
+            "dir": "../local-dependency",
+            "inherited": False,
+        }
+    )
+    (tmp_path / "second" / "lake-manifest.json").write_text(json.dumps(manifest))
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    first = runtime.prepare_shared_project(first_source)
+    second = runtime.prepare_shared_project(second_source)
+    first_override = json.loads(first.overrides_file.read_text())["packages"][0]["dir"]
+    second_override = json.loads(second.overrides_file.read_text())["packages"][0]["dir"]
+    assert first.workspace_id != second.workspace_id
+    assert first_override == second_override
 
 
 def test_project_environment_checks_actual_relative_file_and_records_provenance(

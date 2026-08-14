@@ -53,6 +53,7 @@ from .publisher_verification import CosignVerifier
 from .references import PACKAGE_ALIASES, PackageReference, discover_package, normalize_references
 from .resolver import EnvironmentResolver
 from .serialization import sha256_id, sha256_text
+from .shared_projects import SharedProjectManager, SharedProjectWorkspace
 from .specs import EnvironmentSpec, GitPackage
 from .store import (
     CleanupReport,
@@ -171,6 +172,7 @@ class Runtime:
         self.home = self.toolchains.home
         self.backend = backend or LocalBackend()
         self.store = EnvironmentStore(self.home)
+        self.shared_projects = SharedProjectManager(self.home, self.events)
         self.resolver = EnvironmentResolver(self.toolchains, self.store, self.backend, self.events)
         self.environments = EnvironmentManager(
             self.store, self.toolchains, self.backend, self.events
@@ -1076,6 +1078,7 @@ class Runtime:
         targets: Sequence[str] = (),
         toolchain: str | None = None,
         timeout: float = 900,
+        shared: bool = False,
     ) -> ExecutionResult:
         """Build an existing trusted Lake project outside the environment store."""
         context = discover_project(project)
@@ -1085,7 +1088,21 @@ class Runtime:
             context,
             targets=targets,
             policy=ExecutionPolicy(timeout_seconds=timeout, max_output_bytes=10_000_000),
+            shared=shared,
         )
+
+    def prepare_shared_project(
+        self,
+        project: str | os.PathLike[str],
+        *,
+        toolchain: str | None = None,
+        cancel: threading.Event | None = None,
+    ) -> SharedProjectWorkspace:
+        """Prepare reusable dependencies for a pinned local Lake project."""
+        context = discover_project(project)
+        if toolchain is not None:
+            context = replace(context, toolchain=normalize_toolchain(toolchain))
+        return self.shared_projects.prepare(context, cancel=cancel)
 
     def project(
         self,
@@ -1329,18 +1346,32 @@ class Runtime:
         targets: Sequence[str],
         policy: ExecutionPolicy,
         cancel: threading.Event | None = None,
+        shared: bool = False,
     ) -> ExecutionResult:
-        command = self.toolchains.command(context.toolchain, "lake", "build", *targets)
-        return self._raw_result(
-            command,
-            cwd=context.root,
-            toolchain=context.toolchain,
-            source_digest=sha256_text(""),
-            policy=policy,
-            project=context.provenance(),
-            logical_command=("lake", "build", *targets),
-            cancel=cancel,
+        workspace = self.shared_projects.prepare(context, cancel=cancel) if shared else None
+        lake_arguments = (
+            (f"--packages={workspace.overrides_file}", "build", *targets)
+            if workspace is not None
+            else ("build", *targets)
         )
+        command = self.toolchains.command(context.toolchain, "lake", *lake_arguments)
+
+        def run() -> ExecutionResult:
+            return self._raw_result(
+                command,
+                cwd=context.root,
+                toolchain=context.toolchain,
+                source_digest=sha256_text(""),
+                policy=policy,
+                project=context.provenance(),
+                logical_command=("lake", "build", *(("--shared",) if shared else ()), *targets),
+                cancel=cancel,
+            )
+
+        if workspace is None:
+            return run()
+        with self.shared_projects.build_lock(workspace, cancel=cancel):
+            return run()
 
     def _raw_result(
         self,
