@@ -145,15 +145,27 @@ project = lean.setup(project="./my-project")
 result = project.check_file("./my-project/MyProject/Main.lean")
 ```
 
-Repositories that pin the same Lake graph can also share one dependency build
-instead of keeping another Mathlib checkout under every `.lake/packages`:
+Create a normal Lake project whose exact dependencies are shared automatically:
 
 ```bash
-lean-runtime build ./my-project --shared
+lean-runtime init MyProof --mathlib
+cd MyProof
+lean-runtime build .
 ```
 
-The project itself stays mutable and keeps its own build output; exact manifest
-dependencies are sourced from a content-addressed runtime workspace.
+Existing repositories can preview and adopt the same layout individually or in
+bulk:
+
+```bash
+lean-runtime attach ~/research --recursive
+lean-runtime attach ~/research --recursive --execute
+```
+
+The dry run reports blockers and estimated recovery without changing anything.
+Adoption preserves each root `.lake/build`, verifies both the override and
+ordinary Lake views, then replaces only generated package copies with links to
+the content-addressed store. `lean-runtime detach . --execute` materializes an
+independent project again.
 
 One-shot helpers are available when setup reuse is unnecessary:
 

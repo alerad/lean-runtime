@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -12,6 +13,7 @@ import pytest
 
 from lean_runtime import ProjectError, Runtime, discover_project
 from lean_runtime._git import git_command
+from lean_runtime.serialization import sha256_id
 
 
 class ProjectToolchains:
@@ -22,7 +24,12 @@ class ProjectToolchains:
     def environment(self) -> dict[str, str]:
         return os.environ.copy()
 
+    def ensure(self, toolchain: str) -> Path:
+        return Path(toolchain)
+
     def command(self, _toolchain: str, executable: str, *args: str) -> list[str]:
+        if executable == "lake" and args[-3:] == ("env", "lean", "--version"):
+            return [sys.executable, "-c", "raise SystemExit(0)"]
         if executable == "lake" and args[:2] == ("env", "lean"):
             script = (
                 "import pathlib,sys,time; "
@@ -33,6 +40,34 @@ class ProjectToolchains:
             )
             return [sys.executable, "-c", script, args[-1]]
         return [sys.executable, "-c", "raise SystemExit(0)", executable, *args]
+
+
+class InitProjectToolchains(ProjectToolchains):
+    def command(self, toolchain: str, executable: str, *args: str) -> list[str]:
+        if executable == "lake" and "init" in args:
+            directory = next(
+                value.removeprefix("--dir=") for value in args if value.startswith("--dir=")
+            )
+            script = (
+                "import pathlib,sys; root=pathlib.Path(sys.argv[1]); "
+                "(root/'lean-toolchain').write_text(sys.argv[2]+'\\n'); "
+                "(root/'lakefile.toml').write_text('name = \\\"fresh\\\"\\n'); "
+                "(root/'Fresh').mkdir(); "
+                "(root/'Fresh'/'Basic.lean').write_text('def value := 1\\n')"
+            )
+            return [sys.executable, "-c", script, directory, toolchain]
+        if executable == "lake" and args[-1:] == ("update",):
+            directory = next(
+                value.removeprefix("--dir=") for value in args if value.startswith("--dir=")
+            )
+            script = (
+                "import json,pathlib,sys; root=pathlib.Path(sys.argv[1]); "
+                "(root/'lake-manifest.json').write_text(json.dumps({"
+                "'version':'1.2.0','name':'fresh','lakeDir':'.lake',"
+                "'packagesDir':'.lake/packages','packages':[]}))"
+            )
+            return [sys.executable, "-c", script, directory]
+        return super().command(toolchain, executable, *args)
 
 
 def _project(root: Path, *, name: str = "sample") -> Path:
@@ -200,6 +235,211 @@ def test_shared_project_with_no_dependencies_reuses_its_workspace(tmp_path: Path
     assert runtime.prepare_shared_project(source).reused
 
 
+def test_attach_replaces_only_packages_and_detach_materializes_them(tmp_path: Path) -> None:
+    source, revision = _shared_project(tmp_path / "project", tmp_path / "dependency")
+    build_artifact = tmp_path / "project" / ".lake" / "build" / "root.olean"
+    build_artifact.parent.mkdir(parents=True)
+    build_artifact.write_bytes(b"root build")
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    plan = runtime.plan_project_adoption(source)
+    assert plan.ready == 1
+    assert plan.current_dependency_bytes > 0
+    attached = runtime.attach_projects(source)
+    assert attached.ok
+    package = tmp_path / "project" / ".lake" / "packages" / "dep"
+    assert package.is_symlink()
+    assert build_artifact.read_bytes() == b"root build"
+    assert (tmp_path / "project" / "lean-runtime.toml").is_file()
+    assert runtime.build(source).command[-2].startswith("--packages=")
+    with pytest.raises(ProjectError, match="detach"):
+        runtime.build(source, shared=False)
+    detach_plan = runtime.plan_project_detachment(source)
+    assert detach_plan.ready
+    assert detach_plan.materialize_bytes > 0
+
+    detached = runtime.detach_project(source)
+    assert detached.action == "detached"
+    assert package.is_dir() and not package.is_symlink()
+    assert build_artifact.read_bytes() == b"root build"
+    assert not (tmp_path / "project" / "lean-runtime.toml").exists()
+    assert (
+        subprocess.run(
+            git_command("-C", str(package), "rev-parse", "HEAD"),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == revision
+    )
+
+
+def test_attach_preserves_repository_roots_for_subdir_packages(tmp_path: Path) -> None:
+    dependency = tmp_path / "dependency"
+    subprocess.run(git_command("init", "--quiet", str(dependency)), check=True)
+    nested = dependency / "nested" / "package"
+    nested.mkdir(parents=True)
+    (nested / "lakefile.toml").write_text('name = "dep"\n')
+    (nested / "lake-manifest.json").write_text(json.dumps({"version": "1.2.0", "packages": []}))
+    (nested / "Dep.lean").write_text("def sharedValue := 1\n")
+    subprocess.run(git_command("-C", str(dependency), "add", "."), check=True)
+    subprocess.run(
+        git_command(
+            "-C",
+            str(dependency),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ),
+        check=True,
+    )
+    revision = subprocess.run(
+        git_command("-C", str(dependency), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source = _project(tmp_path / "project")
+    local = tmp_path / "project" / ".lake" / "packages" / "dep"
+    local.parent.mkdir(parents=True)
+    subprocess.run(git_command("clone", "--quiet", str(dependency), str(local)), check=True)
+    (tmp_path / "project" / "lake-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": "1.2.0",
+                "packagesDir": ".lake/packages",
+                "packages": [
+                    {
+                        "url": str(dependency),
+                        "type": "git",
+                        "scope": "",
+                        "rev": revision,
+                        "name": "dep",
+                        "subDir": "nested/package",
+                        "inherited": False,
+                        "configFile": "lakefile.toml",
+                    }
+                ],
+            }
+        )
+    )
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    assert runtime.attach_projects(source).ok
+    attached = tmp_path / "project" / ".lake" / "packages" / "dep"
+    assert attached.is_symlink()
+    assert (attached / "nested" / "package" / "lakefile.toml").is_file()
+    assert not (attached / "lakefile.toml").is_file()
+
+    runtime.detach_project(source)
+    assert attached.is_dir() and not attached.is_symlink()
+    assert (attached / "nested" / "package" / "lakefile.toml").is_file()
+
+
+def test_attach_rolls_back_the_package_swap_when_plain_lake_rejects_it(tmp_path: Path) -> None:
+    source, _revision = _shared_project(tmp_path / "project", tmp_path / "dependency")
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+    context = discover_project(source)
+    original = tmp_path / "project" / ".lake" / "packages" / "dep"
+
+    def reject_attached_graph(overrides: Path | None) -> None:
+        if overrides is None:
+            raise ProjectError("plain Lake rejected the graph")
+
+    with pytest.raises(ProjectError, match="plain Lake rejected"):
+        runtime.project_adopter.attach(context, probe=reject_attached_graph)
+
+    assert original.is_dir() and not original.is_symlink()
+    assert not (tmp_path / "project" / "lean-runtime.toml").exists()
+    assert not (tmp_path / "project" / ".lake" / "lean-runtime-attachment.json").exists()
+
+
+def test_recursive_adoption_plan_reports_broken_projects_without_mutation(tmp_path: Path) -> None:
+    source, _revision = _shared_project(tmp_path / "good", tmp_path / "dependency")
+    broken = _project(tmp_path / "broken")
+    (tmp_path / "broken" / "lake-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": "1.2.0",
+                "packages": [{"type": "path", "name": "missing", "dir": "../does-not-exist"}],
+            }
+        )
+    )
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    plan = runtime.plan_project_adoption(tmp_path, recursive=True)
+    assert {project.root for project in plan.projects} == {source.parents[1], broken.parents[1]}
+    assert plan.ready == 1
+    assert plan.blocked == 1
+    assert any(
+        "does not exist" in blocker for project in plan.projects for blocker in project.blockers
+    )
+    assert not (tmp_path / "good" / "lean-runtime.toml").exists()
+
+
+def test_adoption_does_not_mistake_the_parent_repository_for_a_package(tmp_path: Path) -> None:
+    source = _project(tmp_path / "project")
+    subprocess.run(git_command("init", "--quiet", str(tmp_path / "project")), check=True)
+    placeholder = tmp_path / "project" / ".lake" / "packages" / "dep"
+    placeholder.mkdir(parents=True)
+    (tmp_path / "project" / "lake-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": "1.2.0",
+                "packages": [
+                    {
+                        "type": "git",
+                        "name": "dep",
+                        "url": "https://example.invalid/dep.git",
+                        "rev": "a" * 40,
+                    }
+                ],
+            }
+        )
+    )
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    plan = runtime.plan_project_adoption(source)
+    assert plan.ready == 1
+    assert not plan.projects[0].blockers
+    assert "empty local placeholder" in plan.projects[0].warnings[0]
+
+
+def test_init_creates_a_standard_core_project_already_attached(tmp_path: Path) -> None:
+    runtime = Runtime(
+        toolchains=InitProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    result = runtime.init_project(tmp_path / "fresh")
+    assert result.action == "attached"
+    assert (tmp_path / "fresh" / "lakefile.toml").is_file()
+    assert (tmp_path / "fresh" / "lake-manifest.json").is_file()
+    assert (tmp_path / "fresh" / "lean-runtime.toml").is_file()
+    assert (tmp_path / "fresh" / ".lake" / "packages").is_dir()
+    assert runtime.build(tmp_path / "fresh").command[-2].startswith("--packages=")
+
+
 def test_shared_project_reuses_local_git_objects_for_another_revision(tmp_path: Path) -> None:
     source, locked_revision = _shared_project(tmp_path / "project", tmp_path / "dependency")
     dependency = tmp_path / "dependency"
@@ -263,6 +503,8 @@ def test_shared_packages_reuse_only_their_effective_dependency_closure(tmp_path:
         check=True,
     )
     manifest = json.loads((tmp_path / "first" / "lake-manifest.json").read_text())
+    manifest["packages"][0]["url"] = "https://example.invalid/dep"
+    manifest["packages"][0]["scope"] = "cosmetic-scope"
     local_dependency = tmp_path / "local-dependency"
     local_dependency.mkdir()
     (local_dependency / "Local.lean").write_text("def localValue := 2\n")
@@ -286,6 +528,43 @@ def test_shared_packages_reuse_only_their_effective_dependency_closure(tmp_path:
     second_override = json.loads(second.overrides_file.read_text())["packages"][0]["dir"]
     assert first.workspace_id != second.workspace_id
     assert first_override == second_override
+
+
+def test_shared_package_adopts_a_compatible_legacy_managed_path(tmp_path: Path) -> None:
+    first_source, _revision = _shared_project(tmp_path / "first", tmp_path / "dependency")
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+    first = runtime.prepare_shared_project(first_source)
+    first_override = Path(json.loads(first.overrides_file.read_text())["packages"][0]["dir"])
+    marker = json.loads((first_override / ".lean-runtime-package.json").read_text())
+    marker["schema"] = "lean-runtime-shared-project/1"
+    marker["package"]["url"] = str(marker["package"]["url"]).removesuffix(".git")
+    marker["package"]["scope"] = "legacy-cosmetic-scope"
+    legacy_id = sha256_id("project_package", marker)
+    legacy = runtime.home / "project-packages" / legacy_id
+    shutil.copytree(first_override, legacy)
+    (legacy / ".lean-runtime-package.json").write_text(json.dumps(marker))
+
+    second_source = _project(tmp_path / "second")
+    second_local = tmp_path / "second" / ".lake" / "packages" / "dep"
+    second_local.parent.mkdir(parents=True)
+    subprocess.run(
+        git_command("clone", "--quiet", str(tmp_path / "dependency"), str(second_local)),
+        check=True,
+    )
+    second_manifest = json.loads((tmp_path / "first" / "lake-manifest.json").read_text())
+    second_manifest["packages"][0]["url"] = "https://example.invalid/dep"
+    second_manifest["packages"][0]["scope"] = "another-cosmetic-scope"
+    (tmp_path / "second" / "lake-manifest.json").write_text(json.dumps(second_manifest))
+
+    second = runtime.shared_projects.prepare(
+        discover_project(second_source), seed_package_paths={"dep": legacy}
+    )
+    second_override = Path(json.loads(second.overrides_file.read_text())["packages"][0]["dir"])
+    assert second_override == legacy
+    assert second.package_ids == (legacy_id,)
 
 
 def test_project_environment_checks_actual_relative_file_and_records_provenance(

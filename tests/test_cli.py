@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from lean_runtime.bundles import PortableCopyInfo
 from lean_runtime.cli import _print_operation_failure, main, parser
 from lean_runtime.errors import MaterializationError
@@ -34,6 +36,43 @@ def test_removed_v1_commands_are_absent() -> None:
         "program-publish-index",
     }
     assert commands.isdisjoint(removed)
+
+
+def test_project_sharing_commands_have_safe_defaults() -> None:
+    init = parser().parse_args(["init", "demo", "--mathlib", "4.33.0"])
+    assert init.mathlib == "4.33.0"
+    attach = parser().parse_args(["attach", "projects", "--recursive"])
+    assert attach.recursive and not attach.execute
+    detach = parser().parse_args(["detach", "demo"])
+    assert not detach.execute
+    build = parser().parse_args(["build", "demo"])
+    assert build.shared is None
+    with pytest.raises(SystemExit):
+        parser().parse_args(["build", "demo", "--shared", "--local"])
+
+
+def test_attach_plan_is_read_only(tmp_path: Path, capsys) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "lean-toolchain").write_text("leanprover/lean4:v4.32.2\n")
+    (project / "lakefile.toml").write_text('name = "project"\n')
+    (project / "lake-manifest.json").write_text(json.dumps({"version": "1.2.0", "packages": []}))
+
+    assert main(["--home", str(tmp_path / "runtime"), "attach", str(project)]) == 0
+    output = capsys.readouterr().out
+    assert "1 Lake project" in output
+    assert "No changes made" in output
+    assert not (project / ".lake").exists()
+    assert not (project / "lean-runtime.toml").exists()
+
+
+def test_interrupted_command_has_no_traceback(monkeypatch, capsys) -> None:
+    def interrupted(**_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime", interrupted)
+    assert main(["storage"]) == 130
+    assert capsys.readouterr().err == "lean-runtime: interrupted\n"
 
 
 def test_build_and_publish_accepts_environment_build_timeout() -> None:

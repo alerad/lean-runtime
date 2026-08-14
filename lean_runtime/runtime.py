@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import threading
 from collections.abc import Mapping, Sequence
@@ -42,6 +43,16 @@ from .oci import (
 from .policies import ExecutionPolicy, parse_byte_size
 from .profiling import ProfileReport, run_profile
 from .programs import ProgramInfo, ProgramLibrary, ProgramManager, ReadyProgram
+from .project_sharing import (
+    AdoptionBatchResult,
+    AdoptionPlan,
+    AdoptionResult,
+    DetachmentPlan,
+    ProjectAdopter,
+    plan_adoption,
+    plan_detachment,
+    project_sharing_enabled,
+)
 from .projects import (
     ProjectContext,
     ProjectEnvironment,
@@ -173,6 +184,7 @@ class Runtime:
         self.backend = backend or LocalBackend()
         self.store = EnvironmentStore(self.home)
         self.shared_projects = SharedProjectManager(self.home, self.events)
+        self.project_adopter = ProjectAdopter(self.shared_projects)
         self.resolver = EnvironmentResolver(self.toolchains, self.store, self.backend, self.events)
         self.environments = EnvironmentManager(
             self.store, self.toolchains, self.backend, self.events
@@ -1078,17 +1090,23 @@ class Runtime:
         targets: Sequence[str] = (),
         toolchain: str | None = None,
         timeout: float = 900,
-        shared: bool = False,
+        shared: bool | None = None,
     ) -> ExecutionResult:
         """Build an existing trusted Lake project outside the environment store."""
         context = discover_project(project)
         if toolchain is not None:
             context = replace(context, toolchain=normalize_toolchain(toolchain))
+        selected_shared = project_sharing_enabled(context.root) if shared is None else shared
+        if shared is False and project_sharing_enabled(context.root):
+            raise ProjectError(
+                "project is attached to shared dependencies; run "
+                "`lean-runtime detach . --execute` before requesting a local build"
+            )
         return self._build_project(
             context,
             targets=targets,
             policy=ExecutionPolicy(timeout_seconds=timeout, max_output_bytes=10_000_000),
-            shared=shared,
+            shared=selected_shared,
         )
 
     def prepare_shared_project(
@@ -1103,6 +1121,253 @@ class Runtime:
         if toolchain is not None:
             context = replace(context, toolchain=normalize_toolchain(toolchain))
         return self.shared_projects.prepare(context, cancel=cancel)
+
+    def plan_project_adoption(
+        self, path: str | os.PathLike[str], *, recursive: bool = False
+    ) -> AdoptionPlan:
+        """Inspect one project or a tree without changing it."""
+        return plan_adoption(Path(path), recursive=recursive)
+
+    def _probe_project_graph(
+        self,
+        context: ProjectContext,
+        overrides: Path | None,
+        *,
+        timeout: float = 120,
+    ) -> None:
+        self.toolchains.ensure(context.toolchain)
+        lake_args = (
+            *((f"--packages={overrides}",) if overrides else ()),
+            "env",
+            "lean",
+            "--version",
+        )
+        command = self.toolchains.command(context.toolchain, "lake", *lake_args)
+        try:
+            process = subprocess.run(
+                command,
+                cwd=context.root,
+                env=self.toolchains.environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ProjectError(f"Lake graph probe timed out for {context.root}") from exc
+        if process.returncode:
+            detail = process.stdout.strip()
+            raise ProjectError(
+                f"Lake could not load the {'shared' if overrides else 'attached'} dependency "
+                f"graph for {context.root}" + (f":\n{detail}" if detail else "")
+            )
+
+    def attach_projects(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        recursive: bool = False,
+        seed_packages: Path | None = None,
+        seed_package_paths: dict[str, Path] | None = None,
+    ) -> AdoptionBatchResult:
+        """Adopt exact shared dependencies after a read-only plan."""
+        plan = self.plan_project_adoption(path, recursive=recursive)
+        results: list[AdoptionResult] = []
+        failures: list[tuple[Path, str]] = []
+        for project in plan.projects:
+            if project.attached:
+                results.append(
+                    AdoptionResult(project.root, "already-attached", len(project.packages), 0)
+                )
+                continue
+            if not project.ready:
+                continue
+            context = discover_project(project.root)
+
+            def probe(overrides: Path | None, selected_context: ProjectContext = context) -> None:
+                self._probe_project_graph(selected_context, overrides)
+
+            try:
+                results.append(
+                    self.project_adopter.attach(
+                        context,
+                        probe=probe,
+                        seed_packages=seed_packages if len(plan.projects) == 1 else None,
+                        seed_package_paths=(
+                            seed_package_paths if len(plan.projects) == 1 else None
+                        ),
+                    )
+                )
+            except (OSError, ProjectError) as exc:
+                failures.append((project.root, str(exc)))
+        return AdoptionBatchResult(plan, tuple(results), tuple(failures))
+
+    def detach_project(self, path: str | os.PathLike[str]) -> AdoptionResult:
+        """Materialize independent dependency copies for an attached project."""
+        context = discover_project(path)
+        return self.project_adopter.detach(
+            context,
+            probe=lambda overrides: self._probe_project_graph(context, overrides),
+        )
+
+    def plan_project_detachment(self, path: str | os.PathLike[str]) -> DetachmentPlan:
+        """Report the independent-copy cost without changing the project."""
+        return plan_detachment(Path(path))
+
+    def init_project(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        mathlib: str | None = None,
+        toolchain: str | None = None,
+    ) -> AdoptionResult:
+        """Create a standard Lake library and attach its exact dependencies."""
+        from .discovery.defaults import default_catalog
+
+        target = Path(path).expanduser().resolve()
+        if (target / "lakefile.toml").exists() or (target / "lakefile.lean").exists():
+            raise ProjectError(f"Lake project already exists: {target}")
+        entries = [
+            entry
+            for entry in default_catalog().entries
+            if entry.id.startswith("mathlib-v") and "mathlib" in entry.package_names
+        ]
+        if not entries:
+            raise ProjectError("bundled catalog contains no Mathlib project template")
+
+        def version_key(entry: Any) -> tuple[int, ...]:
+            value = entry.id.removeprefix("mathlib-v")
+            return tuple(int(part) for part in value.split(".") if part.isdigit())
+
+        selected = max(entries, key=version_key)
+        if mathlib not in {None, "latest"}:
+            requested = str(mathlib).removeprefix("v")
+            matching = next(
+                (entry for entry in entries if entry.id == f"mathlib-v{requested}"),
+                None,
+            )
+            if matching is None:
+                available = ", ".join(
+                    entry.id.removeprefix("mathlib-v") for entry in sorted(entries, key=version_key)
+                )
+                raise ProjectError(
+                    f"Mathlib {requested} is not in the bundled catalog; available: {available}"
+                )
+            selected = matching
+        selected_toolchain = normalize_toolchain(toolchain or selected.toolchain)
+        if mathlib is not None and selected_toolchain != selected.toolchain:
+            raise ProjectError(
+                f"Mathlib {selected.id.removeprefix('mathlib-v')} requires "
+                f"{selected.toolchain}, not {selected_toolchain}"
+            )
+        self.toolchains.ensure(selected_toolchain)
+        target.mkdir(parents=True, exist_ok=True)
+        command = self.toolchains.command(
+            selected_toolchain,
+            "lake",
+            "--offline",
+            f"--dir={target}",
+            "init",
+            target.name,
+            "lib",
+        )
+        process = subprocess.run(
+            command,
+            cwd=target,
+            env=self.toolchains.environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        if process.returncode:
+            detail = process.stdout.strip()
+            raise ProjectError(
+                "Lake could not initialize the project" + (f":\n{detail}" if detail else "")
+            )
+        update_command = self.toolchains.command(
+            selected_toolchain,
+            "lake",
+            "--offline",
+            f"--dir={target}",
+            "update",
+        )
+        updated = subprocess.run(
+            update_command,
+            cwd=target,
+            env=self.toolchains.environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        manifest_path = target / "lake-manifest.json"
+        if updated.returncode or not manifest_path.is_file():
+            detail = updated.stdout.strip()
+            raise ProjectError(
+                "Lake could not create the root manifest identity"
+                + (f":\n{detail}" if detail else "")
+            )
+        loaded_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded_manifest, dict):
+            raise ProjectError("Lake created a malformed root manifest")
+        manifest: dict[str, Any] = loaded_manifest
+        seed_package_paths: dict[str, Path] | None = None
+        if mathlib is None:
+            seed_packages = None
+        else:
+            manifest["version"] = selected.lock.manifest.get("version", "1.2.0")
+            manifest["packagesDir"] = selected.lock.manifest.get("packagesDir", ".lake/packages")
+            manifest["packages"] = selected.lock.manifest["packages"]
+            selected_packages = selected.lock.manifest["packages"]
+            assert isinstance(selected_packages, list)
+            mathlib_package = next(
+                item
+                for item in selected_packages
+                if isinstance(item, dict) and item.get("name") == "mathlib"
+            )
+            revision = str(mathlib_package["rev"])
+            lakefile = target / "lakefile.toml"
+            with lakefile.open("a", encoding="utf-8") as stream:
+                stream.write(
+                    "\n[[require]]\n"
+                    'name = "mathlib"\n'
+                    'git = "https://github.com/leanprover-community/mathlib4.git"\n'
+                    f'rev = "{revision}"\n'
+                )
+            roots = [source for source in target.glob("*.lean") if source.name not in {"Main.lean"}]
+            if len(roots) != 1:
+                raise ProjectError("Lake did not create one unambiguous library root")
+            root_source = roots[0]
+            root_source.write_text(
+                "import Mathlib\n" + root_source.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            if self.shared_projects.has_built_graph(
+                selected.toolchain, selected_packages, roots=frozenset({"mathlib"})
+            ):
+                seed_packages = None
+                seed_package_paths = self.shared_projects.graph_seeds(
+                    selected.toolchain, selected_packages
+                )
+            else:
+                environment = self.open_exact(selected.lock, import_roots=("Mathlib",))
+                raw_packages = selected.lock.manifest.get("packagesDir", ".lake/packages")
+                seed_packages = environment.workspace / str(raw_packages)
+                seed_package_paths = None
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        result = self.attach_projects(
+            target,
+            seed_packages=seed_packages,
+            seed_package_paths=seed_package_paths,
+        )
+        if result.failures or not result.results:
+            detail = result.failures[0][1] if result.failures else "project was not attachable"
+            raise ProjectError(f"project was created but shared setup failed: {detail}")
+        return result.results[0]
 
     def project(
         self,
@@ -1346,9 +1611,12 @@ class Runtime:
         targets: Sequence[str],
         policy: ExecutionPolicy,
         cancel: threading.Event | None = None,
-        shared: bool = False,
+        shared: bool | None = None,
     ) -> ExecutionResult:
-        workspace = self.shared_projects.prepare(context, cancel=cancel) if shared else None
+        selected_shared = project_sharing_enabled(context.root) if shared is None else shared
+        workspace = (
+            self.shared_projects.prepare(context, cancel=cancel) if selected_shared else None
+        )
         lake_arguments = (
             (f"--packages={workspace.overrides_file}", "build", *targets)
             if workspace is not None
@@ -1364,7 +1632,12 @@ class Runtime:
                 source_digest=sha256_text(""),
                 policy=policy,
                 project=context.provenance(),
-                logical_command=("lake", "build", *(("--shared",) if shared else ()), *targets),
+                logical_command=(
+                    "lake",
+                    "build",
+                    *(("--shared",) if selected_shared else ()),
+                    *targets,
+                ),
                 cancel=cancel,
             )
 

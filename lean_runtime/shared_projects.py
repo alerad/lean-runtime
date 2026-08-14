@@ -8,7 +8,7 @@ import re
 import subprocess
 import threading
 import uuid
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -22,8 +22,17 @@ from .projects import ProjectContext
 from .serialization import sha256_id, write_json_atomic
 from .store import clone_tree, platform_compatibility, source_snapshot_digest
 
-SHARED_PROJECT_SCHEMA = "lean-runtime-shared-project/1"
+SHARED_PROJECT_SCHEMA = "lean-runtime-shared-project/2"
 _PACKAGE_ID_PATTERN = re.compile(r"project_package_[0-9a-f]{64}\Z")
+
+
+def _canonical_git_url(value: str) -> str:
+    url = value.strip().rstrip("/")
+    if url.startswith("git@github.com:"):
+        url = "https://github.com/" + url.removeprefix("git@github.com:")
+    elif url.startswith("ssh://git@github.com/"):
+        url = "https://github.com/" + url.removeprefix("ssh://git@github.com/")
+    return url.removesuffix(".git")
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +108,6 @@ def _entry_identity(entry: dict[str, Any]) -> dict[str, Any]:
     """Keep only fields that can alter a materialized package or its name."""
     keys = (
         "name",
-        "scope",
         "type",
         "url",
         "rev",
@@ -109,7 +117,23 @@ def _entry_identity(entry: dict[str, Any]) -> dict[str, Any]:
         "manifestFile",
         "content_digest",
     )
-    return {key: entry[key] for key in keys if key in entry}
+    identity = {key: entry[key] for key in keys if key in entry}
+    url = identity.get("url")
+    if entry.get("type") == "git" and isinstance(url, str):
+        identity["url"] = _canonical_git_url(url)
+    return identity
+
+
+def _package_subdir(entry: dict[str, Any]) -> Path | None:
+    raw = entry.get("subDir")
+    if raw in {None, ""}:
+        return None
+    if not isinstance(raw, str):
+        raise ProjectError(f"package {entry.get('name')!r} has a non-string subDir")
+    subdir = Path(raw)
+    if subdir.is_absolute() or ".." in subdir.parts:
+        raise ProjectError(f"package {entry.get('name')!r} has an unsafe subDir: {raw}")
+    return subdir
 
 
 def _package_identity(
@@ -158,7 +182,29 @@ def _package_identity(
     }
 
 
+def _normalized_package_identity(identity: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize legacy marker spellings without weakening graph compatibility."""
+    package = identity.get("package")
+    dependencies = identity.get("effective_dependencies")
+    if not isinstance(package, dict) or not isinstance(dependencies, list):
+        return None
+    normalized_dependencies: list[dict[str, Any]] = []
+    for dependency in dependencies:
+        if not isinstance(dependency, dict):
+            return None
+        normalized_dependencies.append(_entry_identity(dependency))
+    return {
+        "toolchain": identity.get("toolchain"),
+        "platform": identity.get("platform"),
+        "package": _entry_identity(package),
+        "effective_dependencies": normalized_dependencies,
+        "package_manifest": identity.get("package_manifest"),
+    }
+
+
 def _git_head(path: Path) -> str | None:
+    if _git_root(path) != path.resolve():
+        return None
     result = subprocess.run(
         git_command("-C", str(path), "rev-parse", "HEAD"),
         text=True,
@@ -169,6 +215,8 @@ def _git_head(path: Path) -> str | None:
 
 
 def _git_clean(path: Path) -> bool:
+    if _git_root(path) != path.resolve():
+        return False
     result = subprocess.run(
         git_command("-C", str(path), "status", "--porcelain", "--untracked-files=normal"),
         text=True,
@@ -179,6 +227,8 @@ def _git_clean(path: Path) -> bool:
 
 
 def _git_has_commit(path: Path, revision: str) -> bool:
+    if _git_root(path) != path.resolve():
+        return False
     result = subprocess.run(
         git_command("-C", str(path), "cat-file", "-e", f"{revision}^{{commit}}"),
         stdout=subprocess.DEVNULL,
@@ -189,6 +239,8 @@ def _git_has_commit(path: Path, revision: str) -> bool:
 
 
 def _git_remote(path: Path) -> str | None:
+    if _git_root(path) != path.resolve():
+        return None
     result = subprocess.run(
         git_command("-C", str(path), "config", "--get", "remote.origin.url"),
         text=True,
@@ -196,6 +248,21 @@ def _git_remote(path: Path) -> str | None:
         check=False,
     )
     return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _git_root(path: Path) -> Path | None:
+    result = subprocess.run(
+        git_command("-C", str(path), "rev-parse", "--show-toplevel"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode or not result.stdout.strip():
+        return None
+    try:
+        return Path(result.stdout.strip()).resolve()
+    except OSError:
+        return None
 
 
 def _run_git(arguments: list[str], *, purpose: str) -> None:
@@ -219,6 +286,15 @@ def _valid_package_marker(package: Path, package_id: str) -> bool:
     return isinstance(marker, dict) and sha256_id("project_package", marker) == package_id
 
 
+def _has_root_olean(build: Path, package_name: str) -> bool:
+    lean_root = build / "lib" / "lean"
+    expected = package_name.rsplit(".", 1)[-1].lower() + ".olean"
+    try:
+        return any(path.name.lower() == expected for path in lean_root.iterdir())
+    except OSError:
+        return False
+
+
 class SharedProjectManager:
     """Prepare and lock reusable Lake dependency workspaces."""
 
@@ -230,6 +306,137 @@ class SharedProjectManager:
         self.sources = home / "project-sources"
         self.locks = home / "locks"
 
+    def graph_seeds(
+        self,
+        toolchain: str,
+        entries: list[dict[str, Any]],
+    ) -> dict[str, Path]:
+        """Find existing exact shared packages despite older identity spellings."""
+        required = {
+            str(entry.get("name")): (
+                str(entry.get("rev")),
+                str(entry.get("subDir") or ""),
+                _canonical_git_url(str(entry.get("url"))),
+            )
+            for entry in entries
+            if entry.get("type") == "git"
+        }
+        # Prefer one complete existing workspace. Lake traces include absolute dependency
+        # paths, so mixing individually warm packages from different workspaces can make
+        # an otherwise reusable graph rebuild itself.
+        coherent: dict[str, Path] | None = None
+        coherent_score: tuple[int, int, int] = (-1, -1, -1)
+        if self.root.is_dir():
+            for record_path in self.root.glob("project_workspace_*/workspace.json"):
+                try:
+                    record = json.loads(record_path.read_text(encoding="utf-8"))
+                    if not isinstance(record, dict):
+                        continue
+                    workspace_entries = record["packages"]
+                    package_ids = record["package_ids"]
+                except (OSError, json.JSONDecodeError, KeyError, TypeError):
+                    continue
+                if (
+                    record.get("toolchain") != toolchain
+                    or not isinstance(workspace_entries, list)
+                    or not isinstance(package_ids, list)
+                ):
+                    continue
+                workspace_required = {
+                    str(entry.get("name")): (
+                        str(entry.get("rev")),
+                        str(entry.get("subDir") or ""),
+                        _canonical_git_url(str(entry.get("url"))),
+                    )
+                    for entry in workspace_entries
+                    if isinstance(entry, dict) and entry.get("type") == "git"
+                }
+                if workspace_required != required or len(package_ids) != len(workspace_entries):
+                    continue
+                candidate: dict[str, Path] = {}
+                roots = 0
+                built = 0
+                modified = 0
+                valid = True
+                for entry, package_id in zip(workspace_entries, package_ids, strict=True):
+                    if not isinstance(entry, dict) or entry.get("type") != "git":
+                        continue
+                    package_id = str(package_id)
+                    package = self.packages / package_id
+                    if not _PACKAGE_ID_PATTERN.fullmatch(package_id) or not _valid_package_marker(
+                        package, package_id
+                    ):
+                        valid = False
+                        break
+                    name = str(entry.get("name"))
+                    candidate[name] = package
+                    subdir = str(entry.get("subDir") or "")
+                    build = package / subdir / ".lake" / "build"
+                    if build.is_dir():
+                        built += 1
+                        if _has_root_olean(build, name):
+                            roots += 1
+                        with suppress(OSError):
+                            modified = max(modified, build.stat().st_mtime_ns)
+                score = (roots, built, modified)
+                if valid and set(candidate) == set(required) and score > coherent_score:
+                    coherent = candidate
+                    coherent_score = score
+        if coherent is not None:
+            return coherent
+
+        found: dict[str, Path] = {}
+        scores: dict[str, tuple[bool, bool, int]] = {}
+        for marker in self.packages.glob("project_package_*/.lean-runtime-package.json"):
+            try:
+                identity = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            package_entry = identity.get("package") if isinstance(identity, dict) else None
+            if (
+                not isinstance(identity, dict)
+                or identity.get("toolchain") != toolchain
+                or not isinstance(package_entry, dict)
+            ):
+                continue
+            name = str(package_entry.get("name"))
+            key = (
+                str(package_entry.get("rev")),
+                str(package_entry.get("subDir") or ""),
+                _canonical_git_url(str(package_entry.get("url"))),
+            )
+            if required.get(name) == key:
+                package_root = marker.parent / key[1] if key[1] else marker.parent
+                build = package_root / ".lake" / "build"
+                try:
+                    modified = build.stat().st_mtime_ns if build.is_dir() else 0
+                except OSError:
+                    modified = 0
+                score = (_has_root_olean(build, name), build.is_dir(), modified)
+                if score > scores.get(name, (False, False, 0)):
+                    found[name] = marker.parent
+                    scores[name] = score
+        return found
+
+    def has_built_graph(
+        self,
+        toolchain: str,
+        entries: list[dict[str, Any]],
+        *,
+        roots: frozenset[str],
+    ) -> bool:
+        seeds = self.graph_seeds(toolchain, entries)
+        for name in roots:
+            seed = seeds.get(name)
+            if seed is None:
+                return False
+            entry = next((item for item in entries if str(item.get("name")).lower() == name), None)
+            subdir = str(entry.get("subDir") or "") if entry is not None else ""
+            build = seed / subdir / ".lake" / "build"
+            if not _has_root_olean(build, name):
+                return False
+        return True
+
     def _object_donor(self, url: str, revision: str, seed: Path | None) -> Path | None:
         candidates = [seed] if seed is not None else []
         if self.sources.is_dir():
@@ -237,7 +444,7 @@ class SharedProjectManager:
         for candidate in candidates:
             if (
                 candidate is not None
-                and _git_remote(candidate) == url
+                and _canonical_git_url(_git_remote(candidate) or "") == _canonical_git_url(url)
                 and _git_has_commit(candidate, revision)
             ):
                 return candidate
@@ -251,7 +458,9 @@ class SharedProjectManager:
         seed: Path | None,
         cancel: threading.Event | None = None,
     ) -> Path:
-        source_id = sha256_id("project_source", {"url": url, "revision": revision})
+        source_id = sha256_id(
+            "project_source", {"url": _canonical_git_url(url), "revision": revision}
+        )
         destination = self.sources / source_id
         with FileLock(self.locks / f"{source_id}.lock", timeout=1800, cancel=cancel):
             if (
@@ -331,6 +540,8 @@ class SharedProjectManager:
         context: ProjectContext,
         *,
         cancel: threading.Event | None = None,
+        seed_packages: Path | None = None,
+        seed_package_paths: dict[str, Path] | None = None,
     ) -> SharedProjectWorkspace:
         manifest = _load_manifest(context)
         packages = manifest["packages"]
@@ -408,16 +619,23 @@ class SharedProjectManager:
                                 f"git dependency {entry['name']!r} has no exact URL and revision"
                             )
                         local = local_packages / str(entry["name"])
+                        seed = (
+                            seed_package_paths.get(str(entry["name"]), local)
+                            if seed_package_paths is not None
+                            else seed_packages / str(entry["name"])
+                            if seed_packages
+                            else local
+                        )
+                        if seed.is_symlink():
+                            seed = seed.resolve()
                         source = self._source_checkout(
                             url=url,
                             revision=revision,
-                            seed=local if local.is_dir() else None,
+                            seed=seed if seed.is_dir() else None,
                             cancel=cancel,
                         )
-                        subdir = entry.get("subDir")
-                        source_package = (
-                            source / subdir if isinstance(subdir, str) and subdir else source
-                        )
+                        subdir = _package_subdir(entry)
+                        source_package = source / subdir if subdir is not None else source
                         package_identity = _package_identity(
                             context=context,
                             entry=entry,
@@ -425,8 +643,28 @@ class SharedProjectManager:
                             effective_entries=effective_entries,
                         )
                         package_id = sha256_id("project_package", package_identity)
-                        package_ids.append(package_id)
                         final_target = self.packages / package_id
+                        # A marker created by an older schema may describe the exact same
+                        # graph with cosmetic scope/URL differences. Reuse that managed
+                        # path directly so its absolute-path Lake traces remain warm.
+                        try:
+                            seed_marker = json.loads(
+                                (seed / ".lean-runtime-package.json").read_text(encoding="utf-8")
+                            )
+                        except (OSError, json.JSONDecodeError):
+                            seed_marker = None
+                        seed_id = seed.name
+                        if (
+                            isinstance(seed_marker, dict)
+                            and seed.resolve().parent == self.packages.resolve()
+                            and _PACKAGE_ID_PATTERN.fullmatch(seed_id) is not None
+                            and _valid_package_marker(seed, seed_id)
+                            and _normalized_package_identity(seed_marker)
+                            == _normalized_package_identity(package_identity)
+                        ):
+                            package_id = seed_id
+                            final_target = seed
+                        package_ids.append(package_id)
                         with FileLock(
                             self.locks / f"{package_id}.lock", timeout=1800, cancel=cancel
                         ):
@@ -443,10 +681,10 @@ class SharedProjectManager:
                                     # Preserve compatible local artifacts on first import. CoW
                                     # cloning prevents later writes from mutating the donor.
                                     donor = (
-                                        local
-                                        if local.is_dir()
-                                        and _git_head(local) == revision
-                                        and _git_clean(local)
+                                        seed
+                                        if seed.is_dir()
+                                        and _git_head(seed) == revision
+                                        and _git_clean(seed)
                                         else source
                                     )
                                     clone_tree(donor, package_staging)
@@ -459,11 +697,7 @@ class SharedProjectManager:
                                     if package_staging.exists():
                                         remove_tree(package_staging)
                                     raise
-                        package_dir = (
-                            final_target / subdir
-                            if isinstance(subdir, str) and subdir
-                            else final_target
-                        )
+                        package_dir = final_target / subdir if subdir is not None else final_target
                         override.update(type="path", dir=str(package_dir))
                     overrides.append(override)
                 write_json_atomic(
