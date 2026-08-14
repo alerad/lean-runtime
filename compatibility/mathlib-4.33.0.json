@@ -1,5 +1,6 @@
 {
   "name": "mathlib-4.33.0",
+  "reference": "mathlib@v4.33.0",
   "spec": "mathlib-4.33.0.toml",
   "imports": [
     "Mathlib",
