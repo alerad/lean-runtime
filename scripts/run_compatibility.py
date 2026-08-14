@@ -25,12 +25,12 @@ def main() -> int:
     spec = EnvironmentSpec.load(profile_path.with_name(str(profile["spec"])))
     runtime = Runtime(home=args.home, on_event=progress)
     try:
-        environment = runtime.open(str(profile["name"]))
+        environment = runtime.environment(str(profile["name"]))
         lock = environment.lock
         print(f"[environment.cache_hit] Reusing {environment.id}", flush=True)
     except EnvironmentError:
-        lock = runtime.resolve(spec)
-        environment = runtime.ensure(lock, name=str(profile["name"]))
+        lock = runtime.prepare(spec)
+        environment = runtime.open_exact(lock, name=str(profile["name"]))
     modules = tuple(str(module) for module in profile["imports"])
     sources = tuple(f"import {module}\nexample : True := by trivial\n" for module in modules)
     results = environment.check_many(sources, concurrency=args.concurrency)
