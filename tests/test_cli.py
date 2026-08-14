@@ -39,9 +39,11 @@ def test_removed_v1_commands_are_absent() -> None:
 
 
 def test_project_sharing_commands_have_safe_defaults() -> None:
+    assert parser().parse_args(["init", "demo"]).mathlib == "latest"
     init = parser().parse_args(["init", "demo", "--mathlib", "4.33.0"])
     assert init.mathlib == "4.33.0"
     assert init.agents
+    assert parser().parse_args(["init", "demo", "--core"]).mathlib is None
     assert not parser().parse_args(["init", "demo", "--no-agents"]).agents
     attach = parser().parse_args(["attach", "projects", "--recursive"])
     assert attach.recursive and not attach.execute
@@ -49,6 +51,13 @@ def test_project_sharing_commands_have_safe_defaults() -> None:
     assert not detach.execute
     build = parser().parse_args(["build", "demo"])
     assert build.shared is None
+    assert parser().parse_args(["build"]).project == Path(".")
+    assert parser().parse_args(["update"]).path == Path(".")
+    policy = parser().parse_args(
+        ["init", "demo", "--offline", "--max-download", "500MiB", "--plan"]
+    )
+    assert policy.offline and policy.plan and policy.max_download == "500MiB"
+    assert parser().parse_args(["scan"]).path == Path(".")
     with pytest.raises(SystemExit):
         parser().parse_args(["build", "demo", "--shared", "--local"])
 
@@ -131,6 +140,32 @@ def test_check_file_cli_json_result(monkeypatch, tmp_path: Path, capsys) -> None
     assert payload["ok"] is True
     assert payload["schema"] == "lean-runtime.execution/v1"
     assert payload["data"]["toolchain"] == "leanprover/lean4:v4.32.0"
+
+
+def test_check_cli_accepts_one_local_file(monkeypatch, tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := by trivial")
+    result = ExecutionResult(
+        ok=True,
+        exit_code=0,
+        toolchain="leanprover/lean4:v4.33.0",
+        command=("lake", "env", "lean", "Main.lean"),
+        cwd=str(tmp_path),
+        stdout="",
+        stderr="",
+        elapsed_seconds=0.01,
+    )
+    observed = {}
+
+    def check_file(_runtime, path, **options):
+        observed.update(path=path, **options)
+        return result
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.check_file", check_file)
+
+    assert main(["check", str(source), "--json"]) == 0
+    assert observed["path"] == source
+    assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
 def test_managed_check_cli_accepts_supporting_files(monkeypatch, tmp_path: Path, capsys) -> None:

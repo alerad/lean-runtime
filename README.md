@@ -145,31 +145,34 @@ project = lean.setup(project="./my-project")
 result = project.check_file("./my-project/MyProject/Main.lean")
 ```
 
-Create a normal Lake project whose exact dependencies are shared automatically:
+Create a normal Lake project. The newest stable cataloged Mathlib is the
+default, and exact dependencies are shared automatically:
 
 ```bash
-lean-runtime init MyProof --mathlib
+lean-runtime init MyProof
 cd MyProof
-lean-runtime build .
+lean-runtime check MyProof/Basic.lean
+lean-runtime build
 ```
 
 `init` also writes an `AGENTS.md` with the project build, checking, dependency,
 and shared-package rules for coding agents. Pass `--no-agents` to omit it; an
-existing `AGENTS.md` is never overwritten.
+existing `AGENTS.md` is never overwritten. Use `--core` for no Mathlib, or
+`--mathlib 4.33.0` to select a cataloged release. `lean-runtime update`
+explicitly moves a project to the newest cataloged Mathlib after a preview.
 
-Existing repositories can preview and adopt the same layout individually or in
-bulk:
+Running `lean-runtime init .` in an existing pinned Lake project adopts its
+current exact graph without running `lake update`. If you already have many
+Lake checkouts, register them once as local dependency seeds:
 
 ```bash
-lean-runtime attach ~/research --recursive
-lean-runtime attach ~/research --recursive --execute
+lean-runtime scan ~/research
+lean-runtime init .
 ```
 
-The dry run reports blockers and estimated recovery without changing anything.
-Adoption preserves each root `.lake/build`, verifies both the override and
-ordinary Lake views, then replaces only generated package copies with links to
-the content-addressed store. `lean-runtime detach . --execute` materializes an
-independent project again.
+`init --plan` is side-effect free; `--max-download 500MiB` and `--offline`
+enforce cold-start policy. Advanced bulk migration remains available through
+`attach`, and `detach --execute` materializes an independent project again.
 
 One-shot helpers are available when setup reuse is unnecessary:
 

@@ -8,11 +8,13 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ._paths import remove_tree
 from .backends import Backend, LocalBackend
 from .bundles import EnvironmentBundles, PortableCopyInfo
 from .capsules import source_import_roots
@@ -32,7 +34,13 @@ from .events import EventCallback, EventEmitter
 from .health import DoctorReport, diagnose
 from .lockfiles import EnvironmentLock
 from .matrix import MatrixContext, MatrixResult, run_matrix
-from .models import ExecutionProvenance, ExecutionResult, PhaseTiming, ProjectProvenance
+from .models import (
+    ExecutionProvenance,
+    ExecutionResult,
+    PackageProvenance,
+    PhaseTiming,
+    ProjectProvenance,
+)
 from .oci import (
     DEFAULT_ENVIRONMENT_LIBRARIES,
     OCIEnvironmentCache,
@@ -49,6 +57,10 @@ from .project_sharing import (
     AdoptionResult,
     DetachmentPlan,
     ProjectAdopter,
+    ProjectInitPlan,
+    ProjectScanResult,
+    ProjectUpdatePlan,
+    discover_shareable_projects,
     plan_adoption,
     plan_detachment,
     project_sharing_enabled,
@@ -94,19 +106,18 @@ This is a standard Lean 4 and Lake project whose exact dependencies are shared
 through Lean Runtime. Read `lean-toolchain`, the Lake configuration, and
 `lake-manifest.json` before changing the project.
 
-- Use `lean-runtime build .` for the normal full build.
-- Use `lean-runtime check-file PATH` for a focused source check.
+- Use `lean-runtime build` for the normal full build.
+- Use `lean-runtime check PATH` for a focused source check.
 - Ordinary `lake build` and editor tooling work, but `lean-runtime build` also
   serializes writes when another project uses the same shared dependencies.
 - Do not edit `.lake/packages` or files reached through its package links; they
   are generated shared dependencies. Keep project changes outside `.lake`.
 - Treat `lake-manifest.json` as authoritative. Do not run `lake update` or change
   dependency revisions unless the task explicitly requires it.
-- For an intentional dependency update, first run
-  `lean-runtime detach . --execute`, update the ordinary Lake project, then run
-  `lean-runtime attach .` and review the plan before adding `--execute`.
+- Use `lean-runtime update` to preview an intentional move to the latest
+  cataloged Mathlib; apply it only after reviewing the plan.
 - Before finishing, check the changed Lean files and run the smallest relevant
-  build; use `lean-runtime build .` when practical.
+  build; use `lean-runtime build` when practical.
 """
 
 
@@ -1117,6 +1128,7 @@ class Runtime:
     ) -> ExecutionResult:
         """Build an existing trusted Lake project outside the environment store."""
         context = discover_project(project)
+        self.shared_projects.remember_project(context)
         if toolchain is not None:
             context = replace(context, toolchain=normalize_toolchain(toolchain))
         selected_shared = project_sharing_enabled(context.root) if shared is None else shared
@@ -1200,13 +1212,21 @@ class Runtime:
         failures: list[tuple[Path, str]] = []
         for project in plan.projects:
             if project.attached:
+                workspace_id = discover_project(project.root).provenance().workspace_id
                 results.append(
-                    AdoptionResult(project.root, "already-attached", len(project.packages), 0)
+                    AdoptionResult(
+                        project.root,
+                        "already-attached",
+                        len(project.packages),
+                        0,
+                        workspace_id,
+                    )
                 )
                 continue
             if not project.ready:
                 continue
             context = discover_project(project.root)
+            self.shared_projects.remember_project(context)
 
             def probe(overrides: Path | None, selected_context: ProjectContext = context) -> None:
                 self._probe_project_graph(selected_context, overrides)
@@ -1226,6 +1246,249 @@ class Runtime:
                 failures.append((project.root, str(exc)))
         return AdoptionBatchResult(plan, tuple(results), tuple(failures))
 
+    def scan_projects(
+        self, path: str | os.PathLike[str], *, recursive: bool = True
+    ) -> ProjectScanResult:
+        """Register local Lake projects as exact dependency seeds without adopting them."""
+        selected = Path(path).expanduser().resolve()
+        roots = discover_shareable_projects(selected, recursive=recursive)
+        for root in roots:
+            self.shared_projects.remember_project(discover_project(root))
+        return ProjectScanResult(selected, roots)
+
+    @staticmethod
+    def _lakefile_with_mathlib_revision(contents: str, revision: str) -> str:
+        """Replace Mathlib's input revision in a Lake TOML require block."""
+        lines = contents.splitlines(keepends=True)
+        starts = [index for index, line in enumerate(lines) if line.strip() == "[[require]]"]
+        for position, start in enumerate(starts):
+            end = starts[position + 1] if position + 1 < len(starts) else len(lines)
+            block = lines[start:end]
+            if not any(line.strip().replace(" ", "") == 'name="mathlib"' for line in block):
+                continue
+            for index in range(start, end):
+                if lines[index].lstrip().startswith("rev") and "=" in lines[index]:
+                    prefix = lines[index][: len(lines[index]) - len(lines[index].lstrip())]
+                    lines[index] = f'{prefix}rev = "{revision}"\n'
+                    return "".join(lines)
+            lines.insert(end, f'rev = "{revision}"\n')
+            return "".join(lines)
+        raise ProjectError("lakefile.toml has no [[require]] block named mathlib")
+
+    @staticmethod
+    def _project_manifest_packages(
+        packages: list[dict[str, Any]], *, mathlib_version: str
+    ) -> list[dict[str, Any]]:
+        """Retain exact commits while matching Lake's direct input revision."""
+        copied = [dict(entry) for entry in packages]
+        for entry in copied:
+            if entry.get("name") == "mathlib" and entry.get("type") == "git":
+                entry["inputRev"] = f"v{mathlib_version.removeprefix('v')}"
+                break
+        return copied
+
+    def _ensure_project_toolchain(self, toolchain: str) -> None:
+        """Ensure the full Lake-capable toolchain under the selected policy."""
+        installed = self._toolchain_installed(toolchain)
+        if not installed and self.availability == "local":
+            raise ProjectError(
+                f"offline project setup requires the full {toolchain} toolchain locally"
+            )
+        if not installed and self.max_download_bytes is not None:
+            raise DownloadLimitExceeded(
+                "the full Lake-capable Lean toolchain is not installed and Elan's download "
+                "size cannot be preflighted; refusing under --max-download; install the "
+                "toolchain first with `lean-runtime install VERSION`"
+            )
+        self.toolchains.ensure(toolchain)
+
+    def plan_project_update(
+        self,
+        path: str | os.PathLike[str] = ".",
+        *,
+        seed_from: str | os.PathLike[str] | None = None,
+    ) -> ProjectUpdatePlan:
+        """Plan an explicit update to the latest cataloged stable Mathlib."""
+        context = discover_project(path)
+        blockers: list[str] = []
+        if context.lakefile.name != "lakefile.toml":
+            blockers.append("automatic updates currently require lakefile.toml")
+        manifest_path = context.current_manifest()
+        if manifest_path is None:
+            raise ProjectError("project update requires lake-manifest.json")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw_packages = manifest.get("packages") if isinstance(manifest, dict) else None
+        if not isinstance(raw_packages, list):
+            raise ProjectError("project manifest has no package entries")
+        mathlib_package = next(
+            (
+                entry
+                for entry in raw_packages
+                if isinstance(entry, dict)
+                and entry.get("type") == "git"
+                and entry.get("name") == "mathlib"
+            ),
+            None,
+        )
+        if mathlib_package is None:
+            raise ProjectError("project does not have a locked Mathlib dependency")
+        current_revision = str(mathlib_package.get("rev"))
+        current_version = str(mathlib_package.get("inputRev") or current_revision).removeprefix("v")
+        from .discovery.defaults import default_catalog
+
+        for entry in default_catalog().entries:
+            if not entry.id.startswith("mathlib-v"):
+                continue
+            packages = entry.lock.manifest.get("packages")
+            if not isinstance(packages, list):
+                continue
+            locked_mathlib = next(
+                (
+                    package
+                    for package in packages
+                    if isinstance(package, dict) and package.get("name") == "mathlib"
+                ),
+                None,
+            )
+            if locked_mathlib is not None and locked_mathlib.get("rev") == current_revision:
+                current_version = entry.id.removeprefix("mathlib-v")
+                break
+        latest = self._mathlib_catalog_entry("latest")
+        latest_packages = latest.lock.manifest["packages"]
+        assert isinstance(latest_packages, list)
+        latest_mathlib = next(
+            entry
+            for entry in latest_packages
+            if isinstance(entry, dict) and entry.get("name") == "mathlib"
+        )
+        target_version = latest.id.removeprefix("mathlib-v")
+        toolchain_installed = self._toolchain_installed(latest.toolchain)
+        changed = current_revision != str(latest_mathlib.get("rev")) or (
+            context.toolchain != latest.toolchain
+        )
+        seed_root: Path | None = None
+        download_bytes: int | None = 0
+        complete = True
+        if changed:
+            seeds, seed_root = self._project_seed_paths(
+                latest.toolchain,
+                latest_packages,
+                seed_from=Path(seed_from) if seed_from is not None else None,
+            )
+            if not seeds:
+                acquisition = self.plan_exact(latest.lock, import_roots=("Mathlib",))
+                raw_download = acquisition.get("download_bytes")
+                download_bytes = raw_download if isinstance(raw_download, int) else None
+                complete = acquisition.get("download_bytes_complete") is True
+        if not toolchain_installed:
+            download_bytes = None
+            complete = False
+        return ProjectUpdatePlan(
+            context.root,
+            current_version,
+            target_version,
+            current_revision,
+            str(latest_mathlib.get("rev")),
+            context.toolchain,
+            latest.toolchain,
+            tuple(str(entry["name"]) for entry in latest_packages),
+            seed_root,
+            download_bytes,
+            complete,
+            tuple(blockers),
+            toolchain_installed,
+        )
+
+    def update_project(
+        self,
+        path: str | os.PathLike[str] = ".",
+        *,
+        seed_from: str | os.PathLike[str] | None = None,
+    ) -> ProjectUpdatePlan:
+        """Move an attached TOML project to the latest cataloged Mathlib transactionally."""
+        plan = self.plan_project_update(path, seed_from=seed_from)
+        if not plan.ready:
+            raise ProjectError("project cannot be updated:\n- " + "\n- ".join(plan.blockers))
+        if not plan.changed:
+            return plan
+        context = discover_project(plan.root)
+        latest = self._mathlib_catalog_entry("latest")
+        latest_packages = latest.lock.manifest["packages"]
+        assert isinstance(latest_packages, list)
+        self._ensure_project_toolchain(latest.toolchain)
+        seeds, _seed_root = self._project_seed_paths(
+            latest.toolchain,
+            latest_packages,
+            seed_from=Path(seed_from) if seed_from is not None else None,
+        )
+        seed_packages: Path | None = None
+        seed_paths: dict[str, Path] | None = seeds or None
+        if not seeds:
+            if self.availability == "local":
+                raise ProjectError(
+                    "offline update needs an exact local latest-Mathlib graph; "
+                    "run `lean-runtime scan PATH` or pass `--seed-from PROJECT`"
+                )
+            environment = self.open_exact(latest.lock, import_roots=("Mathlib",))
+            raw_dir = latest.lock.manifest.get("packagesDir", ".lake/packages")
+            seed_packages = environment.workspace / str(raw_dir)
+        lakefile = context.lakefile
+        manifest_path = context.current_manifest()
+        assert manifest_path is not None
+        toolchain_path = context.root / "lean-toolchain"
+        marker = context.root / ".lake" / "lean-runtime-attachment.json"
+        config = context.root / "lean-runtime.toml"
+        originals = {
+            lakefile: lakefile.read_bytes(),
+            manifest_path: manifest_path.read_bytes(),
+            toolchain_path: toolchain_path.read_bytes(),
+        }
+        optional_originals = {
+            path: path.read_bytes() for path in (marker, config) if path.is_file()
+        }
+        try:
+            lakefile.write_text(
+                self._lakefile_with_mathlib_revision(
+                    lakefile.read_text(encoding="utf-8"), f"v{plan.target_version}"
+                ),
+                encoding="utf-8",
+            )
+            current_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            current_manifest["version"] = latest.lock.manifest.get("version", "1.2.0")
+            current_manifest["packagesDir"] = latest.lock.manifest.get(
+                "packagesDir", ".lake/packages"
+            )
+            current_manifest["packages"] = self._project_manifest_packages(
+                latest_packages, mathlib_version=plan.target_version
+            )
+            manifest_path.write_text(
+                json.dumps(current_manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            toolchain_path.write_text(latest.toolchain + "\n", encoding="utf-8")
+            if marker.is_file():
+                marker.unlink()
+            if project_sharing_enabled(context.root):
+                config.unlink()
+            result = self.attach_projects(
+                context.root,
+                seed_packages=seed_packages,
+                seed_package_paths=seed_paths,
+            )
+            if result.failures or not result.results:
+                detail = result.failures[0][1] if result.failures else "project was not attachable"
+                raise ProjectError(f"updated project shared setup failed: {detail}")
+            return plan
+        except BaseException:
+            for file_path, contents in originals.items():
+                file_path.write_bytes(contents)
+            for file_path in (marker, config):
+                if file_path in optional_originals:
+                    file_path.write_bytes(optional_originals[file_path])
+                elif file_path.exists():
+                    file_path.unlink()
+            raise
+
     def detach_project(self, path: str | os.PathLike[str]) -> AdoptionResult:
         """Materialize independent dependency copies for an attached project."""
         context = discover_project(path)
@@ -1238,20 +1501,10 @@ class Runtime:
         """Report the independent-copy cost without changing the project."""
         return plan_detachment(Path(path))
 
-    def init_project(
-        self,
-        path: str | os.PathLike[str],
-        *,
-        mathlib: str | None = None,
-        toolchain: str | None = None,
-        agents: bool = True,
-    ) -> AdoptionResult:
-        """Create a standard Lake library and attach its exact dependencies."""
+    @staticmethod
+    def _mathlib_catalog_entry(version: str = "latest") -> Any:
         from .discovery.defaults import default_catalog
 
-        target = Path(path).expanduser().resolve()
-        if (target / "lakefile.toml").exists() or (target / "lakefile.lean").exists():
-            raise ProjectError(f"Lake project already exists: {target}")
         entries = [
             entry
             for entry in default_catalog().entries
@@ -1264,137 +1517,313 @@ class Runtime:
             value = entry.id.removeprefix("mathlib-v")
             return tuple(int(part) for part in value.split(".") if part.isdigit())
 
-        selected = max(entries, key=version_key)
-        if mathlib not in {None, "latest"}:
-            requested = str(mathlib).removeprefix("v")
-            matching = next(
-                (entry for entry in entries if entry.id == f"mathlib-v{requested}"),
-                None,
+        if version == "latest":
+            return max(entries, key=version_key)
+        requested = version.removeprefix("v")
+        matching = next((entry for entry in entries if entry.id == f"mathlib-v{requested}"), None)
+        if matching is not None:
+            return matching
+        available = ", ".join(
+            entry.id.removeprefix("mathlib-v") for entry in sorted(entries, key=version_key)
+        )
+        raise ProjectError(
+            f"Mathlib {requested} is not in the bundled catalog; available: {available}"
+        )
+
+    def _explicit_seed_roots(self, seed_from: Path | None) -> tuple[Path, ...]:
+        if seed_from is None:
+            return ()
+        selected = seed_from.expanduser().resolve()
+        roots: tuple[Path, ...]
+        try:
+            roots = (discover_project(selected).root,)
+        except ProjectError:
+            roots = discover_shareable_projects(selected, recursive=True)
+        if not roots:
+            raise ProjectError(f"no pinned Lake projects found under seed path: {selected}")
+        for root in roots:
+            self.shared_projects.remember_project(discover_project(root))
+        return roots
+
+    def _project_seed_paths(
+        self,
+        toolchain: str,
+        packages: list[dict[str, Any]],
+        *,
+        seed_from: Path | None,
+    ) -> tuple[dict[str, Path], Path | None]:
+        required = {str(entry["name"]) for entry in packages if entry.get("type") == "git"}
+        managed = self.shared_projects.graph_seeds(toolchain, packages)
+        if set(managed) == required:
+            return managed, self.home / "project-packages"
+        roots = self._explicit_seed_roots(seed_from)
+        registered, root = self.shared_projects.registered_graph_seeds(
+            toolchain, packages, roots=roots
+        )
+        if set(registered) == required:
+            return registered, root
+        return {}, None
+
+    def plan_project_init(
+        self,
+        path: str | os.PathLike[str] = ".",
+        *,
+        mathlib: str | None = "latest",
+        toolchain: str | None = None,
+        seed_from: str | os.PathLike[str] | None = None,
+    ) -> ProjectInitPlan:
+        """Plan project creation or adoption without changing the target."""
+        target = Path(path).expanduser().resolve()
+        if (target / "lakefile.toml").is_file() or (target / "lakefile.lean").is_file():
+            adoption = self.plan_project_adoption(target).projects[0]
+            installed = (
+                self._toolchain_installed(adoption.toolchain)
+                if adoption.toolchain is not None
+                else False
             )
-            if matching is None:
-                available = ", ".join(
-                    entry.id.removeprefix("mathlib-v") for entry in sorted(entries, key=version_key)
-                )
-                raise ProjectError(
-                    f"Mathlib {requested} is not in the bundled catalog; available: {available}"
-                )
-            selected = matching
+            return ProjectInitPlan(
+                target,
+                "adopt",
+                adoption.toolchain or "unknown",
+                None,
+                adoption.packages,
+                None,
+                0,
+                True,
+                adoption.attached,
+                installed,
+            )
+        selected = self._mathlib_catalog_entry(mathlib or "latest")
         selected_toolchain = normalize_toolchain(toolchain or selected.toolchain)
         if mathlib is not None and selected_toolchain != selected.toolchain:
             raise ProjectError(
                 f"Mathlib {selected.id.removeprefix('mathlib-v')} requires "
                 f"{selected.toolchain}, not {selected_toolchain}"
             )
-        self.toolchains.ensure(selected_toolchain)
-        target.mkdir(parents=True, exist_ok=True)
-        command = self.toolchains.command(
-            selected_toolchain,
-            "lake",
-            "--offline",
-            f"--dir={target}",
-            "init",
-            target.name,
-            "lib",
-        )
-        process = subprocess.run(
-            command,
-            cwd=target,
-            env=self.toolchains.environment,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-        if process.returncode:
-            detail = process.stdout.strip()
-            raise ProjectError(
-                "Lake could not initialize the project" + (f":\n{detail}" if detail else "")
-            )
-        update_command = self.toolchains.command(
-            selected_toolchain,
-            "lake",
-            "--offline",
-            f"--dir={target}",
-            "update",
-        )
-        updated = subprocess.run(
-            update_command,
-            cwd=target,
-            env=self.toolchains.environment,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-        manifest_path = target / "lake-manifest.json"
-        if updated.returncode or not manifest_path.is_file():
-            detail = updated.stdout.strip()
-            raise ProjectError(
-                "Lake could not create the root manifest identity"
-                + (f":\n{detail}" if detail else "")
-            )
-        loaded_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if not isinstance(loaded_manifest, dict):
-            raise ProjectError("Lake created a malformed root manifest")
-        manifest: dict[str, Any] = loaded_manifest
-        seed_package_paths: dict[str, Path] | None = None
         if mathlib is None:
-            seed_packages = None
+            installed = self._toolchain_installed(selected_toolchain)
+            return ProjectInitPlan(
+                target,
+                "create",
+                selected_toolchain,
+                None,
+                (),
+                None,
+                0 if installed else None,
+                installed,
+                False,
+                installed,
+            )
+        selected_packages = selected.lock.manifest["packages"]
+        assert isinstance(selected_packages, list)
+        seed_paths, seed_root = self._project_seed_paths(
+            selected_toolchain,
+            selected_packages,
+            seed_from=Path(seed_from) if seed_from is not None else None,
+        )
+        if seed_paths:
+            download_bytes: int | None = 0
+            complete = True
         else:
-            manifest["version"] = selected.lock.manifest.get("version", "1.2.0")
-            manifest["packagesDir"] = selected.lock.manifest.get("packagesDir", ".lake/packages")
-            manifest["packages"] = selected.lock.manifest["packages"]
-            selected_packages = selected.lock.manifest["packages"]
-            assert isinstance(selected_packages, list)
-            mathlib_package = next(
-                item
-                for item in selected_packages
-                if isinstance(item, dict) and item.get("name") == "mathlib"
+            acquisition = self.plan_exact(selected.lock, import_roots=("Mathlib",))
+            raw_download = acquisition.get("download_bytes")
+            download_bytes = raw_download if isinstance(raw_download, int) else None
+            complete = acquisition.get("download_bytes_complete") is True
+        toolchain_installed = self._toolchain_installed(selected_toolchain)
+        if not toolchain_installed:
+            download_bytes = None
+            complete = False
+        return ProjectInitPlan(
+            target,
+            "create",
+            selected_toolchain,
+            selected.id.removeprefix("mathlib-v"),
+            tuple(str(entry["name"]) for entry in selected_packages),
+            seed_root,
+            download_bytes,
+            complete,
+            False,
+            toolchain_installed,
+        )
+
+    def init_project(
+        self,
+        path: str | os.PathLike[str] = ".",
+        *,
+        mathlib: str | None = "latest",
+        toolchain: str | None = None,
+        agents: bool = True,
+        seed_from: str | os.PathLike[str] | None = None,
+    ) -> AdoptionResult:
+        """Create or adopt a project; new projects become visible only when complete."""
+        target = Path(path).expanduser().resolve()
+        if (target / "lakefile.toml").is_file() or (target / "lakefile.lean").is_file():
+            self._ensure_project_toolchain(discover_project(target).toolchain)
+            result = self.attach_projects(target)
+            if result.failures or not result.results:
+                detail = result.failures[0][1] if result.failures else "project was not attachable"
+                raise ProjectError(f"existing project shared setup failed: {detail}")
+            agents_file = target / "AGENTS.md"
+            if agents and not agents_file.exists():
+                agents_file.write_text(_DEFAULT_AGENTS_GUIDE, encoding="utf-8")
+            return result.results[0]
+
+        plan = self.plan_project_init(
+            target,
+            mathlib=mathlib,
+            toolchain=toolchain,
+            seed_from=seed_from,
+        )
+        selected = self._mathlib_catalog_entry(mathlib or "latest")
+        selected_packages = selected.lock.manifest["packages"]
+        assert isinstance(selected_packages, list)
+        self._ensure_project_toolchain(plan.toolchain)
+        seed_package_paths: dict[str, Path] | None = None
+        seed_packages: Path | None = None
+        if mathlib is not None:
+            seed_package_paths, _seed_root = self._project_seed_paths(
+                plan.toolchain,
+                selected_packages,
+                seed_from=Path(seed_from) if seed_from is not None else None,
             )
-            revision = str(mathlib_package["rev"])
-            lakefile = target / "lakefile.toml"
-            with lakefile.open("a", encoding="utf-8") as stream:
-                stream.write(
-                    "\n[[require]]\n"
-                    'name = "mathlib"\n'
-                    'git = "https://github.com/leanprover-community/mathlib4.git"\n'
-                    f'rev = "{revision}"\n'
-                )
-            roots = [source for source in target.glob("*.lean") if source.name not in {"Main.lean"}]
-            if len(roots) != 1:
-                raise ProjectError("Lake did not create one unambiguous library root")
-            root_source = roots[0]
-            root_source.write_text(
-                "import Mathlib\n" + root_source.read_text(encoding="utf-8"),
-                encoding="utf-8",
-            )
-            if self.shared_projects.has_built_graph(
-                selected.toolchain, selected_packages, roots=frozenset({"mathlib"})
-            ):
-                seed_packages = None
-                seed_package_paths = self.shared_projects.graph_seeds(
-                    selected.toolchain, selected_packages
-                )
-            else:
+            if not seed_package_paths:
+                if self.availability == "local":
+                    raise ProjectError(
+                        "offline initialization needs an exact local Mathlib graph; "
+                        "run `lean-runtime scan PATH` or pass `--seed-from PROJECT`"
+                    )
                 environment = self.open_exact(selected.lock, import_roots=("Mathlib",))
                 raw_packages = selected.lock.manifest.get("packagesDir", ".lake/packages")
                 seed_packages = environment.workspace / str(raw_packages)
                 seed_package_paths = None
-        manifest_path.write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        existing_entries = tuple(target.iterdir()) if target.is_dir() else ()
+        unsupported = [entry for entry in existing_entries if entry.name != "AGENTS.md"]
+        if unsupported:
+            raise ProjectError(
+                f"initialization target is not empty: {target}; use `lean-runtime init .` "
+                "inside an existing Lake project to adopt it"
+            )
+        staging = Path(
+            tempfile.mkdtemp(prefix=f".{target.name}.lean-runtime-init-", dir=target.parent)
         )
-        result = self.attach_projects(
-            target,
-            seed_packages=seed_packages,
-            seed_package_paths=seed_package_paths,
-        )
-        if result.failures or not result.results:
-            detail = result.failures[0][1] if result.failures else "project was not attachable"
-            raise ProjectError(f"project was created but shared setup failed: {detail}")
-        agents_file = target / "AGENTS.md"
-        if agents and not agents_file.exists():
-            agents_file.write_text(_DEFAULT_AGENTS_GUIDE, encoding="utf-8")
-        return result.results[0]
+        backup: Path | None = None
+        published = False
+        try:
+            custom_agents = target / "AGENTS.md"
+            if custom_agents.is_file():
+                (staging / "AGENTS.md").write_bytes(custom_agents.read_bytes())
+            command = self.toolchains.command(
+                plan.toolchain,
+                "lake",
+                "--offline",
+                f"--dir={staging}",
+                "init",
+                target.name,
+                "lib",
+            )
+            process = subprocess.run(
+                command,
+                cwd=staging,
+                env=self.toolchains.environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+            if process.returncode:
+                detail = process.stdout.strip()
+                raise ProjectError(
+                    "Lake could not initialize the project" + (f":\n{detail}" if detail else "")
+                )
+            update_command = self.toolchains.command(
+                plan.toolchain, "lake", "--offline", f"--dir={staging}", "update"
+            )
+            updated = subprocess.run(
+                update_command,
+                cwd=staging,
+                env=self.toolchains.environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+            manifest_path = staging / "lake-manifest.json"
+            if updated.returncode or not manifest_path.is_file():
+                detail = updated.stdout.strip()
+                raise ProjectError(
+                    "Lake could not create the root manifest identity"
+                    + (f":\n{detail}" if detail else "")
+                )
+            loaded_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded_manifest, dict):
+                raise ProjectError("Lake created a malformed root manifest")
+            manifest: dict[str, Any] = loaded_manifest
+            if mathlib is not None:
+                version = selected.id.removeprefix("mathlib-v")
+                manifest["version"] = selected.lock.manifest.get("version", "1.2.0")
+                manifest["packagesDir"] = selected.lock.manifest.get(
+                    "packagesDir", ".lake/packages"
+                )
+                manifest["packages"] = self._project_manifest_packages(
+                    selected_packages, mathlib_version=version
+                )
+                lakefile = staging / "lakefile.toml"
+                with lakefile.open("a", encoding="utf-8") as stream:
+                    stream.write(
+                        "\n[[require]]\n"
+                        'name = "mathlib"\n'
+                        'git = "https://github.com/leanprover-community/mathlib4.git"\n'
+                        f'rev = "v{version}"\n'
+                    )
+                roots = [source for source in staging.glob("*.lean") if source.name != "Main.lean"]
+                if len(roots) != 1:
+                    raise ProjectError("Lake did not create one unambiguous library root")
+                root_source = roots[0]
+                root_source.write_text(
+                    "import Mathlib\n" + root_source.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            result = self.attach_projects(
+                staging,
+                seed_packages=seed_packages,
+                seed_package_paths=seed_package_paths,
+            )
+            if result.failures or not result.results:
+                detail = result.failures[0][1] if result.failures else "project was not attachable"
+                raise ProjectError(f"project shared setup failed: {detail}")
+            agents_file = staging / "AGENTS.md"
+            if agents and not agents_file.exists():
+                agents_file.write_text(_DEFAULT_AGENTS_GUIDE, encoding="utf-8")
+            if target.exists():
+                backup = target.parent / f".{target.name}.lean-runtime-backup-{os.getpid()}"
+                target.replace(backup)
+            staging.replace(target)
+            published = True
+            if backup is not None:
+                remove_tree(backup)
+                backup = None
+            context = discover_project(target)
+            # Registry discovery is an optimization, not part of publishing the project.
+            with suppress(OSError, EnvironmentError):
+                self.shared_projects.remember_project(context)
+            return replace(result.results[0], root=target)
+        except BaseException:
+            if published:
+                if target.exists():
+                    remove_tree(target)
+                if backup is not None and backup.exists():
+                    backup.replace(target)
+                    backup = None
+            raise
+        finally:
+            if staging.exists():
+                remove_tree(staging)
+            if backup is not None and backup.exists():
+                remove_tree(backup)
 
     def project(
         self,
@@ -1406,6 +1835,7 @@ class Runtime:
         context = discover_project(path)
         if toolchain is not None:
             context = replace(context, toolchain=normalize_toolchain(toolchain))
+        self.shared_projects.remember_project(context)
         return ProjectEnvironment(self, context)
 
     def inspect_project_publication(
@@ -1595,6 +2025,7 @@ class Runtime:
             source_digest=sha256_text(source.read_text(encoding="utf-8")),
             policy=policy,
             project=context.provenance(),
+            packages=context.package_provenance(),
             logical_command=("lake", "env", "lean", relative),
             cancel=cancel,
         )
@@ -1626,6 +2057,7 @@ class Runtime:
                 source_digest=sha256_text(source),
                 policy=policy,
                 project=provenance,
+                packages=context.package_provenance(),
                 logical_command=("lake", "env", "lean", safe_filename),
                 path_map={relative: safe_filename, str(source_path): safe_filename},
                 cancel=cancel,
@@ -1659,6 +2091,7 @@ class Runtime:
                 source_digest=sha256_text(""),
                 policy=policy,
                 project=context.provenance(),
+                packages=context.package_provenance(),
                 logical_command=(
                     "lake",
                     "build",
@@ -1682,6 +2115,7 @@ class Runtime:
         source_digest: str,
         policy: ExecutionPolicy,
         project: ProjectProvenance | None = None,
+        packages: Sequence[PackageProvenance] = (),
         logical_command: Sequence[str] | None = None,
         path_map: Mapping[str, str] | None = None,
         cancel: threading.Event | None = None,
@@ -1731,7 +2165,7 @@ class Runtime:
             request_digest=request_digest,
             lock_id=None,
             toolchain=toolchain,
-            packages=(),
+            packages=tuple(packages),
             platform=platform_record(),
             backend=self.backend.name,
             requested_policy=policy.to_dict(),

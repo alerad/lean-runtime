@@ -59,6 +59,9 @@ from .project_sharing import (
     AdoptionResult,
     DetachmentPlan,
     ProjectAdoption,
+    ProjectInitPlan,
+    ProjectScanResult,
+    ProjectUpdatePlan,
 )
 from .projects import (
     ProjectContext,
@@ -85,6 +88,9 @@ __all__ = [
     "AdoptionPlan",
     "AdoptionResult",
     "DetachmentPlan",
+    "ProjectInitPlan",
+    "ProjectScanResult",
+    "ProjectUpdatePlan",
     "EnvironmentComparison",
     "ComparisonEntry",
     "PortableCopyInfo",

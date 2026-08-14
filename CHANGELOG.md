@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Make the local-project path a four-command workflow: `init`, `check`,
+  `build`, and `update`. New projects use the newest stable cataloged Mathlib
+  by default; `--core` opts out, while `--mathlib VERSION` selects a release.
+- Make `init` adopt an existing pinned Lake project without changing its graph,
+  or create a new project transactionally after its exact dependencies are
+  ready. `--plan`, `--offline`, `--max-download`, and `--seed-from` expose its
+  acquisition policy, and failed initialization leaves no partial project.
+- Add persistent discovery of exact local Lake graphs. `scan` registers existing
+  projects as zero-download seeds for future initialization and updates.
+- Preserve verified sparse-capsule build artifacts when materializing exact Git
+  sources for a mutable project, instead of throwing them away and forcing a
+  dependency rebuild.
+- Add explicit, transactional `update` to the newest cataloged Mathlib, with an
+  old/new revision and toolchain preview and rollback after failed adoption.
+- Include exact package revisions, Git tree hashes, and the shared workspace ID
+  in mutable-project check and build provenance.
+
 ## 2.5.0 - 2026-08-14
 
 - Make `lean-runtime init` create a concise `AGENTS.md` with build, checking,
