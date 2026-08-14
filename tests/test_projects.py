@@ -60,14 +60,15 @@ class InitProjectToolchains(ProjectToolchains):
                 value.removeprefix("--dir=") for value in args if value.startswith("--dir=")
             )
             script = (
-                "import pathlib,sys; root=pathlib.Path(sys.argv[1]); "
+                "import pathlib,sys; root=pathlib.Path(sys.argv[1]); name=sys.argv[3]; "
                 "(root/'lean-toolchain').write_text(sys.argv[2]+'\\n'); "
-                "(root/'lakefile.toml').write_text('name = \\\"fresh\\\"\\n'); "
-                "(root/'Fresh.lean').write_text('import Fresh.Basic\\n'); "
-                "(root/'Fresh').mkdir(); "
-                "(root/'Fresh'/'Basic.lean').write_text('def value := 1\\n')"
+                "(root/'lakefile.toml').write_text(f'name = \\\"{name}\\\"\\n'); "
+                "(root/'.git').mkdir(); "
+                "(root/f'{name}.lean').write_text(f'import {name}.Basic\\n'); "
+                "(root/name).mkdir(); "
+                "(root/name/'Basic.lean').write_text('def value := 1\\n')"
             )
-            return [sys.executable, "-c", script, directory, toolchain]
+            return [sys.executable, "-c", script, directory, toolchain, args[-2]]
         if executable == "lake" and args[-1:] == ("update",):
             directory = next(
                 value.removeprefix("--dir=") for value in args if value.startswith("--dir=")
@@ -501,6 +502,79 @@ def test_init_can_skip_or_preserve_an_agents_guide(tmp_path: Path) -> None:
     assert custom.read_text() == "# Custom instructions\n"
 
 
+def test_init_at_an_empty_git_root_preserves_repository_identity_and_index(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "project"
+    target.mkdir()
+    subprocess.run(git_command("init", "--quiet", str(target)), check=True)
+    tracked = target / "old.txt"
+    tracked.write_text("old\n")
+    subprocess.run(git_command("-C", str(target), "add", "old.txt"), check=True)
+    subprocess.run(
+        git_command(
+            "-C",
+            str(target),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            "baseline",
+        ),
+        check=True,
+    )
+    revision = subprocess.run(
+        git_command("-C", str(target), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tracked.unlink()
+    runtime = Runtime(
+        toolchains=InitProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    plan = runtime.plan_project_init(target, mathlib=None)
+    result = runtime.init_project(target, mathlib=None)
+
+    assert plan.action == "create"
+    assert result.action == "attached"
+    observed_revision = subprocess.run(
+        git_command("-C", str(target), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert observed_revision == revision
+    status = subprocess.run(
+        git_command("-C", str(target), "status", "--porcelain"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert " D old.txt" in status
+    assert "?? lakefile.toml" in status
+
+
+def test_init_plan_rejects_nonempty_nonproject_before_acquisition(tmp_path: Path) -> None:
+    target = tmp_path / "project"
+    target.mkdir()
+    (target / "notes.txt").write_text("keep me\n")
+    runtime = Runtime(
+        toolchains=InitProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ProjectError, match=r"notes\.txt"):
+        runtime.plan_project_init(target)
+
+    assert (target / "notes.txt").read_text() == "keep me\n"
+
+
 def test_init_defaults_to_latest_cataloged_mathlib_without_mutation(tmp_path: Path) -> None:
     runtime = Runtime(
         toolchains=InitProjectToolchains(tmp_path / "runtime"),
@@ -514,6 +588,36 @@ def test_init_defaults_to_latest_cataloged_mathlib_without_mutation(tmp_path: Pa
     assert plan.toolchain == "leanprover/lean4:v4.33.0"
     assert "mathlib" in plan.packages
     assert not (tmp_path / "fresh").exists()
+
+
+def test_init_accepts_an_explicit_project_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    toolchains = InitProjectToolchains(tmp_path / "runtime")
+    runtime = Runtime(toolchains=toolchains, libraries=[])  # type: ignore[arg-type]
+    commands: list[tuple[str, ...]] = []
+    original_command = toolchains.command
+
+    def record_command(toolchain: str, executable: str, *args: str) -> list[str]:
+        commands.append((executable, *args))
+        return original_command(toolchain, executable, *args)
+
+    monkeypatch.setattr(toolchains, "command", record_command)
+    plan = runtime.plan_project_init(
+        tmp_path / "integralframework", name="IntegralFramework", mathlib=None
+    )
+    runtime.init_project(tmp_path / "integralframework", name="IntegralFramework", mathlib=None)
+    repeated = runtime.init_project(
+        tmp_path / "integralframework", name="IntegralFramework", mathlib=None
+    )
+
+    assert plan.project_name == "IntegralFramework"
+    assert repeated.action == "already-attached"
+    assert any(command[-2:] == ("IntegralFramework", "lib") for command in commands)
+    with pytest.raises(ProjectError, match="Lean identifier"):
+        runtime.plan_project_init(tmp_path / "another", name="not-a-module", mathlib=None)
+    with pytest.raises(ProjectError, match="not 'AnotherName'"):
+        runtime.plan_project_init(tmp_path / "integralframework", name="AnotherName")
 
 
 def test_init_policy_fails_closed_for_an_unpriced_full_toolchain(
@@ -540,6 +644,27 @@ def test_init_policy_fails_closed_for_an_unpriced_full_toolchain(
     monkeypatch.setattr(bounded, "_toolchain_installed", lambda _toolchain: False)
     with pytest.raises(DownloadLimitExceeded, match="cannot be preflighted"):
         bounded.init_project(tmp_path / "bounded-project", mathlib=None)
+
+
+def test_offline_init_plan_does_not_query_remote_libraries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = Runtime(
+        toolchains=InitProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+        availability="local",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "plan_exact",
+        lambda *_args, **_kwargs: pytest.fail("offline planning queried a remote library"),
+    )
+
+    plan = runtime.plan_project_init(tmp_path / "project")
+
+    assert not plan.ready
+    assert plan.download_bytes is None
+    assert "no exact local Mathlib" in plan.blockers[0]
 
 
 def test_init_failure_does_not_publish_a_partial_project(

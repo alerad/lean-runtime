@@ -173,6 +173,12 @@ lean-runtime init .
 `init --plan` is side-effect free; `--max-download 500MiB` and `--offline`
 enforce cold-start policy. Advanced bulk migration remains available through
 `attach`, and `detach --execute` materializes an independent project again.
+For a new project, the target may be absent, empty, or an otherwise empty Git
+repository root; existing Git identity and index state are preserved. A custom
+`AGENTS.md` is also allowed and retained. Other existing contents are rejected
+before acquisition rather than overwritten.
+When the directory spelling is not the intended Lean module capitalization,
+set it explicitly, for example `lean-runtime init . --name IntegralFramework`.
 
 One-shot helpers are available when setup reuse is unnecessary:
 

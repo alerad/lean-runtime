@@ -12,7 +12,7 @@ from typing import Any
 
 from .console import styler_for
 from .environments import ExecutionCapture
-from .errors import LeanRuntimeError, MaterializationError, ResolutionError
+from .errors import LeanRuntimeError, MaterializationError, ProjectError, ResolutionError
 from .events import RuntimeEvent
 from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock
@@ -184,7 +184,8 @@ def _render_init_plan(plan: ProjectInitPlan) -> None:
         print(f"Exact dependencies: {len(plan.packages)} package(s); versions unchanged")
         return
     context = f"Mathlib {plan.mathlib_version}" if plan.mathlib_version else "core Lean"
-    print(f"Create {plan.root.name} · {context} · {plan.toolchain}")
+    name = plan.project_name or plan.root.name
+    print(f"Create {name} in {plan.root} · {context} · {plan.toolchain}")
     if not plan.toolchain_installed:
         print("Full Lake toolchain: download required (size not published by Elan)")
     if plan.seed_root is not None:
@@ -194,6 +195,8 @@ def _render_init_plan(plan: ProjectInitPlan) -> None:
         print(f"Download: {format_byte_size(plan.download_bytes)}")
     else:
         print("Download: unknown (no compatible published artifact could be priced)")
+    for blocker in plan.blockers:
+        print(f"Blocker: {blocker}")
 
 
 def _render_update_plan(plan: ProjectUpdatePlan) -> None:
@@ -538,6 +541,7 @@ def parser() -> argparse.ArgumentParser:
         "init", help="create a latest-Mathlib project or adopt an existing Lake project"
     )
     init.add_argument("path", type=Path, nargs="?", default=Path("."))
+    init.add_argument("--name", help="explicit Lake package and root module name")
     init_context = init.add_mutually_exclusive_group()
     init_context.add_argument(
         "--mathlib",
@@ -666,6 +670,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             init_plan = runtime.plan_project_init(
                 args.path,
+                name=args.name,
                 mathlib=args.mathlib,
                 toolchain=args.toolchain,
                 seed_from=args.seed_from,
@@ -675,11 +680,16 @@ def main(argv: list[str] | None = None) -> int:
                     _json(init_plan.to_dict())
                 else:
                     _render_init_plan(init_plan)
-                return 0
+                return 0 if init_plan.ready else 1
+            if not init_plan.ready:
+                raise ProjectError(
+                    "project cannot be initialized:\n- " + "\n- ".join(init_plan.blockers)
+                )
             if not args.json:
                 _render_init_plan(init_plan)
             init_result = runtime.init_project(
                 args.path,
+                name=args.name,
                 mathlib=args.mathlib,
                 toolchain=args.toolchain,
                 agents=args.agents,

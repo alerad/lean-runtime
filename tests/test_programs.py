@@ -18,7 +18,7 @@ def _payload(root: Path) -> Path:
     payload = root / "payload"
     payload.mkdir()
     executable = payload / "echo-bridge"
-    executable.write_text("#!/bin/sh\nwhile IFS= read -r line; do printf '%s\\n' \"$line\"; done\n")
+    executable.write_text("#!/bin/sh\nexec /bin/cat\n")
     executable.chmod(0o755)
     return payload
 

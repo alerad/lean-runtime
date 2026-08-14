@@ -37,9 +37,26 @@ Before doing any work, `init --plan` reports the exact release, local reuse, and
 known download size. `--max-download 500MiB` refuses a larger transfer and
 `--offline` requires a matching local graph. Initialization is transactional:
 the target appears only after Lake and the shared dependency graph both verify.
+Offline plans perform no registry lookup; they return a blocked plan and a
+nonzero status when the required exact local graph is absent.
 Project development requires one full Lake-capable Lean toolchain per Lean
 version. When it is absent, the plan says its Elan download size is unknown;
 `--offline` and `--max-download` fail closed instead of silently installing it.
+
+The target may be a missing directory, an empty directory, or an otherwise
+empty Git repository root. In the Git case, `init` preserves the existing HEAD,
+index, remotes, and worktree metadata. It also preserves an existing
+`AGENTS.md`; any other non-project contents are rejected by both `--plan` and
+execution rather than overwritten.
+The directory name normally supplies the Lake package/root module name. Override
+it when capitalization matters, for example:
+
+```bash
+lean-runtime init . --name IntegralFramework
+```
+
+The same command can be rerun safely after initialization; a different name is
+rejected rather than silently renaming an existing project.
 
 Dependency upgrades are explicit:
 
