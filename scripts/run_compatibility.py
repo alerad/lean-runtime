@@ -44,7 +44,11 @@ def main() -> int:
         "lock_id": lock.lock_id,
         "packages": len(lock.packages),
         "imports": [
-            {"module": module, "ok": result.ok, "diagnostics": len(result.diagnostics)}
+            {
+                "module": module,
+                "ok": result.ok,
+                "diagnostics": [item.to_dict() for item in result.diagnostics],
+            }
             for module, result in zip(modules, results, strict=True)
         ],
         "ok": all(result.ok for result in results),
