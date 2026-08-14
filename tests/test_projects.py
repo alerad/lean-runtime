@@ -800,9 +800,11 @@ def test_latest_mathlib_init_uses_tag_input_and_exact_manifest(
     runtime.init_project(tmp_path / "fresh")
 
     lakefile = (tmp_path / "fresh" / "lakefile.toml").read_text()
+    root_module = (tmp_path / "fresh" / "fresh.lean").read_text()
     manifest = json.loads((tmp_path / "fresh" / "lake-manifest.json").read_text())
     mathlib = next(item for item in manifest["packages"] if item["name"] == "mathlib")
     assert 'rev = "v4.33.0"' in lakefile
+    assert root_module == "import fresh.Basic\n"
     assert mathlib["rev"] == "db584cd6d46c92f209a44c0f1c829460d327499d"
     assert mathlib["inputRev"] == "v4.33.0"
 

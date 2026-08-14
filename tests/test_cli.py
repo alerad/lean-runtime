@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,6 +65,36 @@ def test_project_sharing_commands_have_safe_defaults() -> None:
         parser().parse_args(["build", "demo", "--shared", "--local"])
 
 
+def test_init_completion_recommends_the_fast_first_file_check(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    target = tmp_path / "lowercase-directory"
+    plan = SimpleNamespace(
+        action="create",
+        root=target,
+        project_name="ProofProject",
+        mathlib_version="4.33.0",
+        toolchain="leanprover/lean4:v4.33.0",
+        toolchain_installed=True,
+        seed_root=tmp_path / "shared",
+        download_bytes=0,
+        blockers=(),
+        ready=True,
+    )
+    result = SimpleNamespace(root=target, packages=9)
+    monkeypatch.setattr(
+        "lean_runtime.cli.Runtime.plan_project_init", lambda *_args, **_kwargs: plan
+    )
+    monkeypatch.setattr("lean_runtime.cli.Runtime.init_project", lambda *_args, **_kwargs: result)
+
+    assert main(["--home", str(tmp_path / "runtime"), "init", str(target)]) == 0
+
+    assert (
+        f"Next: cd {target} && lean-runtime check ProofProject/Basic.lean"
+        in capsys.readouterr().out
+    )
+
+
 def test_fileless_check_uses_the_current_project(monkeypatch, tmp_path: Path, capsys) -> None:
     result = ExecutionResult(
         ok=True,
@@ -86,6 +117,28 @@ def test_fileless_check_uses_the_current_project(monkeypatch, tmp_path: Path, ca
     assert main(["--home", str(tmp_path / "runtime"), "check", "--timeout", "15"]) == 0
     assert observed == [(Path("."), None, 15.0)]
     assert "accepted:" in capsys.readouterr().out
+
+
+def test_stdin_check_displays_a_logical_path(monkeypatch, tmp_path: Path, capsys) -> None:
+    staged = ".lake/lean-runtime/check-abc/Main.lean"
+    result = ExecutionResult(
+        ok=False,
+        exit_code=1,
+        toolchain="leanprover/lean4:v4.33.0",
+        command=("lake", "env", "lean", staged),
+        cwd=str(tmp_path),
+        stdout="",
+        stderr=f"{staged}:2:1: error: unsolved goals\n",
+        elapsed_seconds=0.01,
+    )
+    monkeypatch.setattr("lean_runtime.cli.Runtime.check", lambda *_args, **_kwargs: result)
+    monkeypatch.setattr("sys.stdin", io.StringIO("example : False := by trivial\n"))
+
+    assert main(["--home", str(tmp_path / "runtime"), "check", "-"]) == 1
+
+    captured = capsys.readouterr()
+    assert "<stdin>:2:1: error: unsolved goals" in captured.err
+    assert staged not in captured.err
 
 
 def test_version_does_not_require_a_command(capsys) -> None:

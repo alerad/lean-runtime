@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Keep newly initialized project roots narrow: the generated root imports its
+  local `Basic` module without redundantly importing the all-Mathlib umbrella,
+  and the completion hint points to the fast first-file check.
+- Render stdin diagnostics as `<stdin>` in the CLI instead of exposing the
+  disposable `.lake/lean-runtime` staging path.
 - Add fileless `lean-runtime check` and `ProjectEnvironment.check_all()` to
   check every declared local library through Lake's `leanArts` facets, retaining
   correct intra-project dependency ordering without building executables.
