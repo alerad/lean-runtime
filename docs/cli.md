@@ -78,6 +78,7 @@ lean-runtime copy save research-stack --output research-stack.lean-environment
 lean-runtime --home /tmp/fresh copy open research-stack.lean-environment --name research-stack
 lean-runtime publish environment environment.lock.json --publish-to ghcr.io/owner/lean-environments
 lean-runtime publish environment --publish-to ghcr.io/owner/lean-environments --check-access
+lean-runtime publish environment --publish-to ghcr.io/owner/lean-environments --check-access --json
 lean-runtime check research-stack Main.lean --json
 lean-runtime inspect research-stack --packages
 lean-runtime environments

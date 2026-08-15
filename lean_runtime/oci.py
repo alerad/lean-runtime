@@ -88,32 +88,49 @@ class RegistryCredential:
             return cls(username, password, "environment")
         if repository.registry == "ghcr.io" and shutil.which("gh") is not None:
             try:
-                token = subprocess.run(
-                    ("gh", "auth", "token", "--hostname", "github.com"),
+                status = subprocess.run(
+                    (
+                        "gh",
+                        "auth",
+                        "status",
+                        "--active",
+                        "--hostname",
+                        "github.com",
+                        "--json",
+                        "hosts",
+                        "--show-token",
+                    ),
                     text=True,
                     capture_output=True,
-                    timeout=10,
-                    check=False,
-                )
-                identity = subprocess.run(
-                    ("gh", "api", "user", "--jq", ".login"),
-                    text=True,
-                    capture_output=True,
-                    timeout=10,
+                    timeout=5,
                     check=False,
                 )
             except (OSError, subprocess.TimeoutExpired):
-                pass
-            else:
-                selected_token = token.stdout.strip()
-                selected_username = identity.stdout.strip()
-                if (
-                    token.returncode == 0
-                    and identity.returncode == 0
-                    and selected_token
-                    and selected_username
-                ):
-                    return cls(selected_username, selected_token, "GitHub CLI")
+                return cls(None, None, "GitHub CLI")
+            try:
+                payload = json.loads(status.stdout)
+                accounts = payload.get("hosts", {}).get("github.com", [])
+                active = next(
+                    (
+                        account
+                        for account in accounts
+                        if isinstance(account, dict) and account.get("active") is True
+                    ),
+                    None,
+                )
+            except (AttributeError, json.JSONDecodeError):
+                return cls(None, None, "GitHub CLI")
+            if isinstance(active, dict):
+                selected_username = active.get("login")
+                selected_token = active.get("token")
+                if isinstance(selected_username, str) and selected_username:
+                    return cls(
+                        selected_username,
+                        selected_token
+                        if isinstance(selected_token, str) and selected_token
+                        else None,
+                        "GitHub CLI",
+                    )
         return cls(None, None, "anonymous")
 
 

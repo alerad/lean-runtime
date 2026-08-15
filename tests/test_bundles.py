@@ -901,6 +901,58 @@ def test_oci_publisher_denies_access_before_exporting(tmp_path: Path, monkeypatc
     assert "secret" not in json.dumps(events[-1].to_dict())
 
 
+def test_ghcr_credential_discovery_reads_identity_and_token_once(monkeypatch) -> None:
+    monkeypatch.delenv("LEAN_RUNTIME_REGISTRY_USERNAME", raising=False)
+    monkeypatch.delenv("LEAN_RUNTIME_REGISTRY_PASSWORD", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/gh")
+    calls: list[tuple[str, ...]] = []
+
+    def status(command: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        payload = {
+            "hosts": {
+                "github.com": [
+                    {
+                        "active": True,
+                        "state": "success",
+                        "login": "owner",
+                        "token": "secret",
+                    }
+                ]
+            }
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(subprocess, "run", status)
+    credential = RegistryCredential.discover(OCIRepository.parse("oci://ghcr.io/owner/cache"))
+
+    assert credential == RegistryCredential("owner", "secret", "GitHub CLI")
+    assert len(calls) == 1
+    assert calls[0][:3] == ("gh", "auth", "status")
+    assert "api" not in calls[0]
+
+
+def test_ghcr_credential_discovery_keeps_known_identity_when_token_is_unavailable(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("LEAN_RUNTIME_REGISTRY_USERNAME", raising=False)
+    monkeypatch.delenv("LEAN_RUNTIME_REGISTRY_PASSWORD", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/gh")
+    payload = {
+        "hosts": {
+            "github.com": [{"active": True, "state": "failed", "login": "owner", "token": ""}]
+        }
+    }
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, json.dumps(payload), ""),
+    )
+
+    credential = RegistryCredential.discover(OCIRepository.parse("oci://ghcr.io/owner/cache"))
+    assert credential == RegistryCredential("owner", None, "GitHub CLI")
+
+
 def test_oci_publisher_classifies_retryable_preflight_failure(tmp_path: Path) -> None:
     producer, _environment_id, _lock = _published_runtime(tmp_path / "producer")
     publisher = OCIEnvironmentPublisher(

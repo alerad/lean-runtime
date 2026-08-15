@@ -121,6 +121,9 @@ lean-runtime publish environment \
   --check-access
 ```
 
+Add `--json` for the versioned `lean-runtime.publication/v1` success or failure
+envelope. The process exit code retains the classification below.
+
 For GHCR, credentials are selected in this order: the
 `LEAN_RUNTIME_REGISTRY_USERNAME` / `LEAN_RUNTIME_REGISTRY_PASSWORD` pair, an
 authenticated GitHub CLI session, then anonymous access. The access report names
