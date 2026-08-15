@@ -392,7 +392,7 @@ def test_save_copy_cli_reports_copy_identity(monkeypatch, tmp_path: Path, capsys
         path=str(output),
     )
     monkeypatch.setattr("lean_runtime.cli.Runtime.save_portable_copy", lambda *_args: info)
-    assert main(["--quiet", "save-copy", "demo", "--output", str(output)]) == 0
+    assert main(["--quiet", "copy", "save", "demo", "--output", str(output)]) == 0
     assert json.loads(capsys.readouterr().out)["copy_id"] == info.copy_id
 
 

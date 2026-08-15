@@ -2105,9 +2105,17 @@ class Runtime:
         return self.bundles.export_capsule(environment.id, Path(output), roots=roots)
 
     def clean(
-        self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
+        self,
+        *,
+        dry_run: bool = True,
+        minimum_age_seconds: float = 2_592_000,
+        keep_last: int = 0,
     ) -> CleanupReport:
-        return self.store.clean(dry_run=dry_run, minimum_age_seconds=minimum_age_seconds)
+        return self.store.clean(
+            dry_run=dry_run,
+            minimum_age_seconds=minimum_age_seconds,
+            keep_last=keep_last,
+        )
 
     def clean_downloads(
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000

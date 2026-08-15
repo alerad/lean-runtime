@@ -757,7 +757,11 @@ class EnvironmentStore:
         )
 
     def clean(
-        self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
+        self,
+        *,
+        dry_run: bool = True,
+        minimum_age_seconds: float = 2_592_000,
+        keep_last: int = 0,
     ) -> CleanupReport:
         """Remove old environments not reachable through a name.
 
@@ -770,6 +774,22 @@ class EnvironmentStore:
         removed: list[str] = []
         candidate_bytes = 0
         reclaimed_bytes = 0
+        if keep_last < 0:
+            raise ValueError("clean keep_last must be nonnegative")
+        unaliased = [
+            path
+            for path in self.environments.glob("env_*")
+            if path.is_dir() and path.name not in referenced
+        ]
+        unaliased.sort(
+            key=lambda path: (
+                (self.usage / f"{path.name}.json").stat().st_mtime
+                if (self.usage / f"{path.name}.json").exists()
+                else path.stat().st_mtime
+            ),
+            reverse=True,
+        )
+        protected = {path.name for path in unaliased[:keep_last]}
         with FileLock(self.lock_dir / "gc.lock"):
             for path in sorted(self.environments.glob("env_*")):
                 if _ENVIRONMENT_ID.fullmatch(path.name) is None:
@@ -779,6 +799,7 @@ class EnvironmentStore:
                 age = now - (usage.stat().st_mtime if usage.exists() else path.stat().st_mtime)
                 if (
                     path.name in referenced
+                    or path.name in protected
                     or age < minimum_age_seconds
                     or self.has_execution_leases(path.name)
                 ):

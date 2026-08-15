@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -381,7 +382,7 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     root.add_argument("--trusted-publisher")
     root.add_argument("--trusted-issuer")
     root.add_argument("--verification-tool", default="cosign")
-    commands = root.add_subparsers(dest="command", required=True)
+    commands = root.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
     completion = commands.add_parser("completion", help="generate shell completion")
     completion.add_argument("shell", choices=("bash", "zsh", "fish"))
@@ -426,6 +427,16 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     finalize_program.add_argument("--library", required=True)
     finalize_program.add_argument("--tag", action="append", default=[])
     finalize_program.add_argument("--sign", action="store_true")
+
+    copy = commands.add_parser("copy", help="save or open a verified portable copy")
+    copy_operations = copy.add_subparsers(dest="copy_operation", required=True)
+    copy_save = copy_operations.add_parser("save", help="save an environment copy")
+    copy_save.add_argument("environment")
+    copy_save.add_argument("--output", required=True, type=Path)
+    copy_open = copy_operations.add_parser("open", help="verify and open an environment copy")
+    copy_open.add_argument("copy", type=Path)
+    copy_open.add_argument("--name")
+    copy_open.add_argument("--no-probe", action="store_true", help="skip the Lean import probe")
 
     resolve = commands.add_parser("prepare", help="prepare an exact environment description")
     resolve.add_argument("spec", type=Path)
@@ -647,6 +658,12 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     gc.add_argument("--execute", action="store_true", help="remove candidates; default is dry-run")
     gc.add_argument("--minimum-age-hours", type=float, default=24 * 30)
     gc.add_argument(
+        "--keep-last",
+        type=int,
+        default=int(os.environ.get("LEAN_RUNTIME_CLEAN_KEEP_LAST", "0")),
+        help="retain the newest N otherwise-cleanable environments",
+    )
+    gc.add_argument(
         "--include-downloads", action="store_true", help="also clean unused downloaded files"
     )
     gc.add_argument("--json", action="store_true")
@@ -809,6 +826,32 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     project_update.add_argument("--offline", action="store_true")
     project_update.add_argument("--max-download", metavar="SIZE")
     project_update.add_argument("--json", action="store_true")
+    visible = {
+        "init",
+        "check",
+        "build",
+        "update",
+        "project",
+        "prepare",
+        "open",
+        "download",
+        "environments",
+        "inspect",
+        "verify",
+        "compare",
+        "storage",
+        "clean",
+        "doctor",
+        "publish",
+        "finalize",
+        "copy",
+        "replay",
+        "completion",
+    }
+    subparser_action = cast(Any, commands)
+    subparser_action._choices_actions[:] = [
+        action for action in subparser_action._choices_actions if action.dest in visible
+    ]
     return root
 
 
@@ -826,6 +869,8 @@ def main(argv: list[str] | None = None) -> int:
             "toolchain": "toolchain-finalize-publication",
             "program": "program-finalize-publication",
         }[args.finalize_kind]
+    if args.command == "copy":
+        args.command = {"save": "save-copy", "open": "open-copy"}[args.copy_operation]
     if args.command == "project" and args.project_command in {"scan", "attach", "detach", "update"}:
         args.command = args.project_command
     if args.command == "init":
@@ -1360,6 +1405,7 @@ def main(argv: list[str] | None = None) -> int:
             gc_report = runtime.clean(
                 dry_run=not args.execute,
                 minimum_age_seconds=args.minimum_age_hours * 3600,
+                keep_last=args.keep_last,
             )
             gc_downloads = (
                 runtime.clean_downloads(

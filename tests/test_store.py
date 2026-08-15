@@ -293,6 +293,21 @@ def test_status_reports_per_category_bytes_and_environment_usage(tmp_path: Path)
     assert status.to_dict()["environment_usage"][0]["aliases"] == ["research"]
 
 
+def test_clean_can_retain_the_newest_unnamed_environment(tmp_path: Path) -> None:
+    store = EnvironmentStore(tmp_path)
+    older = store.environment_path("env_" + "7" * 64)
+    newer = store.environment_path("env_" + "8" * 64)
+    older.mkdir()
+    newer.mkdir()
+    os.utime(older, (1, 1))
+    os.utime(newer, (2, 2))
+
+    report = store.clean(dry_run=True, minimum_age_seconds=0, keep_last=1)
+
+    assert older.name in report.candidates
+    assert newer.name in report.retained
+
+
 def test_clean_reports_candidate_and_reclaimed_bytes(tmp_path: Path) -> None:
     store = EnvironmentStore(tmp_path)
     candidate = store.environment_path(CANDIDATE)

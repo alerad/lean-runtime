@@ -42,6 +42,8 @@ stores remain an instant-information command. `storage --verify` explicitly
 rebuilds that ledger and prints a progress line because it must walk the store.
 `doctor` is human-readable by default; `doctor --json` preserves automation and
 `doctor --fix` applies its safe stale-staging and private-Elan remedies.
+`clean --keep-last N` (or `LEAN_RUNTIME_CLEAN_KEEP_LAST`) retains the newest N
+otherwise eligible unnamed environments in addition to the age threshold.
 
 ## One-shot package workflow
 
@@ -72,9 +74,9 @@ lean-runtime check Main.lean \
 lean-runtime prepare environment.toml --output environment.lock.json
 lean-runtime open environment.lock.json --name research-stack
 lean-runtime --library ghcr.io/owner/lean-environments download environment.lock.json
-lean-runtime save-copy research-stack --output research-stack.lean-environment
-lean-runtime --home /tmp/fresh open-copy research-stack.lean-environment --name research-stack
-lean-runtime build-and-publish environment.lock.json --publish-to ghcr.io/owner/lean-environments
+lean-runtime copy save research-stack --output research-stack.lean-environment
+lean-runtime --home /tmp/fresh copy open research-stack.lean-environment --name research-stack
+lean-runtime publish environment environment.lock.json --publish-to ghcr.io/owner/lean-environments
 lean-runtime check research-stack Main.lean --json
 lean-runtime inspect research-stack --packages
 lean-runtime environments
@@ -90,9 +92,10 @@ lean-runtime clean --execute
 
 `clean` is a dry run unless `--execute` is supplied.
 
-`save-copy` creates a portable environment file. `open-copy` verifies its exact
+`copy save` creates a portable environment file. `copy open` verifies its exact
 identity, package Git trees, computer compatibility, and Lean probe before
-making the environment available. See [Portable copies and environment
+making the environment available. The former `save-copy` and `open-copy`
+spellings remain compatibility aliases. See [Portable copies and environment
 libraries](portable-copies.md) for its trust boundary.
 
 ## Slim toolchains

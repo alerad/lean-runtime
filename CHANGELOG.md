@@ -10,11 +10,13 @@
 - Make `init --mathlib-version VERSION` unambiguous, preserve common repository
   scaffolding, optionally generate matching CI with `--ci`, and retain the old
   `--mathlib` spelling as a validated compatibility alias.
-- Add `project scan/attach/detach/update`, `publish KIND`, and `finalize KIND`
-  namespaces while retaining existing command spellings for automation.
+- Add `project scan/attach/detach/update`, `publish KIND`, `finalize KIND`, and
+  `copy save/open` namespaces while retaining existing command spellings for
+  automation.
 - Give environments and doctor human output plus `--json`, add `doctor --fix`,
   fingerprinted storage accounting with `storage --verify`, cleanup nudges,
-  curated help, and generated Bash/Zsh/Fish completions.
+  `clean --keep-last` retention, curated help, and generated Bash/Zsh/Fish
+  completions.
 
 ## 2.7.0 - 2026-08-14
 
