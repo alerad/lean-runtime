@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.9.0 - 2026-08-15
+
 - Make environment publication fail closed: verify registry push access before
   building, report the selected credential source, remotely verify every
   manifest, emit an explicit terminal failure event, and reserve exit codes 3,
