@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.7.0 - 2026-08-14
+
 - Keep newly initialized project roots narrow: the generated root imports its
   local `Basic` module without redundantly importing the all-Mathlib umbrella,
   and the completion hint points to the fast first-file check.
