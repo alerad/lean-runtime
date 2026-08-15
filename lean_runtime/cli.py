@@ -10,12 +10,13 @@ import time
 from datetime import datetime
 from importlib.metadata import version as distribution_version
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .console import styler_for
 from .environments import ExecutionCapture
 from .errors import LeanRuntimeError, MaterializationError, ProjectError, ResolutionError
 from .events import RuntimeEvent
+from .health import DoctorReport
 from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock
 from .matrix import load_matrix
@@ -107,6 +108,26 @@ def _render_storage(status: StoreStatus) -> None:
         print(
             style.dim("Shared project packages are retained for reuse; cleanup is not automatic.")
         )
+
+
+def _render_environments(records: tuple[dict[str, object], ...]) -> None:
+    if not records:
+        print("No ready environments.")
+        return
+    for record in records:
+        names = record.get("names")
+        label = (
+            ", ".join(str(item) for item in names)
+            if isinstance(names, list) and names
+            else str(record["environment_id"])
+        )
+        print(f"{label}  {record.get('toolchain', 'unknown')}  {record.get('status', 'unknown')}")
+
+
+def _render_doctor(report: DoctorReport) -> None:
+    symbols = {"pass": "✓", "warning": "!", "fail": "✗"}
+    for check in report.checks:
+        print(f"{symbols[check.status]} {check.name}: {check.message}")
 
 
 def _render_cleanup(environments: CleanupReport, downloads: DownloadCleanupReport | None) -> None:
@@ -303,6 +324,22 @@ def _mathlib_version(value: str) -> str:
     )
 
 
+def _completion_script(shell: str) -> str:
+    command_names = sorted(cast(Any, parser())._subparsers._group_actions[0].choices)
+    words = " ".join(command_names)
+    if shell == "bash":
+        return f"complete -W '{words}' lean-runtime\n"
+    if shell == "zsh":
+        return f"#compdef lean-runtime\n_arguments '1:command:({words})' '*::arg:->args'\n"
+    return (
+        "\n".join(
+            f"complete -c lean-runtime -n '__fish_use_subcommand' -a {name}"
+            for name in command_names
+        )
+        + "\n"
+    )
+
+
 def _add_policy(parser: argparse.ArgumentParser, *, timeout: float = 120) -> None:
     parser.add_argument("--timeout", type=float, default=timeout)
     parser.add_argument("--max-output", type=int, default=1_000_000)
@@ -312,7 +349,17 @@ def _add_policy(parser: argparse.ArgumentParser, *, timeout: float = 120) -> Non
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="lean-runtime")
+    root = argparse.ArgumentParser(
+        prog="lean-runtime",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Common workflows:
+  Daily         init · check · build · update
+  Project       project scan · attach · detach · update
+  Environments  environments · inspect · storage · clean · doctor
+  Publishing    project init-publish · publish · finalize
+
+Run `lean-runtime COMMAND --help` for examples and options.""",
+    )
     root.add_argument(
         "--version",
         action="version",
@@ -334,6 +381,9 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--trusted-issuer")
     root.add_argument("--verification-tool", default="cosign")
     commands = root.add_subparsers(dest="command", required=True)
+
+    completion = commands.add_parser("completion", help="generate shell completion")
+    completion.add_argument("shell", choices=("bash", "zsh", "fish"))
 
     resolve = commands.add_parser("prepare", help="prepare an exact environment description")
     resolve.add_argument("spec", type=Path)
@@ -497,10 +547,14 @@ def parser() -> argparse.ArgumentParser:
     inspect.add_argument("--packages", action="store_true", help="include exact package locks")
     inspect.add_argument("--explain", action="store_true", help="explain identity and reuse")
 
-    commands.add_parser("environments", help="list ready environments")
+    environments = commands.add_parser("environments", help="list ready environments")
+    environments.add_argument("--json", action="store_true")
     storage = commands.add_parser("storage", help="show downloaded and built storage usage")
     storage.add_argument("--json", action="store_true")
-    commands.add_parser("doctor", help="check local prerequisites and environment storage")
+    storage.add_argument("--verify", action="store_true", help="rebuild the storage ledger")
+    doctor = commands.add_parser("doctor", help="check local prerequisites and environment storage")
+    doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--fix", action="store_true", help="clear stale staging and bootstrap Elan")
 
     verify = commands.add_parser("verify", help="verify a lock or published environment")
     verify.add_argument("subject")
@@ -685,16 +739,44 @@ def parser() -> argparse.ArgumentParser:
         type=Path,
     )
     project_init.add_argument("--force", action="store_true")
+    project_scan = project_commands.add_parser(
+        "scan", help="register local projects as exact dependency seeds"
+    )
+    project_scan.add_argument("path", type=Path, nargs="?", default=Path("."))
+    project_scan.add_argument("--no-recursive", dest="recursive", action="store_false")
+    project_scan.add_argument("--json", action="store_true")
+    project_attach = project_commands.add_parser("attach", help="adopt shared dependencies")
+    project_attach.add_argument("path", type=Path, nargs="?", default=Path("."))
+    project_attach.add_argument("--recursive", action="store_true")
+    project_attach.add_argument("--execute", action="store_true")
+    project_attach.add_argument("--json", action="store_true")
+    project_detach = project_commands.add_parser("detach", help="restore independent dependencies")
+    project_detach.add_argument("path", type=Path, nargs="?", default=Path("."))
+    project_detach.add_argument("--execute", action="store_true")
+    project_detach.add_argument("--json", action="store_true")
+    project_update = project_commands.add_parser("update", help="update to stable Mathlib")
+    project_update.add_argument("path", type=Path, nargs="?", default=Path("."))
+    project_update.add_argument("--seed-from", type=Path)
+    project_update.add_argument("--plan", action="store_true")
+    project_update.add_argument("--yes", action="store_true")
+    project_update.add_argument("--offline", action="store_true")
+    project_update.add_argument("--max-download", metavar="SIZE")
+    project_update.add_argument("--json", action="store_true")
     return root
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.command == "project" and args.project_command in {"scan", "attach", "detach", "update"}:
+        args.command = args.project_command
     if args.command == "init":
         args.mathlib = None if args.core else args.mathlib_version
     operation_started = time.monotonic()
     display_path: str | None = None
     try:
+        if args.command == "completion":
+            print(_completion_script(args.shell), end="")
+            return 0
         selected_availability = (
             "local" if args.command in {"init", "update"} and args.offline else args.availability
         )
@@ -1109,10 +1191,14 @@ def main(argv: list[str] | None = None) -> int:
             _json(envelope("lean-runtime.inspect/v1", ok=True, data=payload))
             return 0
         if args.command == "environments":
-            _json(list(runtime.list_environments()))
+            records = runtime.list_environments()
+            if args.json:
+                _json(list(records))
+            else:
+                _render_environments(records)
             return 0
         if args.command == "storage":
-            status = runtime.store_status()
+            status = runtime.store_status(verify=args.verify)
             if args.json:
                 _json(status.to_dict())
             else:
@@ -1131,8 +1217,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command == "doctor":
-            doctor_report = runtime.doctor()
-            _json(doctor_report.to_dict())
+            doctor_report = runtime.doctor_fix() if args.fix else runtime.doctor()
+            if args.json:
+                _json(doctor_report.to_dict())
+            else:
+                _render_doctor(doctor_report)
             return 0 if doctor_report.ok else 2
         if args.command == "verify":
             report = runtime.verify(args.subject, offline=args.offline, rebuild=args.rebuild)

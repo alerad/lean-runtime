@@ -39,7 +39,7 @@ from .errors import (
 )
 from .events import EventCallback, EventEmitter
 from .header_cache import LeanHeaderCache
-from .health import DoctorReport, diagnose
+from .health import DoctorReport, diagnose, repair
 from .identifier_resolver import IdentifierResolver
 from .lake_cache import LakeArtifactCache
 from .lockfiles import EnvironmentLock
@@ -2103,8 +2103,11 @@ class Runtime:
     def doctor(self) -> DoctorReport:
         return diagnose(self.toolchains, self.store)
 
-    def store_status(self) -> StoreStatus:
-        return self.store.status()
+    def doctor_fix(self) -> DoctorReport:
+        return repair(self.toolchains, self.store)
+
+    def store_status(self, *, verify: bool = False) -> StoreStatus:
+        return self.store.status(verify=verify)
 
     def list_environments(self) -> tuple[dict[str, object], ...]:
         aliases = self.store.aliases()
