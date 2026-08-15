@@ -22,6 +22,7 @@ from .lockfiles import EnvironmentLock
 from .matrix import load_matrix
 from .models import ExecutionResult, PhaseTiming
 from .policies import ExecutionPolicy, format_byte_size, parse_byte_size
+from .profiling import ProfileReport
 from .project_sharing import AdoptionPlan, ProjectInitPlan, ProjectUpdatePlan
 from .projects import discover_project, project_publication_workflow
 from .runtime import Runtime
@@ -385,6 +386,47 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     completion = commands.add_parser("completion", help="generate shell completion")
     completion.add_argument("shell", choices=("bash", "zsh", "fish"))
 
+    publish = commands.add_parser("publish", help="publish an environment, toolchain, or program")
+    publish_kinds = publish.add_subparsers(dest="publish_kind", required=True)
+    publish_environment = publish_kinds.add_parser("environment")
+    publish_environment.add_argument("lock", type=Path)
+    publish_environment.add_argument("--publish-to", required=True)
+    publish_environment.add_argument("--tag", action="append", default=[])
+    publish_environment.add_argument("--name")
+    publish_environment.add_argument("--timeout", type=float, default=1800)
+    publish_environment.add_argument("--platform-only", action="store_true")
+    publish_environment.add_argument("--accelerate", action="store_true")
+    publish_environment.add_argument("--sign", action="store_true")
+    publish_environment.add_argument("--attest", action="store_true")
+    publish_toolchain = publish_kinds.add_parser("toolchain")
+    publish_toolchain.add_argument("toolchain")
+    publish_toolchain.add_argument("--library", required=True)
+    publish_program = publish_kinds.add_parser("program")
+    publish_program.add_argument("program_id")
+    publish_program.add_argument("--library", required=True)
+    publish_program.add_argument("--tag", action="append", default=[])
+    publish_program.add_argument("--sign", action="store_true")
+
+    finalize = commands.add_parser("finalize", help="finalize a multi-platform publication")
+    finalize_kinds = finalize.add_subparsers(dest="finalize_kind", required=True)
+    finalize_environment = finalize_kinds.add_parser("environment")
+    finalize_environment.add_argument("lock_id")
+    finalize_environment.add_argument("platform_results", nargs="+", type=Path)
+    finalize_environment.add_argument("--library", required=True)
+    finalize_environment.add_argument("--tag", action="append", default=[])
+    finalize_environment.add_argument("--sign", action="store_true")
+    finalize_toolchain = finalize_kinds.add_parser("toolchain")
+    finalize_toolchain.add_argument("toolchain")
+    finalize_toolchain.add_argument("platform_results", nargs="+", type=Path)
+    finalize_toolchain.add_argument("--library", required=True)
+    finalize_toolchain.add_argument("--sign", action="store_true")
+    finalize_program = finalize_kinds.add_parser("program")
+    finalize_program.add_argument("source_revision")
+    finalize_program.add_argument("computer_results", nargs="+", type=Path)
+    finalize_program.add_argument("--library", required=True)
+    finalize_program.add_argument("--tag", action="append", default=[])
+    finalize_program.add_argument("--sign", action="store_true")
+
     resolve = commands.add_parser("prepare", help="prepare an exact environment description")
     resolve.add_argument("spec", type=Path)
     resolve.add_argument("--output", type=Path)
@@ -540,6 +582,10 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
         "--watch", action="store_true", help="re-check FILE on save using warm import snapshots"
     )
     check.add_argument("--watch-interval", type=float, default=0.2, help=argparse.SUPPRESS)
+    check.add_argument("--repeat", type=int, help="measure N repeated checks of one project file")
+    check.add_argument("--warmup", type=int, default=1, help="warmups before --repeat samples")
+    check.add_argument("--across", type=Path, help="check FILE across contexts in CONFIGURATION")
+    check.add_argument("--concurrency", type=int, default=1, help="workers for --across")
     _add_policy(check)
 
     inspect = commands.add_parser("inspect", help="inspect a published environment")
@@ -667,6 +713,7 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
         help="do not create the default AGENTS.md project guide",
     )
     init.add_argument("--json", action="store_true")
+    init.add_argument("--ci", action="store_true", help="generate CI using the same project check")
 
     scan = commands.add_parser(
         "scan", help="register local Lake projects as reusable exact dependency seeds"
@@ -767,6 +814,18 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.command == "publish":
+        args.command = {
+            "environment": "build-and-publish",
+            "toolchain": "toolchain-publish",
+            "program": "program-publish",
+        }[args.publish_kind]
+    if args.command == "finalize":
+        args.command = {
+            "environment": "finalize-publication",
+            "toolchain": "toolchain-finalize-publication",
+            "program": "program-finalize-publication",
+        }[args.finalize_kind]
     if args.command == "project" and args.project_command in {"scan", "attach", "detach", "update"}:
         args.command = args.project_command
     if args.command == "init":
@@ -822,6 +881,7 @@ def main(argv: list[str] | None = None) -> int:
                 mathlib=args.mathlib,
                 toolchain=args.toolchain,
                 agents=args.agents,
+                ci=args.ci,
                 seed_from=args.seed_from,
             )
             if args.json:
@@ -1198,6 +1258,8 @@ def main(argv: list[str] | None = None) -> int:
                 _render_environments(records)
             return 0
         if args.command == "storage":
+            if args.verify and not args.json:
+                print("Verifying storage ledger…", file=sys.stderr)
             status = runtime.store_status(verify=args.verify)
             if args.json:
                 _json(status.to_dict())
@@ -1323,6 +1385,65 @@ def main(argv: list[str] | None = None) -> int:
                 _render_cleanup(gc_report, gc_downloads)
             return 0
         if args.command == "check":
+            if args.across is not None:
+                if len(args.inputs) != 1 or args.package_refs or args.include or args.project:
+                    raise ValueError("check --across requires exactly one FILE")
+                across_file = Path(args.inputs[0])
+                contexts = load_matrix(args.across)
+                matrix_result = runtime.check_matrix(
+                    across_file.read_text(encoding="utf-8"),
+                    contexts=contexts,
+                    filename=across_file.name,
+                    base=args.across.parent,
+                    concurrency=args.concurrency,
+                )
+                if args.json:
+                    _json(serialize_matrix_v1(matrix_result))
+                else:
+                    print("Context\tResult\tTime\tEnvironment")
+                    for entry in matrix_result.entries:
+                        print(
+                            f"{entry.context}\t{'accepted' if entry.result.ok else 'rejected'}\t"
+                            f"{entry.result.elapsed_seconds:.2f}s\t"
+                            f"{entry.result.environment_id or '-'}"
+                        )
+                return 0 if matrix_result.ok else 1
+            if args.repeat is not None:
+                if (
+                    len(args.inputs) != 1
+                    or args.inputs[0] == "-"
+                    or args.package_refs
+                    or args.include
+                ):
+                    raise ValueError("check --repeat requires exactly one project FILE")
+                if args.repeat < 1 or args.warmup < 0:
+                    raise ValueError(
+                        "check --repeat requires positive samples and nonnegative warmups"
+                    )
+                repeated_file = Path(args.inputs[0])
+                for _ in range(args.warmup):
+                    warm = runtime.check_file(
+                        repeated_file, project=args.project, policy=_policy(args)
+                    )
+                    if not warm.ok:
+                        _emit_result(warm, args.json)
+                        return 1
+                repeated_started = time.monotonic()
+                samples = tuple(
+                    runtime.check_file(repeated_file, project=args.project, policy=_policy(args))
+                    for _ in range(args.repeat)
+                )
+                profile_report = ProfileReport(
+                    str(repeated_file), args.warmup, samples, time.monotonic() - repeated_started
+                )
+                if args.json:
+                    _json(serialize_profile_v1(profile_report))
+                else:
+                    print(f"Profile: {repeated_file.name}")
+                    for name, value in profile_report.statistics().items():
+                        if value is not None:
+                            print(f"  {name:<6} {value:g} ms")
+                return 0 if profile_report.ok else 1
             if args.watch:
                 if args.json:
                     raise ValueError("check --watch does not support --json; use one-shot check")

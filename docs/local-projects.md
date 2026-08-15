@@ -46,6 +46,7 @@ each repository's `.lake/packages`. New projects can start in shared mode:
 lean-runtime init MyProof
 cd MyProof
 lean-runtime check MyProof/Basic.lean
+lean-runtime check MyProof/Basic.lean --watch
 lean-runtime check
 lean-runtime build
 ```
@@ -64,12 +65,19 @@ stays silent. Only root-project outputs enter this cache: locked dependencies
 continue to use the verified shared workspace, avoiding a second multi-gigabyte
 copy. `build` retains Lake's complete target semantics.
 
+Repeated file checks reuse Lean's native header snapshots, keyed by the exact
+toolchain, project identity, and import block. Body-only edits therefore avoid
+reloading the unchanged import environment. `--watch` is a thin save loop over
+the same ordinary check/result contract. Failed checks may add exact-graph
+identifier hints derived from pinned `.ilean` indexes; raw Lean streams remain
+unchanged.
+
 The generated files are a standard Lake project plus a small
 `lean-runtime.toml`. Root build outputs stay local; exact dependencies are
 shared. The generated root imports only its local `Basic` module, leaving
 implementation files free to select precise Mathlib modules. The newest stable
 cataloged Mathlib is selected by default. Select a
-release with `--mathlib 4.33.0`, or use `--core` for a core-only library.
+release with `--mathlib-version 4.33.0`, or use `--core` for a core-only library.
 `init` also creates an `AGENTS.md` describing the safe
 build and dependency workflow unless `--no-agents` is passed; it never
 overwrites an existing guide.

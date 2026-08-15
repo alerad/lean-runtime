@@ -62,7 +62,12 @@ def test_project_sharing_commands_have_safe_defaults() -> None:
     )
     assert policy.offline and policy.plan and policy.max_download == "500MiB"
     assert parser().parse_args(["scan"]).path == Path(".")
+    assert parser().parse_args(["project", "scan"]).path == Path(".")
     assert parser().parse_args(["check"]).inputs == []
+    publish = parser().parse_args(
+        ["publish", "environment", "lock.json", "--publish-to", "ghcr.io/example/envs"]
+    )
+    assert publish.publish_kind == "environment"
     with pytest.raises(SystemExit):
         parser().parse_args(["build", "demo", "--shared", "--local"])
 
@@ -180,6 +185,13 @@ def test_version_does_not_require_a_command(capsys) -> None:
         parser().parse_args(["--version"])
     assert stopped.value.code == 0
     assert capsys.readouterr().out.startswith("lean-runtime 2.")
+
+
+def test_completion_is_generated_from_current_commands(capsys) -> None:
+    assert main(["completion", "bash"]) == 0
+    output = capsys.readouterr().out
+    assert "complete -W" in output
+    assert "check" in output and "project" in output and "publish" in output
 
 
 def test_attach_plan_is_read_only(tmp_path: Path, capsys) -> None:

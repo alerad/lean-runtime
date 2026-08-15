@@ -137,9 +137,23 @@ def clone_tree(source: Path, destination: Path) -> None:
 
 def _tree_bytes(root: Path) -> int:
     """Sum regular-file sizes under a directory, tolerating races."""
-    total = 0
     if not root.is_dir():
         return 0
+    du = shutil.which("gdu") if platform.system() == "Darwin" else shutil.which("du")
+    if os.name != "nt" and du is not None:
+        with suppress(OSError, ValueError):
+            arguments = [du, "-s", "--apparent-size", "--block-size=1", str(root)]
+            process = subprocess.run(
+                arguments,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=300,
+                check=False,
+            )
+            if process.returncode == 0:
+                return int(process.stdout.split()[0])
+    total = 0
     for path in root.rglob("*"):
         try:
             if path.is_file() and not path.is_symlink():
@@ -652,13 +666,6 @@ class EnvironmentStore:
                 if value["fingerprint"] == fingerprint:
                     cached = StoreStatus.from_dict(value["status"])
                     return replace(cached, bytes_free=shutil.disk_usage(self.home).free)
-        bytes_used = 0
-        for path in self.home.rglob("*"):
-            try:
-                if path.is_file() and not path.is_symlink():
-                    bytes_used += path.stat().st_size
-            except OSError:
-                continue
         aliases = self.aliases()
         names_by_environment: dict[str, list[str]] = {}
         for name, environment_id in aliases.items():
@@ -685,6 +692,30 @@ class EnvironmentStore:
         project_packages = self.home / "project-packages"
         project_sources = self.home / "project-sources"
         project_workspaces = self.home / "project-workspaces"
+        environments_bytes = sum(item.bytes_used for item in usage)
+        sources_bytes = _tree_bytes(self.sources)
+        oci_blobs_bytes = _tree_bytes(self.oci_blobs)
+        cas_artifacts_bytes = _tree_bytes(self.cas_artifacts)
+        project_packages_bytes = (
+            _tree_bytes(project_packages)
+            + _tree_bytes(project_sources)
+            + _tree_bytes(project_workspaces)
+        )
+        toolchains_bytes = _tree_bytes(self.home / "elan") + _tree_bytes(self.home / "toolchains")
+        executions_bytes = _tree_bytes(self.executions)
+        bytes_used = sum(
+            (
+                environments_bytes,
+                sources_bytes,
+                oci_blobs_bytes,
+                cas_artifacts_bytes,
+                project_packages_bytes,
+                toolchains_bytes,
+                executions_bytes,
+                _tree_bytes(self.locks),
+                _tree_bytes(self.names),
+            )
+        )
         status = StoreStatus(
             home=str(self.home),
             environments=len(usage),
@@ -698,19 +729,16 @@ class EnvironmentStore:
             aliases=len(aliases),
             bytes_used=bytes_used,
             bytes_free=shutil.disk_usage(self.home).free,
-            environments_bytes=sum(item.bytes_used for item in usage),
-            sources_bytes=_tree_bytes(self.sources),
-            oci_blobs_bytes=_tree_bytes(self.oci_blobs),
-            cas_artifacts_bytes=_tree_bytes(self.cas_artifacts),
+            environments_bytes=environments_bytes,
+            sources_bytes=sources_bytes,
+            oci_blobs_bytes=oci_blobs_bytes,
+            cas_artifacts_bytes=cas_artifacts_bytes,
             project_packages=sum(
                 1 for path in project_packages.glob("project_package_*") if path.is_dir()
             ),
-            project_packages_bytes=_tree_bytes(project_packages)
-            + _tree_bytes(project_sources)
-            + _tree_bytes(project_workspaces),
-            toolchains_bytes=_tree_bytes(self.home / "elan")
-            + _tree_bytes(self.home / "toolchains"),
-            executions_bytes=_tree_bytes(self.executions),
+            project_packages_bytes=project_packages_bytes,
+            toolchains_bytes=toolchains_bytes,
+            executions_bytes=executions_bytes,
             environment_usage=tuple(usage),
         )
         write_json_atomic(ledger, {"fingerprint": fingerprint, "status": status.to_dict()})

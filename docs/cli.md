@@ -32,6 +32,17 @@ first-time download cannot expire the search. `--discovery-timeout` and
 
 All commands accept `--home PATH` before the subcommand to select a store.
 
+For project iteration, `check FILE --watch` rechecks on save with warm native
+import snapshots. `check FILE --repeat N` measures the same path, and
+`check FILE --across matrix.toml` checks exact contexts. The older `profile`
+and `matrix` commands remain compatibility aliases.
+
+`storage` reads a fingerprinted ledger after its first inventory, so large
+stores remain an instant-information command. `storage --verify` explicitly
+rebuilds that ledger and prints a progress line because it must walk the store.
+`doctor` is human-readable by default; `doctor --json` preserves automation and
+`doctor --fix` applies its safe stale-staging and private-Elan remedies.
+
 ## One-shot package workflow
 
 ```bash

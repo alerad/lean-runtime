@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timezone
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,7 @@ from .projects import (
     ProjectPublicationPlan,
     discover_project,
     inspect_project_publication,
+    project_check_workflow,
 )
 from .publisher_verification import CosignVerifier
 from .references import PACKAGE_ALIASES, PackageReference, discover_package, normalize_references
@@ -1797,11 +1799,14 @@ class Runtime:
         mathlib: str | None = "latest",
         toolchain: str | None = None,
         agents: bool = True,
+        ci: bool = False,
         seed_from: str | os.PathLike[str] | None = None,
     ) -> AdoptionResult:
         """Create or adopt a project; new projects become visible only when complete."""
         target = Path(path).expanduser().resolve()
         if (target / "lakefile.toml").is_file() or (target / "lakefile.lean").is_file():
+            if ci:
+                raise ProjectError("init --ci is only available while creating a new project")
             self._ensure_project_toolchain(discover_project(target).toolchain)
             result = self.attach_projects(target)
             if result.failures or not result.results:
@@ -1953,6 +1958,15 @@ class Runtime:
             agents_file = staging / "AGENTS.md"
             if agents and not agents_file.exists():
                 agents_file.write_text(_DEFAULT_AGENTS_GUIDE, encoding="utf-8")
+            if ci:
+                workflow = staging / ".github" / "workflows" / "lean-runtime.yml"
+                if workflow.exists():
+                    raise ProjectError(f"CI workflow already exists: {workflow}")
+                workflow.parent.mkdir(parents=True, exist_ok=True)
+                workflow.write_text(
+                    project_check_workflow(runtime_version=distribution_version("lean-runtime")),
+                    encoding="utf-8",
+                )
             if original_git is not None:
                 generated_git = staging / ".git"
                 if generated_git.is_dir() and not generated_git.is_symlink():

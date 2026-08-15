@@ -581,6 +581,20 @@ def test_init_can_skip_or_preserve_an_agents_guide(tmp_path: Path) -> None:
     assert custom.read_text() == "# Custom instructions\n"
 
 
+def test_init_can_generate_matching_lean_runtime_ci(tmp_path: Path) -> None:
+    runtime = Runtime(
+        toolchains=InitProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    runtime.init_project(tmp_path / "with-ci", mathlib=None, ci=True)
+
+    workflow = (tmp_path / "with-ci" / ".github" / "workflows" / "lean-runtime.yml").read_text()
+    assert "lean-runtime check" in workflow
+    assert "hashFiles('lean-toolchain', 'lake-manifest.json')" in workflow
+    assert "LEAN_RUNTIME_HOME" in workflow
+
+
 def test_init_at_an_empty_git_root_preserves_repository_identity_and_index(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
