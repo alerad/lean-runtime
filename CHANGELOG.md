@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.9.1 - 2026-08-15
+
 - Make GHCR credential discovery a single bounded GitHub CLI status read so a
   transient identity lookup cannot silently downgrade an authenticated account
   to anonymous; add a validated `lean-runtime.publication/v1` envelope behind
