@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Make environment publication fail closed: verify registry push access before
+  building, report the selected credential source, remotely verify every
+  manifest, emit an explicit terminal failure event, and reserve exit codes 3,
+  4, and 5 for permission, retryable transport, and partial/indeterminate
+  publication failures respectively.
 - Make standalone `check FILE` failures point directly to `--toolchain`, and
   have project checks ask Lake to materialize a missing local import before one
   automatic retry.

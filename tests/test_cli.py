@@ -9,9 +9,10 @@ import pytest
 
 from lean_runtime.bundles import PortableCopyInfo
 from lean_runtime.cli import _print_operation_failure, _progress, main, parser
-from lean_runtime.errors import MaterializationError
+from lean_runtime.errors import MaterializationError, PublicationError
 from lean_runtime.events import RuntimeEvent
 from lean_runtime.models import ExecutionResult
+from lean_runtime.oci import PublicationAccess
 from lean_runtime.verification import VerificationCheck, VerificationReport
 
 
@@ -259,6 +260,62 @@ def test_build_and_publish_accepts_environment_build_timeout() -> None:
     )
 
     assert arguments.timeout == 3600
+
+
+def test_publish_access_denial_exits_three_without_opening_environment(monkeypatch, capsys) -> None:
+    def denied(_self, _library: str) -> PublicationAccess:
+        raise PublicationError(
+            "registry denied push access",
+            phase="access_preflight",
+            registry="ghcr.io/owner/cache",
+            status_code=403,
+            credential_source="GitHub CLI",
+            username="owner",
+            hint="run `gh auth refresh -s write:packages,read:packages`, then retry",
+        )
+
+    def unexpected_open(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("environment opened before publication access was verified")
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.check_publication_access", denied)
+    monkeypatch.setattr("lean_runtime.cli.Runtime.open_exact", unexpected_open)
+
+    result = main(
+        [
+            "publish",
+            "environment",
+            "missing.lock.json",
+            "--publish-to",
+            "oci://ghcr.io/owner/cache",
+        ]
+    )
+
+    assert result == 3
+    error_output = capsys.readouterr().err
+    assert "Nothing was published" in error_output
+    assert "owner (source: GitHub CLI)" in error_output
+    assert "gh auth refresh" in error_output
+
+
+def test_publish_check_access_needs_no_lock(monkeypatch, capsys) -> None:
+    def allowed(_self, _library: str) -> PublicationAccess:
+        return PublicationAccess("ghcr.io/owner/cache", "owner", "GitHub CLI", True)
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.check_publication_access", allowed)
+    result = main(
+        [
+            "publish",
+            "environment",
+            "--publish-to",
+            "oci://ghcr.io/owner/cache",
+            "--check-access",
+        ]
+    )
+
+    assert result == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["push_verified"] is True
+    assert output["credential_source"] == "GitHub CLI"
 
 
 def test_verbose_materialization_failure_includes_tool_output(capsys) -> None:

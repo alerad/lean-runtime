@@ -20,6 +20,7 @@ from lean_runtime import (
     EnvironmentError,
     EnvironmentLock,
     LockedPackage,
+    PublicationError,
     Runtime,
 )
 from lean_runtime.bundles import (
@@ -30,8 +31,14 @@ from lean_runtime.bundles import (
 )
 from lean_runtime.capsules import build_manifest
 from lean_runtime.environments import ENVIRONMENT_SCHEMA
+from lean_runtime.errors import RegistryRequestError
 from lean_runtime.events import EventEmitter, RuntimeEvent
-from lean_runtime.oci import OCIEnvironmentPublisher, OCIRegistryClient, OCIRepository
+from lean_runtime.oci import (
+    OCIEnvironmentPublisher,
+    OCIRegistryClient,
+    OCIRepository,
+    RegistryCredential,
+)
 from lean_runtime.store import (
     EnvironmentStore,
     environment_identity,
@@ -749,6 +756,9 @@ def test_oci_publisher_uploads_blobs_before_manifests(tmp_path: Path) -> None:
     operations: list[tuple[str, str]] = []
 
     class FakeClient:
+        def check_push_access(self) -> None:
+            pass
+
         def manifest_exists(self, _digest: str) -> bool:
             return True
 
@@ -788,6 +798,9 @@ def test_oci_publisher_reports_remote_blob_reuse(tmp_path: Path) -> None:
     )
 
     class ReusingClient:
+        def check_push_access(self) -> None:
+            pass
+
         def manifest_exists(self, _digest: str) -> bool:
             return True
 
@@ -806,6 +819,200 @@ def test_oci_publisher_reports_remote_blob_reuse(tmp_path: Path) -> None:
     assert result.uploaded_bytes == 0
     assert result.reused_bytes == result.total_blob_bytes
     assert result.reuse_percent == 100
+
+
+def test_oci_manifest_publication_requires_remote_digest_verification() -> None:
+    manifest_data = b'{"schemaVersion":2}'
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_PUT(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(201)
+            self.end_headers()
+
+        def do_GET(self) -> None:
+            remote_data = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+            self.send_header("Content-Length", str(len(remote_data)))
+            self.end_headers()
+            self.wfile.write(remote_data)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        repository = OCIRepository.parse(f"oci+http://127.0.0.1:{server.server_port}/owner/cache")
+        with pytest.raises(EnvironmentError, match="remote digest verification"):
+            OCIRegistryClient(repository).publish_manifest(
+                "release",
+                manifest_data,
+                "application/vnd.oci.image.manifest.v1+json",
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_oci_publisher_denies_access_before_exporting(tmp_path: Path, monkeypatch) -> None:
+    producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
+    events: list[RuntimeEvent] = []
+    publisher = OCIEnvironmentPublisher(
+        OCIRepository.parse("oci://ghcr.io/owner/cache"),
+        producer.store,
+        producer.bundles,
+        EventEmitter(events.append),
+    )
+    publisher.credential = RegistryCredential("owner", "secret", "GitHub CLI")
+
+    class DeniedClient:
+        def check_push_access(self) -> None:
+            raise RegistryRequestError(
+                "HTTP 403",
+                operation="push access probe",
+                status_code=403,
+            )
+
+    publisher.client = DeniedClient()  # type: ignore[assignment]
+
+    def unexpected_export(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("publication exported an environment before checking access")
+
+    monkeypatch.setattr(producer.bundles, "export_layout", unexpected_export)
+    with pytest.raises(PublicationError) as raised:
+        publisher.publish(environment_id)
+
+    failure = raised.value
+    assert failure.exit_code == 3
+    assert failure.published is False
+    assert failure.partial is False
+    assert failure.status_code == 403
+    assert failure.credential_source == "GitHub CLI"
+    assert failure.hint == "run `gh auth refresh -s write:packages,read:packages`, then retry"
+    assert [event.kind for event in events] == [
+        "library.publish_auth_selected",
+        "library.publish_failed",
+    ]
+    assert events[-1].data["published"] is False
+    assert "secret" not in json.dumps(events[-1].to_dict())
+
+
+def test_oci_publisher_classifies_retryable_preflight_failure(tmp_path: Path) -> None:
+    producer, _environment_id, _lock = _published_runtime(tmp_path / "producer")
+    publisher = OCIEnvironmentPublisher(
+        OCIRepository.parse("oci://registry.example/owner/cache"),
+        producer.store,
+        producer.bundles,
+        producer.events,
+    )
+
+    class UnavailableClient:
+        def check_push_access(self) -> None:
+            raise RegistryRequestError(
+                "HTTP 503",
+                operation="push access probe",
+                status_code=503,
+                retryable=True,
+            )
+
+    publisher.client = UnavailableClient()  # type: ignore[assignment]
+    with pytest.raises(PublicationError) as raised:
+        publisher.check_access()
+    assert raised.value.exit_code == 4
+    assert raised.value.retryable is True
+    assert raised.value.partial is False
+
+
+def test_oci_publisher_treats_unverified_manifest_write_as_indeterminate(
+    tmp_path: Path,
+) -> None:
+    producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
+    events: list[RuntimeEvent] = []
+    publisher = OCIEnvironmentPublisher(
+        OCIRepository.parse("oci://registry.example/owner/cache"),
+        producer.store,
+        producer.bundles,
+        EventEmitter(events.append),
+    )
+
+    class UnverifiedClient:
+        def check_push_access(self) -> None:
+            pass
+
+        def blob_exists(self, _digest: str) -> bool:
+            return True
+
+        def upload_blob(self, _path: Path, _digest: str) -> None:
+            pass
+
+        def publish_manifest(self, _reference: str, _data: bytes, _media_type: str) -> str:
+            raise EnvironmentError("published manifest could not be read back")
+
+    publisher.client = UnverifiedClient()  # type: ignore[assignment]
+    with pytest.raises(PublicationError) as raised:
+        publisher.publish(environment_id)
+
+    failure = raised.value
+    assert failure.exit_code == 5
+    assert failure.partial is True
+    assert failure.published is False
+    assert failure.phase == "platform_manifest"
+    assert [event.kind for event in events].count("library.publish_failed") == 1
+    assert not any(event.kind == "library.published" for event in events)
+
+
+def test_oci_publisher_reports_partial_state_when_tag_finalization_fails(
+    tmp_path: Path,
+) -> None:
+    producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
+    events: list[RuntimeEvent] = []
+    publisher = OCIEnvironmentPublisher(
+        OCIRepository.parse("oci://registry.example/owner/cache"),
+        producer.store,
+        producer.bundles,
+        EventEmitter(events.append),
+    )
+
+    class TagFailureClient:
+        def check_push_access(self) -> None:
+            pass
+
+        def manifest_exists(self, _digest: str) -> bool:
+            return True
+
+        def blob_exists(self, _digest: str) -> bool:
+            return True
+
+        def upload_blob(self, _path: Path, _digest: str) -> None:
+            pass
+
+        def publish_manifest(self, reference: str, data: bytes, _media_type: str) -> str:
+            if reference == "release":
+                raise RegistryRequestError(
+                    "HTTP 503",
+                    operation="manifest upload",
+                    status_code=503,
+                    retryable=True,
+                )
+            return "sha256:" + hashlib.sha256(data).hexdigest()
+
+    publisher.client = TagFailureClient()  # type: ignore[assignment]
+    with pytest.raises(PublicationError) as raised:
+        publisher.publish(environment_id, tags=("release",))
+
+    failure = raised.value
+    assert failure.exit_code == 5
+    assert failure.partial is True
+    assert failure.published is False
+    assert failure.phase == "tag_finalization"
+    terminal = [event for event in events if event.kind == "library.publish_failed"]
+    assert len(terminal) == 1
+    assert terminal[0].data["partial"] is True
+    assert not any(event.kind == "library.published" for event in events)
 
 
 def test_oci_truncated_blob_download_resumes_with_range(tmp_path: Path) -> None:

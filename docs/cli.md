@@ -77,6 +77,7 @@ lean-runtime --library ghcr.io/owner/lean-environments download environment.lock
 lean-runtime copy save research-stack --output research-stack.lean-environment
 lean-runtime --home /tmp/fresh copy open research-stack.lean-environment --name research-stack
 lean-runtime publish environment environment.lock.json --publish-to ghcr.io/owner/lean-environments
+lean-runtime publish environment --publish-to ghcr.io/owner/lean-environments --check-access
 lean-runtime check research-stack Main.lean --json
 lean-runtime inspect research-stack --packages
 lean-runtime environments
@@ -224,6 +225,15 @@ Global `--library` is repeatable and `--availability auto|required|local`
 controls whether ready-to-use environments are downloaded or built locally.
 `LEAN_RUNTIME_LIBRARIES` accepts a comma-separated equivalent and
 `LEAN_RUNTIME_AVAILABILITY` sets the default policy.
+
+Environment publishing probes repository push access before opening or building
+the lock. `--check-access` runs only that content-free preflight and needs no
+lock. GHCR publishers can use an authenticated `gh` session; explicit
+`LEAN_RUNTIME_REGISTRY_USERNAME` and `LEAN_RUNTIME_REGISTRY_PASSWORD` values take
+precedence. Publication exits `3` for authentication/permission denial, `4` for
+retryable transport or registry failures, and `5` when remote state is partial
+or indeterminate. Success is emitted only after the published manifest is read
+back and its digest is verified. See [Portable copies](portable-copies.md#publishing).
 
 ## Publish an existing project
 
