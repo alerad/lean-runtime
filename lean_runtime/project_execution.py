@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -51,17 +52,23 @@ class ProjectExecutor:
         command = self.runtime.toolchains.command(
             context.toolchain, "lake", "env", "lean", relative
         )
-        return self.runtime._raw_result(
-            command,
-            cwd=context.root,
-            toolchain=context.toolchain,
-            source_digest=sha256_text(source.read_text(encoding="utf-8")),
-            policy=policy,
-            project=context.provenance(),
-            packages=context.package_provenance(),
-            logical_command=("lake", "env", "lean", relative),
-            cancel=cancel,
-        )
+        text = source.read_text(encoding="utf-8")
+        provenance = context.provenance()
+        with self.runtime.header_cache.command(
+            context.toolchain, provenance.workspace_digest, text, command
+        ) as selected_command:
+            result = self.runtime._raw_result(
+                selected_command,
+                cwd=context.root,
+                toolchain=context.toolchain,
+                source_digest=sha256_text(text),
+                policy=policy,
+                project=provenance,
+                packages=context.package_provenance(),
+                logical_command=("lake", "env", "lean", relative),
+                cancel=cancel,
+            )
+        return self._with_identifier_hints(context, result)
 
     def check_source(
         self,
@@ -84,18 +91,29 @@ class ProjectExecutor:
             command = self.runtime.toolchains.command(
                 context.toolchain, "lake", "env", "lean", relative
             )
-            return self.runtime._raw_result(
-                command,
-                cwd=context.root,
-                toolchain=context.toolchain,
-                source_digest=sha256_text(source),
-                policy=policy,
-                project=context.provenance(),
-                packages=context.package_provenance(),
-                logical_command=("lake", "env", "lean", safe_filename),
-                path_map={relative: safe_filename, str(source_path): safe_filename},
-                cancel=cancel,
-            )
+            provenance = context.provenance()
+            with self.runtime.header_cache.command(
+                context.toolchain, provenance.workspace_digest, source, command
+            ) as selected_command:
+                result = self.runtime._raw_result(
+                    selected_command,
+                    cwd=context.root,
+                    toolchain=context.toolchain,
+                    source_digest=sha256_text(source),
+                    policy=policy,
+                    project=provenance,
+                    packages=context.package_provenance(),
+                    logical_command=("lake", "env", "lean", safe_filename),
+                    path_map={relative: safe_filename, str(source_path): safe_filename},
+                    cancel=cancel,
+                )
+            return self._with_identifier_hints(context, result)
+
+    def _with_identifier_hints(
+        self, context: ProjectContext, result: ExecutionResult
+    ) -> ExecutionResult:
+        hints = self.runtime.identifier_resolver.suggestions(context, result)
+        return result if not hints else replace(result, hints=hints)
 
     def build(
         self,

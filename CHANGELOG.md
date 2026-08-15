@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Cut repeated project-check latency with capability-probed Lean header snapshots;
+  `check --watch` rechecks on save, while `check --repeat` and `check --across`
+  absorb the common profile/matrix workflows without removing legacy aliases.
+- Suggest exact-workspace declarations after coded unknown-identifier diagnostics
+  using persisted `.ilean` indexes from the pinned dependency graph.
+- Make `init --mathlib-version VERSION` unambiguous, preserve common repository
+  scaffolding, optionally generate matching CI with `--ci`, and retain the old
+  `--mathlib` spelling as a validated compatibility alias.
+- Add `project scan/attach/detach/update`, `publish KIND`, `finalize KIND`, and
+  `copy save/open` namespaces while retaining existing command spellings for
+  automation.
+- Give environments and doctor human output plus `--json`, add `doctor --fix`,
+  fingerprinted storage accounting with `storage --verify`, cleanup nudges,
+  `clean --keep-last` retention, curated help, and generated Bash/Zsh/Fish
+  completions.
+- Report cumulative frame and byte counters while restoring sparse capsules, so
+  both terse and verbose cold-start output shows measurable forward progress.
+
 ## 2.7.0 - 2026-08-14
 
 - Keep newly initialized project roots narrow: the generated root imports its

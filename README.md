@@ -152,6 +152,7 @@ default, and exact dependencies are shared automatically:
 lean-runtime init MyProof
 cd MyProof
 lean-runtime check MyProof/Basic.lean
+lean-runtime check MyProof/Basic.lean --watch
 # Check every declared local library, in Lake dependency order:
 lean-runtime check
 lean-runtime build
@@ -160,7 +161,7 @@ lean-runtime build
 `init` also writes an `AGENTS.md` with the project build, checking, dependency,
 and shared-package rules for coding agents. Pass `--no-agents` to omit it; an
 existing `AGENTS.md` is never overwritten. Use `--core` for no Mathlib, or
-`--mathlib 4.33.0` to select a cataloged release. `lean-runtime update`
+`--mathlib-version 4.33.0` to select a cataloged release. `lean-runtime update`
 explicitly moves a project to the newest cataloged Mathlib after a preview.
 
 Running `lean-runtime init .` in an existing pinned Lake project adopts its

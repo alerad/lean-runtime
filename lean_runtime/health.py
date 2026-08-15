@@ -7,9 +7,12 @@ import platform
 import shutil
 import subprocess
 import tempfile
+from contextlib import suppress
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from typing import Literal
 
+from ._paths import remove_tree
 from .errors import ToolchainError
 from .store import EnvironmentStore
 from .toolchains import ToolchainManager
@@ -83,4 +86,34 @@ def diagnose(toolchains: ToolchainManager, store: EnvironmentStore) -> DoctorRep
     status = "warning" if staging else "pass"
     message = f"{len(staging)} incomplete staging directories" if staging else "No stale builds"
     checks.append(DoctorCheck("staging", status, message))
+    store_status = store.status()
+    cutoff = datetime.now(timezone.utc).timestamp() - 7 * 24 * 3600
+    stale = tuple(
+        usage
+        for usage in store_status.environment_usage
+        if not usage.aliases
+        and usage.last_used_at is not None
+        and datetime.fromisoformat(usage.last_used_at.replace("Z", "+00:00")).timestamp() < cutoff
+    )
+    reclaimable = sum(item.bytes_used for item in stale)
+    if stale:
+        checks.append(
+            DoctorCheck(
+                "cleanup",
+                "warning",
+                f"{reclaimable // (1024**2)} MiB reclaimable from "
+                f"{len(stale)} environment(s) unused for 7d",
+            )
+        )
+    else:
+        checks.append(DoctorCheck("cleanup", "pass", "No environments unused for 7d"))
     return DoctorReport(tuple(checks))
+
+
+def repair(toolchains: ToolchainManager, store: EnvironmentStore) -> DoctorReport:
+    """Apply the safe remedies represented by doctor checks, then diagnose again."""
+    for staging in store.environments.glob(".staging-*"):
+        remove_tree(staging)
+    with suppress(ToolchainError):
+        toolchains.elan_path(bootstrap=True)
+    return diagnose(toolchains, store)

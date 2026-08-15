@@ -13,7 +13,7 @@ import time
 import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -137,9 +137,23 @@ def clone_tree(source: Path, destination: Path) -> None:
 
 def _tree_bytes(root: Path) -> int:
     """Sum regular-file sizes under a directory, tolerating races."""
-    total = 0
     if not root.is_dir():
         return 0
+    du = shutil.which("gdu") if platform.system() == "Darwin" else shutil.which("du")
+    if os.name != "nt" and du is not None:
+        with suppress(OSError, ValueError):
+            arguments = [du, "-s", "--apparent-size", "--block-size=1", str(root)]
+            process = subprocess.run(
+                arguments,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=300,
+                check=False,
+            )
+            if process.returncode == 0:
+                return int(process.stdout.split()[0])
+    total = 0
     for path in root.rglob("*"):
         try:
             if path.is_file() and not path.is_symlink():
@@ -253,6 +267,23 @@ class StoreStatus:
             "executions_bytes": self.executions_bytes,
             "environment_usage": [usage.to_dict() for usage in self.environment_usage],
         }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> StoreStatus:
+        fields = dict(value)
+        fields["environment_usage"] = tuple(
+            EnvironmentUsage(
+                environment_id=str(item["environment_id"]),
+                bytes_used=int(item["bytes_used"]),
+                aliases=tuple(str(alias) for alias in item["aliases"]),
+                toolchain=str(item["toolchain"]) if item.get("toolchain") is not None else None,
+                last_used_at=(
+                    str(item["last_used_at"]) if item.get("last_used_at") is not None else None
+                ),
+            )
+            for item in fields.get("environment_usage", [])
+        )
+        return cls(**fields)
 
 
 class EnvironmentStore:
@@ -599,14 +630,42 @@ class EnvironmentStore:
             result[path.stem] = self._read_alias(path)
         return result
 
-    def status(self) -> StoreStatus:
-        bytes_used = 0
-        for path in self.home.rglob("*"):
-            try:
-                if path.is_file() and not path.is_symlink():
-                    bytes_used += path.stat().st_size
-            except OSError:
-                continue
+    def _storage_fingerprint(self) -> list[list[object]]:
+        roots = (
+            self.environments,
+            self.sources,
+            self.oci_blobs,
+            self.cas_artifacts,
+            self.executions,
+            self.home / "project-packages",
+            self.home / "project-sources",
+            self.home / "project-workspaces",
+            self.home / "elan",
+            self.home / "toolchains",
+        )
+        fingerprint: list[list[object]] = []
+        for root in roots:
+            with suppress(OSError):
+                children = tuple(root.iterdir())
+                fingerprint.append(
+                    [
+                        root.name,
+                        root.stat().st_mtime_ns,
+                        len(children),
+                        sum(child.stat().st_mtime_ns for child in children),
+                    ]
+                )
+        return fingerprint
+
+    def status(self, *, verify: bool = False) -> StoreStatus:
+        ledger = self.home / "storage-ledger.json"
+        fingerprint = self._storage_fingerprint()
+        if not verify:
+            with suppress(OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                value = json.loads(ledger.read_text(encoding="utf-8"))
+                if value["fingerprint"] == fingerprint:
+                    cached = StoreStatus.from_dict(value["status"])
+                    return replace(cached, bytes_free=shutil.disk_usage(self.home).free)
         aliases = self.aliases()
         names_by_environment: dict[str, list[str]] = {}
         for name, environment_id in aliases.items():
@@ -633,7 +692,31 @@ class EnvironmentStore:
         project_packages = self.home / "project-packages"
         project_sources = self.home / "project-sources"
         project_workspaces = self.home / "project-workspaces"
-        return StoreStatus(
+        environments_bytes = sum(item.bytes_used for item in usage)
+        sources_bytes = _tree_bytes(self.sources)
+        oci_blobs_bytes = _tree_bytes(self.oci_blobs)
+        cas_artifacts_bytes = _tree_bytes(self.cas_artifacts)
+        project_packages_bytes = (
+            _tree_bytes(project_packages)
+            + _tree_bytes(project_sources)
+            + _tree_bytes(project_workspaces)
+        )
+        toolchains_bytes = _tree_bytes(self.home / "elan") + _tree_bytes(self.home / "toolchains")
+        executions_bytes = _tree_bytes(self.executions)
+        bytes_used = sum(
+            (
+                environments_bytes,
+                sources_bytes,
+                oci_blobs_bytes,
+                cas_artifacts_bytes,
+                project_packages_bytes,
+                toolchains_bytes,
+                executions_bytes,
+                _tree_bytes(self.locks),
+                _tree_bytes(self.names),
+            )
+        )
+        status = StoreStatus(
             home=str(self.home),
             environments=len(usage),
             locks=sum(1 for path in self.locks.glob("lock_*") if path.is_dir()),
@@ -646,21 +729,20 @@ class EnvironmentStore:
             aliases=len(aliases),
             bytes_used=bytes_used,
             bytes_free=shutil.disk_usage(self.home).free,
-            environments_bytes=sum(item.bytes_used for item in usage),
-            sources_bytes=_tree_bytes(self.sources),
-            oci_blobs_bytes=_tree_bytes(self.oci_blobs),
-            cas_artifacts_bytes=_tree_bytes(self.cas_artifacts),
+            environments_bytes=environments_bytes,
+            sources_bytes=sources_bytes,
+            oci_blobs_bytes=oci_blobs_bytes,
+            cas_artifacts_bytes=cas_artifacts_bytes,
             project_packages=sum(
                 1 for path in project_packages.glob("project_package_*") if path.is_dir()
             ),
-            project_packages_bytes=_tree_bytes(project_packages)
-            + _tree_bytes(project_sources)
-            + _tree_bytes(project_workspaces),
-            toolchains_bytes=_tree_bytes(self.home / "elan")
-            + _tree_bytes(self.home / "toolchains"),
-            executions_bytes=_tree_bytes(self.executions),
+            project_packages_bytes=project_packages_bytes,
+            toolchains_bytes=toolchains_bytes,
+            executions_bytes=executions_bytes,
             environment_usage=tuple(usage),
         )
+        write_json_atomic(ledger, {"fingerprint": fingerprint, "status": status.to_dict()})
+        return status
 
     def _last_used_at(self, environment_path: Path) -> str | None:
         marker = self.usage / f"{environment_path.name}.json"
@@ -675,7 +757,11 @@ class EnvironmentStore:
         )
 
     def clean(
-        self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
+        self,
+        *,
+        dry_run: bool = True,
+        minimum_age_seconds: float = 2_592_000,
+        keep_last: int = 0,
     ) -> CleanupReport:
         """Remove old environments not reachable through a name.
 
@@ -688,6 +774,22 @@ class EnvironmentStore:
         removed: list[str] = []
         candidate_bytes = 0
         reclaimed_bytes = 0
+        if keep_last < 0:
+            raise ValueError("clean keep_last must be nonnegative")
+        unaliased = [
+            path
+            for path in self.environments.glob("env_*")
+            if path.is_dir() and path.name not in referenced
+        ]
+        unaliased.sort(
+            key=lambda path: (
+                (self.usage / f"{path.name}.json").stat().st_mtime
+                if (self.usage / f"{path.name}.json").exists()
+                else path.stat().st_mtime
+            ),
+            reverse=True,
+        )
+        protected = {path.name for path in unaliased[:keep_last]}
         with FileLock(self.lock_dir / "gc.lock"):
             for path in sorted(self.environments.glob("env_*")):
                 if _ENVIRONMENT_ID.fullmatch(path.name) is None:
@@ -697,6 +799,7 @@ class EnvironmentStore:
                 age = now - (usage.stat().st_mtime if usage.exists() else path.stat().st_mtime)
                 if (
                     path.name in referenced
+                    or path.name in protected
                     or age < minimum_age_seconds
                     or self.has_execution_leases(path.name)
                 ):

@@ -581,6 +581,20 @@ def test_init_can_skip_or_preserve_an_agents_guide(tmp_path: Path) -> None:
     assert custom.read_text() == "# Custom instructions\n"
 
 
+def test_init_can_generate_matching_lean_runtime_ci(tmp_path: Path) -> None:
+    runtime = Runtime(
+        toolchains=InitProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    runtime.init_project(tmp_path / "with-ci", mathlib=None, ci=True)
+
+    workflow = (tmp_path / "with-ci" / ".github" / "workflows" / "lean-runtime.yml").read_text()
+    assert "lean-runtime check" in workflow
+    assert "hashFiles('lean-toolchain', 'lake-manifest.json')" in workflow
+    assert "LEAN_RUNTIME_HOME" in workflow
+
+
 def test_init_at_an_empty_git_root_preserves_repository_identity_and_index(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -640,6 +654,26 @@ def test_init_at_an_empty_git_root_preserves_repository_identity_and_index(
     ).stdout
     assert " D old.txt" in status
     assert "?? lakefile.toml" in status
+
+
+def test_init_preserves_compatible_repository_scaffolding(tmp_path: Path) -> None:
+    target = tmp_path / "project"
+    (target / ".github" / "workflows").mkdir(parents=True)
+    (target / ".github" / "workflows" / "ci.yml").write_text("name: existing\n")
+    (target / ".gitignore").write_text("private-notes/\n")
+    (target / "README.md").write_text("# Existing project\n")
+    (target / "LICENSE").write_text("Existing license\n")
+    runtime = Runtime(
+        toolchains=InitProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    runtime.init_project(target, mathlib=None)
+
+    assert (target / ".github" / "workflows" / "ci.yml").read_text() == "name: existing\n"
+    assert (target / "README.md").read_text() == "# Existing project\n"
+    assert (target / "LICENSE").read_text() == "Existing license\n"
+    assert "private-notes/" in (target / ".gitignore").read_text()
 
 
 def test_init_plan_rejects_nonempty_nonproject_before_acquisition(tmp_path: Path) -> None:

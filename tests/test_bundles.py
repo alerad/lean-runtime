@@ -30,7 +30,7 @@ from lean_runtime.bundles import (
 )
 from lean_runtime.capsules import build_manifest
 from lean_runtime.environments import ENVIRONMENT_SCHEMA
-from lean_runtime.events import EventEmitter
+from lean_runtime.events import EventEmitter, RuntimeEvent
 from lean_runtime.oci import OCIEnvironmentPublisher, OCIRegistryClient, OCIRepository
 from lean_runtime.store import (
     EnvironmentStore,
@@ -447,13 +447,23 @@ def test_sparse_oci_pull_downloads_only_the_import_closure(tmp_path: Path) -> No
     thread.start()
     try:
         library = f"oci+http://127.0.0.1:{server.server_port}/owner/cache"
-        consumer = Runtime(home=tmp_path / "consumer", libraries=(library,))
+        events: list[RuntimeEvent] = []
+        consumer = Runtime(home=tmp_path / "consumer", libraries=(library,), on_event=events.append)
         cache = consumer.libraries[0]
         before = set(consumer.store.cas_artifacts.iterdir())
         plan = cache.plan_capsule(lock, ("B",))
         assert set(consumer.store.cas_artifacts.iterdir()) == before
         assert plan.modules == ("A", "B")
         cache.pull_capsule(lock, ("B",))
+        progress = [event for event in events if event.kind == "library.layer_progress"]
+        assert [(event.data["frame_current"], event.data["frame_total"]) for event in progress] == [
+            (1, 2),
+            (2, 2),
+        ]
+        assert progress[-1].current_bytes == progress[-1].total_bytes
+        assert progress[0].current_bytes is not None
+        assert progress[1].current_bytes is not None
+        assert progress[0].current_bytes < progress[1].current_bytes
         environment = consumer.environment(environment_id)
         assert list(environment.workspace.rglob("A.olean"))
         assert list(environment.workspace.rglob("B.olean"))

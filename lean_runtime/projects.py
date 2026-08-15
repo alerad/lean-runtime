@@ -302,6 +302,36 @@ jobs:
 """
 
 
+def project_check_workflow(*, runtime_version: str) -> str:
+    """Return CI that exercises the same manifest and lean-runtime check path as local use."""
+    cache_key = (
+        "lean-runtime-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}"
+    )
+    return f"""name: Lean Runtime
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/cache@v5
+        with:
+          path: ${{{{ runner.temp }}}}/lean-runtime
+          key: {cache_key}
+      - run: python -m pip install lean-runtime=={runtime_version}
+      - run: lean-runtime check
+        env:
+          LEAN_RUNTIME_HOME: ${{{{ runner.temp }}}}/lean-runtime
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class ProjectContext:
     root: Path

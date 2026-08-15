@@ -21,17 +21,19 @@ shared exact dependencies:
 lean-runtime init MyProof
 cd MyProof
 lean-runtime check MyProof/Basic.lean
+lean-runtime check MyProof/Basic.lean --watch
 lean-runtime check
 lean-runtime build
 ```
 
 By default, `init` writes an `AGENTS.md` explaining the project workflow and
 shared-dependency safety rules to coding agents. Pass `--no-agents` to omit it.
-An existing file is preserved. The generated root imports only the project's
+An existing file is preserved. Pass `--ci` to generate a workflow that checks
+the same exact committed project graph. The generated root imports only the project's
 local `Basic` module; add the narrow Mathlib imports each implementation file
 needs rather than paying for the all-Mathlib umbrella on every root import.
 
-Use `--mathlib 4.33.0` to select that release explicitly, or `--core` for a
+Use `--mathlib-version 4.33.0` to select that release explicitly, or `--core` for a
 core-only library. The root project remains an ordinary mutable Lake project;
 its dependency sources and build artifacts are reused by other projects with
 the same exact graph.
@@ -81,6 +83,8 @@ lean-runtime scan ~/research
 ```
 
 `scan` only records exact local graphs as possible future zero-download seeds.
+The converged spelling is `lean-runtime project scan`; `project attach`,
+`project detach`, and `project update` group the other dependency-graph actions.
 Advanced bulk migration remains available through `attach`. See [Local Lake
 projects](local-projects.md) for detachment, storage estimates, and the complete
 safety model.

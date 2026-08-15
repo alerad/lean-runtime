@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timezone
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +39,9 @@ from .errors import (
     ToolchainError,
 )
 from .events import EventCallback, EventEmitter
-from .health import DoctorReport, diagnose
+from .header_cache import LeanHeaderCache
+from .health import DoctorReport, diagnose, repair
+from .identifier_resolver import IdentifierResolver
 from .lake_cache import LakeArtifactCache
 from .lockfiles import EnvironmentLock
 from .matrix import MatrixContext, MatrixResult, run_matrix
@@ -79,6 +83,7 @@ from .projects import (
     ProjectPublicationPlan,
     discover_project,
     inspect_project_publication,
+    project_check_workflow,
 )
 from .publisher_verification import CosignVerifier
 from .references import PACKAGE_ALIASES, PackageReference, discover_package, normalize_references
@@ -229,6 +234,8 @@ class Runtime:
         self.store = EnvironmentStore(self.home)
         self.shared_projects = SharedProjectManager(self.home, self.events)
         self.lake_cache = LakeArtifactCache(self.home, self.toolchains, self.events)
+        self.header_cache = LeanHeaderCache(self.home, self.toolchains)
+        self.identifier_resolver = IdentifierResolver(self.home)
         self.project_adopter = ProjectAdopter(self.shared_projects)
         self.project_executor = ProjectExecutor(self)
         self.resolver = EnvironmentResolver(self.toolchains, self.store, self.backend, self.events)
@@ -1638,8 +1645,18 @@ class Runtime:
         if not target.is_dir():
             raise ProjectError(f"initialization target is not a directory: {target}")
         entries = tuple(target.iterdir())
-        allowed = {".git", "AGENTS.md"}
-        unsupported = [entry for entry in entries if entry.name not in allowed]
+
+        def compatible(entry: Path) -> bool:
+            name = entry.name
+            return (
+                name in {".git", ".github", ".gitignore", "AGENTS.md"}
+                or name == "README"
+                or name.startswith("README.")
+                or name == "LICENSE"
+                or name.startswith("LICENSE.")
+            )
+
+        unsupported = [entry for entry in entries if not compatible(entry)]
         if unsupported:
             names = ", ".join(sorted(entry.name for entry in unsupported))
             raise ProjectError(
@@ -1782,11 +1799,14 @@ class Runtime:
         mathlib: str | None = "latest",
         toolchain: str | None = None,
         agents: bool = True,
+        ci: bool = False,
         seed_from: str | os.PathLike[str] | None = None,
     ) -> AdoptionResult:
         """Create or adopt a project; new projects become visible only when complete."""
         target = Path(path).expanduser().resolve()
         if (target / "lakefile.toml").is_file() or (target / "lakefile.lean").is_file():
+            if ci:
+                raise ProjectError("init --ci is only available while creating a new project")
             self._ensure_project_toolchain(discover_project(target).toolchain)
             result = self.attach_projects(target)
             if result.failures or not result.results:
@@ -1835,6 +1855,7 @@ class Runtime:
         original_git = next((entry for entry in existing_entries if entry.name == ".git"), None)
         published_in_place = False
         published_entries: list[Path] = []
+        modified_existing: dict[Path, bytes] = {}
         try:
             custom_agents = target / "AGENTS.md"
             if custom_agents.is_file():
@@ -1862,6 +1883,21 @@ class Runtime:
                 raise ProjectError(
                     "Lake could not initialize the project" + (f":\n{detail}" if detail else "")
                 )
+            for existing in existing_entries:
+                if existing.name in {".git", "AGENTS.md"}:
+                    continue
+                destination = staging / existing.name
+                if existing.name == ".gitignore" and destination.is_file():
+                    generated = destination.read_text(encoding="utf-8").splitlines()
+                    preserved = existing.read_text(encoding="utf-8").splitlines()
+                    merged = list(dict.fromkeys([*preserved, *generated]))
+                    destination.write_text("\n".join(merged) + "\n", encoding="utf-8")
+                elif existing.is_dir():
+                    if destination.exists():
+                        remove_tree(destination)
+                    shutil.copytree(existing, destination, symlinks=True)
+                else:
+                    shutil.copy2(existing, destination, follow_symlinks=False)
             if self.lake_cache.capabilities(plan.toolchain).supported:
                 lakefile = staging / "lakefile.toml"
                 lakefile.write_text(
@@ -1922,6 +1958,15 @@ class Runtime:
             agents_file = staging / "AGENTS.md"
             if agents and not agents_file.exists():
                 agents_file.write_text(_DEFAULT_AGENTS_GUIDE, encoding="utf-8")
+            if ci:
+                workflow = staging / ".github" / "workflows" / "lean-runtime.yml"
+                if workflow.exists():
+                    raise ProjectError(f"CI workflow already exists: {workflow}")
+                workflow.parent.mkdir(parents=True, exist_ok=True)
+                workflow.write_text(
+                    project_check_workflow(runtime_version=distribution_version("lean-runtime")),
+                    encoding="utf-8",
+                )
             if original_git is not None:
                 generated_git = staging / ".git"
                 if generated_git.is_dir() and not generated_git.is_symlink():
@@ -1937,7 +1982,17 @@ class Runtime:
                 for entry in sorted(staging.iterdir(), key=lambda path: path.name):
                     destination = target / entry.name
                     if destination.exists() or destination.is_symlink():
-                        if entry.name == "AGENTS.md" and destination.is_file():
+                        if entry.name in {
+                            ".github",
+                            ".gitignore",
+                            "AGENTS.md",
+                            "README",
+                            "README.md",
+                            "LICENSE",
+                        } or entry.name.startswith(("README.", "LICENSE.")):
+                            if entry.name == ".gitignore" and destination.is_file():
+                                modified_existing[destination] = destination.read_bytes()
+                                destination.write_bytes(entry.read_bytes())
                             if entry.is_symlink() or entry.is_file():
                                 entry.unlink()
                             elif entry.exists():
@@ -1963,6 +2018,8 @@ class Runtime:
                         entry.unlink()
                     elif entry.exists():
                         remove_tree(entry)
+                for destination, contents in modified_existing.items():
+                    destination.write_bytes(contents)
             elif published and target.exists():
                 remove_tree(target)
             raise
@@ -2048,9 +2105,17 @@ class Runtime:
         return self.bundles.export_capsule(environment.id, Path(output), roots=roots)
 
     def clean(
-        self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
+        self,
+        *,
+        dry_run: bool = True,
+        minimum_age_seconds: float = 2_592_000,
+        keep_last: int = 0,
     ) -> CleanupReport:
-        return self.store.clean(dry_run=dry_run, minimum_age_seconds=minimum_age_seconds)
+        return self.store.clean(
+            dry_run=dry_run,
+            minimum_age_seconds=minimum_age_seconds,
+            keep_last=keep_last,
+        )
 
     def clean_downloads(
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
@@ -2060,8 +2125,11 @@ class Runtime:
     def doctor(self) -> DoctorReport:
         return diagnose(self.toolchains, self.store)
 
-    def store_status(self) -> StoreStatus:
-        return self.store.status()
+    def doctor_fix(self) -> DoctorReport:
+        return repair(self.toolchains, self.store)
+
+    def store_status(self, *, verify: bool = False) -> StoreStatus:
+        return self.store.status(verify=verify)
 
     def list_environments(self) -> tuple[dict[str, object], ...]:
         aliases = self.store.aliases()

@@ -8,8 +8,9 @@ from types import SimpleNamespace
 import pytest
 
 from lean_runtime.bundles import PortableCopyInfo
-from lean_runtime.cli import _print_operation_failure, main, parser
+from lean_runtime.cli import _print_operation_failure, _progress, main, parser
 from lean_runtime.errors import MaterializationError
+from lean_runtime.events import RuntimeEvent
 from lean_runtime.models import ExecutionResult
 from lean_runtime.verification import VerificationCheck, VerificationReport
 
@@ -40,11 +41,13 @@ def test_removed_v1_commands_are_absent() -> None:
 
 
 def test_project_sharing_commands_have_safe_defaults() -> None:
-    assert parser().parse_args(["init", "demo"]).mathlib == "latest"
-    init = parser().parse_args(["init", "demo", "--mathlib", "4.33.0"])
-    assert init.mathlib == "4.33.0"
+    assert parser().parse_args(["init", "demo"]).mathlib_version == "latest"
+    init = parser().parse_args(["init", "demo", "--mathlib-version", "4.33.0"])
+    assert init.mathlib_version == "4.33.0"
+    with pytest.raises(SystemExit):
+        parser().parse_args(["init", "--mathlib", "demo"])
     assert init.agents
-    assert parser().parse_args(["init", "demo", "--core"]).mathlib is None
+    assert parser().parse_args(["init", "demo", "--core"]).core
     assert parser().parse_args(["init", ".", "--name", "DemoProject"]).name == "DemoProject"
     assert not parser().parse_args(["init", "demo", "--no-agents"]).agents
     attach = parser().parse_args(["attach", "projects", "--recursive"])
@@ -60,7 +63,12 @@ def test_project_sharing_commands_have_safe_defaults() -> None:
     )
     assert policy.offline and policy.plan and policy.max_download == "500MiB"
     assert parser().parse_args(["scan"]).path == Path(".")
+    assert parser().parse_args(["project", "scan"]).path == Path(".")
     assert parser().parse_args(["check"]).inputs == []
+    publish = parser().parse_args(
+        ["publish", "environment", "lock.json", "--publish-to", "ghcr.io/example/envs"]
+    )
+    assert publish.publish_kind == "environment"
     with pytest.raises(SystemExit):
         parser().parse_args(["build", "demo", "--shared", "--local"])
 
@@ -119,6 +127,38 @@ def test_fileless_check_uses_the_current_project(monkeypatch, tmp_path: Path, ca
     assert "accepted:" in capsys.readouterr().out
 
 
+def test_watch_checks_immediately_and_stops_cleanly(monkeypatch, tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := by trivial\n")
+    result = ExecutionResult(
+        ok=True,
+        exit_code=0,
+        toolchain="leanprover/lean4:v4.33.0",
+        command=("lake", "env", "lean", "Main.lean"),
+        cwd=str(tmp_path),
+        stdout="",
+        stderr="",
+        elapsed_seconds=0.01,
+    )
+    checked: list[Path] = []
+
+    def check_file(_runtime, path, **_kwargs):
+        checked.append(path)
+        return result
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.check_file", check_file)
+    monkeypatch.setattr(
+        "lean_runtime.cli.time.sleep", lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
+
+    assert main(["check", str(source), "--watch"]) == 130
+    assert checked == [source]
+    output = capsys.readouterr()
+    assert "Watching" in output.out
+    assert "accepted:" in output.out
+    assert output.err == "lean-runtime: interrupted\n"
+
+
 def test_stdin_check_displays_a_logical_path(monkeypatch, tmp_path: Path, capsys) -> None:
     staged = ".lake/lean-runtime/check-abc/Main.lean"
     result = ExecutionResult(
@@ -146,6 +186,29 @@ def test_version_does_not_require_a_command(capsys) -> None:
         parser().parse_args(["--version"])
     assert stopped.value.code == 0
     assert capsys.readouterr().out.startswith("lean-runtime 2.")
+
+
+def test_progress_prints_sparse_frame_and_byte_counters(capsys) -> None:
+    _progress(
+        RuntimeEvent(
+            kind="library.layer_progress",
+            message="Downloading sparse capsule frames",
+            current_bytes=612 * 2**20,
+            total_bytes=2**30,
+            data={"frame_current": 132, "frame_total": 410},
+        )
+    )
+    assert capsys.readouterr().err == (
+        "lean-runtime: library.layer_progress: Downloading sparse capsule frames · "
+        "frames 132/410, 612 MiB/1 GiB\n"
+    )
+
+
+def test_completion_is_generated_from_current_commands(capsys) -> None:
+    assert main(["completion", "bash"]) == 0
+    output = capsys.readouterr().out
+    assert "complete -W" in output
+    assert "check" in output and "project" in output and "publish" in output
 
 
 def test_attach_plan_is_read_only(tmp_path: Path, capsys) -> None:
@@ -346,7 +409,7 @@ def test_save_copy_cli_reports_copy_identity(monkeypatch, tmp_path: Path, capsys
         path=str(output),
     )
     monkeypatch.setattr("lean_runtime.cli.Runtime.save_portable_copy", lambda *_args: info)
-    assert main(["--quiet", "save-copy", "demo", "--output", str(output)]) == 0
+    assert main(["--quiet", "copy", "save", "demo", "--output", str(output)]) == 0
     assert json.loads(capsys.readouterr().out)["copy_id"] == info.copy_id
 
 
