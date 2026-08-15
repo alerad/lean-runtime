@@ -87,6 +87,29 @@ class InitProjectToolchains(ProjectToolchains):
         return super().command(toolchain, executable, *args)
 
 
+class ImportBuildingToolchains(ProjectToolchains):
+    def command(self, toolchain: str, executable: str, *args: str) -> list[str]:
+        if executable == "lake" and args[:2] == ("env", "lean"):
+            script = (
+                "import pathlib,sys; source=pathlib.Path(sys.argv[1]); "
+                "artifact=pathlib.Path('.lake/build/lib/lean/Sample/Dependency.olean'); "
+                "missing='import Sample.Dependency' in source.read_text() "
+                "and not artifact.is_file(); "
+                "print(\"object file '.lake/build/lib/lean/Sample/Dependency.olean' of module "
+                'Sample.Dependency does not exist", file=sys.stderr) if missing else None; '
+                "raise SystemExit(1 if missing else 0)"
+            )
+            return [sys.executable, "-c", script, args[-1]]
+        if executable == "lake" and args[:1] == ("build",):
+            script = (
+                "import pathlib; artifact=pathlib.Path("
+                "'.lake/build/lib/lean/Sample/Dependency.olean'); "
+                "artifact.parent.mkdir(parents=True, exist_ok=True); artifact.write_bytes(b'olean')"
+            )
+            return [sys.executable, "-c", script]
+        return super().command(toolchain, executable, *args)
+
+
 def _project(root: Path, *, name: str = "sample") -> Path:
     root.mkdir(parents=True)
     (root / "lean-toolchain").write_text("leanprover/lean4:v4.32.0\n")
@@ -176,6 +199,36 @@ def test_discover_project_requires_lakefile_and_toolchain(tmp_path: Path) -> Non
     source.write_text("example : True := by trivial\n")
     with pytest.raises(ProjectError, match="no pinned Lake project"):
         discover_project(source)
+
+
+def test_runtime_check_file_suggests_toolchain_for_a_standalone_file(tmp_path: Path) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := by trivial\n")
+    runtime = Runtime(home=tmp_path / "runtime", libraries=[])
+
+    with pytest.raises(ProjectError, match=r"check FILE --toolchain v4\.33\.0"):
+        runtime.check_file(source)
+
+
+def test_check_builds_a_missing_local_import_then_retries(tmp_path: Path) -> None:
+    importer = _project(tmp_path / "project")
+    dependency = importer.parent / "Dependency.lean"
+    dependency.write_text("def localValue : Nat := 1\n")
+    importer.write_text("import Sample.Dependency\nexample : Nat := localValue\n")
+    events = []
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=ImportBuildingToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+        on_event=events.append,
+    )
+
+    result = runtime.check_file(importer)
+
+    assert result.ok
+    assert (tmp_path / "project/.lake/build/lib/lean/Sample/Dependency.olean").is_file()
+    assert any(event.kind == "project.check_dependency_build_started" for event in events)
+    assert result.timings[0].phase == "build"
 
 
 def test_project_wide_check_builds_only_lake_declared_library_artifacts(

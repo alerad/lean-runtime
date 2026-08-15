@@ -82,7 +82,9 @@ def test_project_preflight_reports_dirty_and_ambiguous_projects(tmp_path: Path) 
     assert not any("multiple importable roots" in blocker for blocker in selected.blockers)
 
 
-def test_project_preflight_rejects_non_github_and_nested_roots(tmp_path: Path) -> None:
+def test_project_preflight_accepts_self_hosted_origin_and_rejects_nested_roots(
+    tmp_path: Path,
+) -> None:
     project = _project(tmp_path / "project")
     subprocess.run(
         ["git", "-C", str(project), "remote", "set-url", "origin", "https://example.test/x"],
@@ -90,7 +92,9 @@ def test_project_preflight_rejects_non_github_and_nested_roots(tmp_path: Path) -
     )
     runtime = Runtime(home=tmp_path / "runtime", libraries=[])
     plan = runtime.inspect_project_publication(project)
-    assert any("GitHub" in blocker for blocker in plan.blockers)
+    assert plan.ready
+    assert plan.repository == "https://example.test/x"
+    assert plan.reference is None
 
     nested = project / "nested"
     nested.mkdir()
@@ -98,6 +102,45 @@ def test_project_preflight_rejects_non_github_and_nested_roots(tmp_path: Path) -
     (nested / "lakefile.toml").write_text('name = "nested"\n\n[[lean_lib]]\nname = "Nested"\n')
     plan = runtime.inspect_project_publication(nested)
     assert any("repository root" in blocker for blocker in plan.blockers)
+
+
+def test_project_preflight_accepts_local_bare_origin_and_proves_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _project(tmp_path / "project")
+    bare = tmp_path / "project.git"
+    subprocess.run(["git", "clone", "--quiet", "--bare", str(project), str(bare)], check=True)
+    subprocess.run(
+        ["git", "-C", str(project), "remote", "set-url", "origin", str(bare)],
+        check=True,
+    )
+
+    runtime = Runtime(home=tmp_path / "runtime", libraries=[])
+    plan = runtime.inspect_project_publication(project, check_remote=True)
+
+    assert plan.ready
+    assert plan.repository == bare.resolve().as_uri()
+    assert plan.reference is None
+
+    captured = None
+
+    def prepare(spec, *, timeout=900, cancel=None):  # type: ignore[no-untyped-def]
+        nonlocal captured
+        del timeout, cancel
+        captured = spec
+        return EnvironmentLock(
+            toolchain=spec.toolchain,
+            spec_digest=spec.spec_digest,
+            root_lakefile='name = "fixture"\n',
+            root_module="import Fixture\n",
+            manifest={"packages": []},
+            packages=(),
+        )
+
+    monkeypatch.setattr(runtime, "prepare", prepare)
+    runtime.prepare_project(project)
+    assert captured is not None
+    assert captured.packages[0].url == bare.resolve().as_uri()
 
 
 def test_prepare_project_uses_exact_commit_and_selected_module(

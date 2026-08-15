@@ -235,10 +235,12 @@ lean-runtime project init-publish . --module MyProject \
   --library ghcr.io/owner/my-project-environments
 ```
 
-`inspect` is read-only. The other commands require a clean root GitHub project
-whose exact HEAD commit is available from `origin`. `init-publish` creates a
-small caller for the maintained multi-platform publication and clean-consumer
-workflow. See [Publishing a Lean project](project-publishing.md).
+`inspect` is read-only. The other commands require a clean root Git project
+whose exact HEAD commit is available from its configured origin. GitHub,
+self-hosted HTTPS/SSH, and local bare repositories are supported.
+`init-publish` creates a small caller for the maintained multi-platform
+publication and clean-consumer workflow. See
+[Publishing a Lean project](project-publishing.md).
 
 Use global `--publisher_verification required --trusted-publisher ID --trusted-issuer ISSUER`
 to require a verified publisher. `build-and-publish --sign` records the trusted

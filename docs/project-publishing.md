@@ -1,6 +1,6 @@
 # Publishing a Lean project
 
-Lean Runtime can freeze a clean, pushed GitHub Lean project into an exact lock,
+Lean Runtime can freeze a clean Git-backed Lean project into an exact lock,
 build it on each supported computer type, and publish verified ready-to-use
 environments through an OCI-compatible library. Consumers import the project's
 public module without cloning or building the project.
@@ -24,7 +24,8 @@ Add `--check-remote` to prove that the exact HEAD commit is available from
 - a root `lakefile.toml` or `lakefile.lean` with an importable Lean library;
 - the Lake project at the Git repository root;
 - a clean checkout;
-- a GitHub `origin`; and
+- a fetchable `origin` (GitHub, self-hosted HTTPS/SSH, `file://`, or a local
+  bare repository); and
 - a HEAD commit available from that remote.
 
 If `lakefile.lean` must be translated, its pinned toolchain must already be
@@ -39,6 +40,12 @@ lean-runtime project lock . --module MyProject
 The default output is `environment.lock.json` in the project root. The lock
 contains the exact project commit, complete Lake dependency graph, toolchain,
 and selected public module.
+
+GitHub HTTPS and SSH origins are canonicalized to the portable HTTPS form and
+receive a `github:OWNER/REPOSITORY@COMMIT` convenience reference. Other origins
+are preserved as exact Git sources. Relative local paths become absolute
+`file://` URLs, which is useful for offline export but intentionally remains
+machine-local unless the resulting capsule is distributed.
 
 ## Export this computer
 

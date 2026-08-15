@@ -777,7 +777,7 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     install.add_argument("toolchain")
 
     project = commands.add_parser(
-        "project", help="inspect, freeze, or export a pinned GitHub Lean project"
+        "project", help="inspect, freeze, or export a pinned Git-backed Lean project"
     )
     project_commands = project.add_subparsers(dest="project_command", required=True)
     project_inspect = project_commands.add_parser(

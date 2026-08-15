@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.parse
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -56,15 +57,27 @@ def _git(root: Path, *arguments: str) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def _github_url(value: str) -> str:
+def _publication_url(value: str, *, root: Path) -> str:
     match = _GITHUB_HTTPS.fullmatch(value) or _GITHUB_SSH.fullmatch(value)
-    if match is None:
-        raise ProjectError(
-            "project origin must be a GitHub HTTPS or SSH URL; "
-            "set origin to github.com/OWNER/REPOSITORY before publishing"
-        )
-    repository = match.group("repo").removesuffix(".git")
-    return f"https://github.com/{match.group('owner')}/{repository}.git"
+    if match is not None:
+        repository = match.group("repo").removesuffix(".git")
+        return f"https://github.com/{match.group('owner')}/{repository}.git"
+    if not value or value.startswith("-"):
+        raise ProjectError("project origin is not a usable Git remote")
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme:
+        if parsed.scheme not in {"file", "git", "http", "https", "ssh"}:
+            raise ProjectError("project origin must use file, git, HTTP(S), or SSH transport")
+        if parsed.scheme != "file" and not parsed.netloc:
+            raise ProjectError("project origin URL has no host")
+        return value
+    # SCP-style SSH remotes are understood by Git but not by urlsplit.
+    if re.fullmatch(r"[^/@:]+@[^/:]+:.+", value):
+        return value
+    local = Path(value).expanduser()
+    if not local.is_absolute():
+        local = root / local
+    return local.resolve().as_uri()
 
 
 def _lake_metadata(path: Path, toolchain: str, runtime: Runtime) -> tuple[str, tuple[str, ...]]:
@@ -156,7 +169,7 @@ def _remote_contains_commit(url: str, revision: str, directory: Path) -> None:
                 )
             except subprocess.TimeoutExpired as exc:
                 raise ProjectError(
-                    "timed out proving that HEAD is available from the GitHub origin"
+                    "timed out proving that HEAD is available from the configured origin"
                 ) from exc
         if process.returncode:
             detail = (process.stdout + process.stderr).strip()
@@ -189,7 +202,8 @@ class ProjectPublicationPlan:
         if self.repository is None or self.revision is None:
             return None
         match = _GITHUB_HTTPS.fullmatch(self.repository)
-        assert match is not None
+        if match is None:
+            return None
         owner = match.group("owner")
         repository = match.group("repo").removesuffix(".git")
         return f"github:{owner}/{repository}@{self.revision}"
@@ -223,7 +237,7 @@ def inspect_project_publication(
     module: str | None = None,
     check_remote: bool = False,
 ) -> ProjectPublicationPlan:
-    """Assess whether a clean root GitHub project can become an exact environment."""
+    """Assess whether a clean root Git project can become an exact environment."""
     context = discover_project(path)
     root = context.root
     blockers: list[str] = []
@@ -245,7 +259,7 @@ def inspect_project_publication(
         blockers.append("Git remote 'origin' is not configured")
     else:
         try:
-            repository = _github_url(origin)
+            repository = _publication_url(origin, root=root)
         except ProjectError as exc:
             blockers.append(str(exc))
     package, modules = _lake_metadata(root, context.toolchain, runtime)

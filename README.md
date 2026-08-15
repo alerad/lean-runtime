@@ -226,7 +226,7 @@ lean-runtime build-and-publish environment.lock.json \
   --publish-to ghcr.io/owner/lean-environments
 ```
 
-To publish an existing clean, pushed GitHub Lean project, inspect it and
+To publish an existing clean Git-backed Lean project, inspect it and
 generate the maintained multi-platform workflow:
 
 ```bash
