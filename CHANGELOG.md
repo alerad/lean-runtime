@@ -17,6 +17,8 @@
   fingerprinted storage accounting with `storage --verify`, cleanup nudges,
   `clean --keep-last` retention, curated help, and generated Bash/Zsh/Fish
   completions.
+- Report cumulative frame and byte counters while restoring sparse capsules, so
+  both terse and verbose cold-start output shows measurable forward progress.
 
 ## 2.7.0 - 2026-08-14
 

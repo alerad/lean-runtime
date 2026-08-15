@@ -250,7 +250,17 @@ def _render_update_plan(plan: ProjectUpdatePlan) -> None:
 
 def _progress(event: RuntimeEvent) -> None:
     package = f" [{event.data['package']}]" if "package" in event.data else ""
-    print(f"lean-runtime: {event.kind}{package}: {event.message}", file=sys.stderr)
+    counters: list[str] = []
+    frame_current = event.data.get("frame_current")
+    frame_total = event.data.get("frame_total")
+    if isinstance(frame_current, int) and isinstance(frame_total, int):
+        counters.append(f"frames {frame_current}/{frame_total}")
+    if event.current_bytes is not None and event.total_bytes is not None:
+        counters.append(
+            f"{format_byte_size(event.current_bytes)}/{format_byte_size(event.total_bytes)}"
+        )
+    progress = f" · {', '.join(counters)}" if counters else ""
+    print(f"lean-runtime: {event.kind}{package}: {event.message}{progress}", file=sys.stderr)
 
 
 def _print_operation_failure(exc: ResolutionError | MaterializationError, *, verbose: bool) -> None:

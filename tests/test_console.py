@@ -123,6 +123,49 @@ def test_tty_mode_redraws_one_line_and_finishes_it() -> None:
     assert output.endswith("Downloaded and verified environment\n")
 
 
+def test_sparse_frame_progress_shows_aggregate_bytes_and_frame_count() -> None:
+    renderer, stream = _renderer("tty")
+    renderer(_event("acquisition.planned", download_bytes=1000, cached_bytes=0))
+    renderer(
+        _event(
+            "library.layer_progress",
+            "Downloading sparse capsule frames",
+            digest="sha256:a",
+            current_bytes=250,
+            total_bytes=1000,
+            frame_current=1,
+            frame_total=4,
+        )
+    )
+    assert "25% · 250 B/1000 B · frames 1/4" in stream.getvalue()
+
+
+def test_sparse_frame_progress_is_informative_in_plain_and_verbose_modes() -> None:
+    plain, plain_stream = _renderer("plain")
+    plain(_event("acquisition.planned", download_bytes=1000, cached_bytes=0))
+    event = _event(
+        "library.layer_progress",
+        "Downloading sparse capsule frames",
+        digest="sha256:a",
+        current_bytes=500,
+        total_bytes=1000,
+        frame_current=2,
+        frame_total=4,
+    )
+    plain(event)
+    assert plain_stream.getvalue().splitlines()[-2:] == [
+        "Downloaded 25% · frames 2/4",
+        "Downloaded 50% · frames 2/4",
+    ]
+
+    verbose, verbose_stream = _renderer("plain", verbose=True)
+    verbose(event)
+    assert verbose_stream.getvalue().strip() == (
+        "library.layer_progress: Downloading sparse capsule frames "
+        "[500 B/1000 B] [frames 2/4] (digest=sha256:a)"
+    )
+
+
 def test_retry_and_resume_are_visible() -> None:
     renderer, stream = _renderer("plain")
     renderer(_event("library.layer_download_started", resumed_bytes=2048, size=4096))

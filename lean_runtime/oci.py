@@ -825,6 +825,9 @@ class OCIEnvironmentCache:
         # Bound both concurrency and buffered compressed data. Eight parallel
         # range reads hide registry round-trip latency without turning a full
         # Mathlib closure into thousands of serial HTTP requests.
+        downloaded_frame_bytes = 0
+        total_frame_bytes = sum(frame.size for _descriptor, frame in missing_frames)
+        completed_frames = 0
         for offset in range(0, len(missing_frames), 8):
             batch = missing_frames[offset : offset + 8]
             with ThreadPoolExecutor(max_workers=len(batch)) as executor:
@@ -847,13 +850,17 @@ class OCIEnvironmentCache:
                     self.store.cas_artifacts,
                     lock_root=self.store.lock_dir,
                 )
+                downloaded_frame_bytes += frame.size
+                completed_frames += 1
                 self.events.emit(
                     "library.layer_progress",
                     "Downloading sparse capsule frames",
                     phase="download",
-                    current_bytes=frame.size,
-                    total_bytes=frame.size,
+                    current_bytes=downloaded_frame_bytes,
+                    total_bytes=total_frame_bytes,
                     digest=frame.digest,
+                    frame_current=completed_frames,
+                    frame_total=len(missing_frames),
                 )
 
         environment_id = environment_identity(lock)

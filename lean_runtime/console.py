@@ -145,22 +145,31 @@ class ConsoleRenderer:
         digest = str(event.data.get("digest", ""))
         if event.current_bytes is None or self._download_total is None:
             return
-        self._layer_bytes[digest] = event.current_bytes
-        done = min(sum(self._layer_bytes.values()), self._download_total)
+        frame_current = event.data.get("frame_current")
+        frame_total = event.data.get("frame_total")
+        aggregate_frames = isinstance(frame_current, int) and isinstance(frame_total, int)
+        if aggregate_frames and event.total_bytes is not None:
+            done = event.current_bytes
+            total = event.total_bytes
+        else:
+            self._layer_bytes[digest] = event.current_bytes
+            done = min(sum(self._layer_bytes.values()), self._download_total)
+            total = self._download_total
         if self.mode == "tty":
             now = self._clock()
             if (
                 self._last_redraw is not None
-                and done < self._download_total
+                and done < total
                 and now - self._last_redraw < _TTY_REDRAW_SECONDS
             ):
                 return
             self._last_redraw = now
-            self._draw_bar(done, self._download_total)
+            self._draw_bar(done, total, frame_progress=(frame_current, frame_total))
         else:
-            percent = done * 100 // self._download_total
+            percent = done * 100 // total
             while self._next_checkpoint <= percent:
-                self._print(f"Downloaded {self._next_checkpoint}%")
+                frames = f" · frames {frame_current}/{frame_total}" if aggregate_frames else ""
+                self._print(f"Downloaded {self._next_checkpoint}%{frames}")
                 self._next_checkpoint += _PLAIN_CHECKPOINT_PERCENT
 
     def _render_library_layer_download_started(self, event: RuntimeEvent) -> None:
@@ -214,20 +223,32 @@ class ConsoleRenderer:
             parts.append(
                 f"[{format_byte_size(event.current_bytes)}/{format_byte_size(event.total_bytes)}]"
             )
+        frame_current = event.data.get("frame_current")
+        frame_total = event.data.get("frame_total")
+        if isinstance(frame_current, int) and isinstance(frame_total, int):
+            parts.append(f"[frames {frame_current}/{frame_total}]")
         if event.data:
-            details = " ".join(f"{key}={value}" for key, value in sorted(event.data.items()))
-            parts.append(f"({details})")
+            details = " ".join(
+                f"{key}={value}"
+                for key, value in sorted(event.data.items())
+                if key not in {"frame_current", "frame_total"}
+            )
+            if details:
+                parts.append(f"({details})")
         self._print(" ".join(parts))
 
-    def _draw_bar(self, done: int, total: int) -> None:
+    def _draw_bar(
+        self, done: int, total: int, *, frame_progress: tuple[object, object] | None = None
+    ) -> None:
         filled = _BAR_WIDTH * done // total if total else _BAR_WIDTH
         bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
         percent = done * 100 // total if total else 100
         sizes = f"{format_byte_size(done)}/{format_byte_size(total)}"
-        plain = f"Downloading [{bar}] {percent}% · {sizes}"
+        frames = f" · frames {frame_progress[0]}/{frame_progress[1]}" if frame_progress else ""
+        plain = f"Downloading [{bar}] {percent}% · {sizes}{frames}"
         line = (
             f"Downloading [{self.style.cyan(bar)}] "
-            f"{self.style.bold(f'{percent}%')} · {self.style.dim(sizes)}"
+            f"{self.style.bold(f'{percent}%')} · {self.style.dim(sizes + frames)}"
         )
         padding = " " * max(0, self._line_length - len(plain))
         self.stream.write("\r" + line + padding)

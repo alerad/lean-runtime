@@ -8,8 +8,9 @@ from types import SimpleNamespace
 import pytest
 
 from lean_runtime.bundles import PortableCopyInfo
-from lean_runtime.cli import _print_operation_failure, main, parser
+from lean_runtime.cli import _print_operation_failure, _progress, main, parser
 from lean_runtime.errors import MaterializationError
+from lean_runtime.events import RuntimeEvent
 from lean_runtime.models import ExecutionResult
 from lean_runtime.verification import VerificationCheck, VerificationReport
 
@@ -185,6 +186,22 @@ def test_version_does_not_require_a_command(capsys) -> None:
         parser().parse_args(["--version"])
     assert stopped.value.code == 0
     assert capsys.readouterr().out.startswith("lean-runtime 2.")
+
+
+def test_progress_prints_sparse_frame_and_byte_counters(capsys) -> None:
+    _progress(
+        RuntimeEvent(
+            kind="library.layer_progress",
+            message="Downloading sparse capsule frames",
+            current_bytes=612 * 2**20,
+            total_bytes=2**30,
+            data={"frame_current": 132, "frame_total": 410},
+        )
+    )
+    assert capsys.readouterr().err == (
+        "lean-runtime: library.layer_progress: Downloading sparse capsule frames · "
+        "frames 132/410, 612 MiB/1 GiB\n"
+    )
 
 
 def test_completion_is_generated_from_current_commands(capsys) -> None:
