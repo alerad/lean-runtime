@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.8.0 - 2026-08-14
+
 - Cut repeated project-check latency with capability-probed Lean header snapshots;
   `check --watch` rechecks on save, while `check --repeat` and `check --across`
   absorb the common profile/matrix workflows without removing legacy aliases.
