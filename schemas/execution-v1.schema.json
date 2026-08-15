@@ -111,7 +111,7 @@
     },
     "execution": {
       "type": "object",
-      "required": ["ok", "exit_code", "toolchain", "command", "cwd", "stdout", "stderr", "elapsed_seconds", "timed_out", "cancelled", "output_truncated", "diagnostics", "provenance", "timings"],
+      "required": ["ok", "exit_code", "toolchain", "command", "cwd", "stdout", "stderr", "elapsed_seconds", "timed_out", "cancelled", "output_truncated", "diagnostics", "provenance", "timings", "hints"],
       "additionalProperties": false,
       "properties": {
         "ok": {"type": "boolean"},
@@ -127,7 +127,8 @@
         "output_truncated": {"type": "boolean"},
         "diagnostics": {"type": "array", "items": {"$ref": "#/$defs/diagnostic"}},
         "provenance": {"anyOf": [{"$ref": "#/$defs/provenance"}, {"type": "null"}]},
-        "timings": {"type": "array", "items": {"$ref": "#/$defs/timing"}}
+        "timings": {"type": "array", "items": {"$ref": "#/$defs/timing"}},
+        "hints": {"type": "array", "items": {"type": "string"}}
       }
     }
   }

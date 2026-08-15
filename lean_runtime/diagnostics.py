@@ -10,7 +10,7 @@ from .models import Diagnostic, Severity
 
 _HEADER = re.compile(
     r"^(?P<file>.*?):(?P<line>\d+):(?P<column>\d+): "
-    r"(?P<severity>error|warning|information):\s*(?P<message>.*)$"
+    r"(?P<severity>error|warning|information)(?:\([^)]*\))?:\s*(?P<message>.*)$"
 )
 
 

@@ -34,3 +34,12 @@ def test_map_diagnostic_paths_is_identity_without_a_map() -> None:
     diagnostics = parse_diagnostics("Main.lean:1:1: error: boom\n")
     assert map_diagnostic_paths(diagnostics, None) is diagnostics
     assert map_diagnostic_paths(diagnostics, {}) is diagnostics
+
+
+def test_parse_diagnostics_accepts_lean_diagnostic_codes() -> None:
+    diagnostics = parse_diagnostics(
+        "Main.lean:2:7: error(lean.unknownIdentifier): Unknown identifier `missing`\n"
+    )
+
+    assert diagnostics[0].severity == "error"
+    assert diagnostics[0].message == "Unknown identifier `missing`"

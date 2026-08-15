@@ -149,6 +149,7 @@ class ExecutionResult:
     diagnostics: tuple[Diagnostic, ...] = field(default_factory=tuple)
     provenance: ExecutionProvenance | None = None
     timings: tuple[PhaseTiming, ...] = field(default_factory=tuple)
+    hints: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def errors(self) -> tuple[Diagnostic, ...]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from datetime import datetime
@@ -274,6 +275,8 @@ def _emit_result(
     if result.stderr:
         stderr = _display_result_text(result.stderr, result, display_path)
         print(stderr, end="" if stderr.endswith("\n") else "\n", file=sys.stderr)
+    for hint in result.hints:
+        print(f"hint: {hint}", file=sys.stderr)
     status = "accepted" if result.ok else "rejected"
     environment = f" environment={result.environment_id}" if result.environment_id else ""
     print(
@@ -289,6 +292,14 @@ def _policy(arguments: argparse.Namespace) -> ExecutionPolicy:
         memory_mb=arguments.memory,
         cpu_seconds=arguments.cpu,
         network=arguments.network,
+    )
+
+
+def _mathlib_version(value: str) -> str:
+    if value == "latest" or re.fullmatch(r"\d+\.\d+\.\d+", value):
+        return value
+    raise argparse.ArgumentTypeError(
+        "expected a version such as 4.33.0; put the project path immediately after `init`"
     )
 
 
@@ -475,6 +486,10 @@ def parser() -> argparse.ArgumentParser:
         "--include", action="append", default=[], type=Path, help="additional Lean source file"
     )
     check.add_argument("--json", action="store_true")
+    check.add_argument(
+        "--watch", action="store_true", help="re-check FILE on save using warm import snapshots"
+    )
+    check.add_argument("--watch-interval", type=float, default=0.2, help=argparse.SUPPRESS)
     _add_policy(check)
 
     inspect = commands.add_parser("inspect", help="inspect a published environment")
@@ -573,17 +588,17 @@ def parser() -> argparse.ArgumentParser:
     init.add_argument("--name", help="explicit Lake package and root module name")
     init_context = init.add_mutually_exclusive_group()
     init_context.add_argument(
+        "--mathlib-version",
         "--mathlib",
-        nargs="?",
-        const="latest",
+        dest="mathlib_version",
+        metavar="VERSION",
+        type=_mathlib_version,
         default="latest",
-        help="use the newest cataloged Mathlib, or select a version such as 4.33.0",
+        help="select a cataloged Mathlib version; the newest stable is the default",
     )
     init_context.add_argument(
         "--core",
-        dest="mathlib",
-        action="store_const",
-        const=None,
+        action="store_true",
         help="create a core-only project",
     )
     init.add_argument("--toolchain")
@@ -675,6 +690,8 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.command == "init":
+        args.mathlib = None if args.core else args.mathlib_version
     operation_started = time.monotonic()
     display_path: str | None = None
     try:
@@ -1217,6 +1234,34 @@ def main(argv: list[str] | None = None) -> int:
                 _render_cleanup(gc_report, gc_downloads)
             return 0
         if args.command == "check":
+            if args.watch:
+                if args.json:
+                    raise ValueError("check --watch does not support --json; use one-shot check")
+                if (
+                    args.package_refs
+                    or args.include
+                    or len(args.inputs) != 1
+                    or args.inputs[0] == "-"
+                ):
+                    raise ValueError("check --watch requires exactly one project FILE")
+                watched = Path(args.inputs[0]).expanduser().resolve()
+                if not watched.is_file():
+                    raise ValueError(f"watched Lean file does not exist: {watched}")
+                print(f"Watching {watched} · Ctrl-C to stop")
+                previous: tuple[int, int] | None = None
+                while True:
+                    stat = watched.stat()
+                    signature = (stat.st_mtime_ns, stat.st_size)
+                    if signature != previous:
+                        previous = signature
+                        watched_result = runtime.check_file(
+                            watched,
+                            toolchain=args.toolchain,
+                            project=args.project,
+                            policy=_policy(args),
+                        )
+                        _emit_result(watched_result, False)
+                    time.sleep(args.watch_interval)
             if args.project is not None and args.package_refs:
                 raise ValueError("check cannot combine --project with --with")
             if not args.inputs:

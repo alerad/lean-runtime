@@ -40,11 +40,13 @@ def test_removed_v1_commands_are_absent() -> None:
 
 
 def test_project_sharing_commands_have_safe_defaults() -> None:
-    assert parser().parse_args(["init", "demo"]).mathlib == "latest"
-    init = parser().parse_args(["init", "demo", "--mathlib", "4.33.0"])
-    assert init.mathlib == "4.33.0"
+    assert parser().parse_args(["init", "demo"]).mathlib_version == "latest"
+    init = parser().parse_args(["init", "demo", "--mathlib-version", "4.33.0"])
+    assert init.mathlib_version == "4.33.0"
+    with pytest.raises(SystemExit):
+        parser().parse_args(["init", "--mathlib", "demo"])
     assert init.agents
-    assert parser().parse_args(["init", "demo", "--core"]).mathlib is None
+    assert parser().parse_args(["init", "demo", "--core"]).core
     assert parser().parse_args(["init", ".", "--name", "DemoProject"]).name == "DemoProject"
     assert not parser().parse_args(["init", "demo", "--no-agents"]).agents
     attach = parser().parse_args(["attach", "projects", "--recursive"])
@@ -117,6 +119,38 @@ def test_fileless_check_uses_the_current_project(monkeypatch, tmp_path: Path, ca
     assert main(["--home", str(tmp_path / "runtime"), "check", "--timeout", "15"]) == 0
     assert observed == [(Path("."), None, 15.0)]
     assert "accepted:" in capsys.readouterr().out
+
+
+def test_watch_checks_immediately_and_stops_cleanly(monkeypatch, tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := by trivial\n")
+    result = ExecutionResult(
+        ok=True,
+        exit_code=0,
+        toolchain="leanprover/lean4:v4.33.0",
+        command=("lake", "env", "lean", "Main.lean"),
+        cwd=str(tmp_path),
+        stdout="",
+        stderr="",
+        elapsed_seconds=0.01,
+    )
+    checked: list[Path] = []
+
+    def check_file(_runtime, path, **_kwargs):
+        checked.append(path)
+        return result
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.check_file", check_file)
+    monkeypatch.setattr(
+        "lean_runtime.cli.time.sleep", lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
+
+    assert main(["check", str(source), "--watch"]) == 130
+    assert checked == [source]
+    output = capsys.readouterr()
+    assert "Watching" in output.out
+    assert "accepted:" in output.out
+    assert output.err == "lean-runtime: interrupted\n"
 
 
 def test_stdin_check_displays_a_logical_path(monkeypatch, tmp_path: Path, capsys) -> None:
