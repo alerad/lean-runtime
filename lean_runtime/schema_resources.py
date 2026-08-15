@@ -13,6 +13,7 @@ SCHEMA_NAMES = frozenset(
         "inspect-v1.schema.json",
         "matrix-v1.schema.json",
         "profile-v1.schema.json",
+        "publication-v1.schema.json",
         "verify-v1.schema.json",
     }
 )

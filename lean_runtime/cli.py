@@ -55,6 +55,7 @@ def _schema_for(command: str) -> str:
         "matrix": "lean-runtime.matrix/v1",
         "clean": "lean-runtime.cleanup/v1",
         "inspect": "lean-runtime.inspect/v1",
+        "build-and-publish": "lean-runtime.publication/v1",
     }.get(command, "lean-runtime.execution/v1")
 
 
@@ -441,6 +442,9 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     publish_environment.add_argument("--sign", action="store_true")
     publish_environment.add_argument("--attest", action="store_true")
     publish_environment.add_argument(
+        "--json", action="store_true", help="emit a versioned JSON envelope"
+    )
+    publish_environment.add_argument(
         "--check-access",
         action="store_true",
         help="verify registry push access without building or publishing",
@@ -526,6 +530,7 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     push.add_argument(
         "--attest", action="store_true", help="publish a signed source/probe attestation"
     )
+    push.add_argument("--json", action="store_true", help="emit a versioned JSON envelope")
     push.add_argument(
         "--check-access",
         action="store_true",
@@ -1187,7 +1192,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "build-and-publish":
             access = runtime.check_publication_access(args.publish_to)
             if args.check_access:
-                _json(access.to_dict())
+                _json(
+                    envelope(_schema_for(args.command), ok=True, data=access.to_dict())
+                    if args.json
+                    else access.to_dict()
+                )
                 return 0
             if args.lock is None:
                 raise ValueError("publish environment requires LOCK unless --check-access is used")
@@ -1208,7 +1217,11 @@ def main(argv: list[str] | None = None) -> int:
             publication["consumer_command"] = (
                 f"lean-runtime --library {args.publish_to} download {args.lock}"
             )
-            _json(publication)
+            _json(
+                envelope(_schema_for(args.command), ok=True, data=publication)
+                if args.json
+                else publication
+            )
             return 0
         if args.command == "finalize-publication":
             descriptors = []
@@ -1686,7 +1699,7 @@ def main(argv: list[str] | None = None) -> int:
                 envelope(
                     _schema_for(args.command),
                     ok=False,
-                    data={"publication": exc.to_dict()},
+                    data=exc.to_dict(),
                     errors=[error("publication_failed", str(exc), details=exc.to_dict())],
                 )
             )

@@ -318,6 +318,64 @@ def test_publish_check_access_needs_no_lock(monkeypatch, capsys) -> None:
     assert output["credential_source"] == "GitHub CLI"
 
 
+def test_publish_failure_json_is_a_versioned_envelope(monkeypatch, capsys) -> None:
+    def denied(_self, _library: str) -> PublicationAccess:
+        raise PublicationError(
+            "registry denied push access",
+            phase="access_preflight",
+            registry="ghcr.io/owner/cache",
+            status_code=403,
+            credential_source="GitHub CLI",
+            username="owner",
+            hint="refresh scopes",
+        )
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.check_publication_access", denied)
+    result = main(
+        [
+            "publish",
+            "environment",
+            "--publish-to",
+            "oci://ghcr.io/owner/cache",
+            "--check-access",
+            "--json",
+        ]
+    )
+
+    assert result == 3
+    output = json.loads(capsys.readouterr().out)
+    assert output["schema"] == "lean-runtime.publication/v1"
+    assert output["ok"] is False
+    assert output["data"]["published"] is False
+    assert output["data"]["status_code"] == 403
+    assert output["errors"][0]["code"] == "publication_failed"
+
+
+def test_publish_access_json_is_a_versioned_envelope(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        "lean_runtime.cli.Runtime.check_publication_access",
+        lambda _self, _library: PublicationAccess(
+            "ghcr.io/owner/cache", "owner", "GitHub CLI", True
+        ),
+    )
+    result = main(
+        [
+            "publish",
+            "environment",
+            "--publish-to",
+            "oci://ghcr.io/owner/cache",
+            "--check-access",
+            "--json",
+        ]
+    )
+
+    assert result == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["schema"] == "lean-runtime.publication/v1"
+    assert output["ok"] is True
+    assert output["data"]["push_verified"] is True
+
+
 def test_verbose_materialization_failure_includes_tool_output(capsys) -> None:
     failure = MaterializationError(
         "environment build failed",

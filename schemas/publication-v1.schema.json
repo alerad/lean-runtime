@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lean-runtime.dev/schemas/publication-v1.schema.json",
+  "type": "object",
+  "required": ["schema", "ok", "data", "warnings", "errors"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "lean-runtime.publication/v1"},
+    "ok": {"type": "boolean"},
+    "data": {
+      "oneOf": [
+        {"$ref": "#/$defs/access"},
+        {"$ref": "#/$defs/publication"},
+        {"$ref": "#/$defs/failure"},
+        {"type": "object", "maxProperties": 0}
+      ]
+    },
+    "warnings": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"},
+    "errors": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"}
+  },
+  "$defs": {
+    "access": {
+      "type": "object",
+      "required": ["registry", "username", "credential_source", "push_verified"],
+      "additionalProperties": false,
+      "properties": {
+        "registry": {"type": "string"},
+        "username": {"type": ["string", "null"]},
+        "credential_source": {"type": "string"},
+        "push_verified": {"type": "boolean"}
+      }
+    },
+    "publication": {
+      "type": "object",
+      "required": ["library", "exact_environment_id", "environment_id", "computer_copy_id", "publication_id", "uploaded_files", "total_blob_bytes", "uploaded_bytes", "reused_bytes", "reuse_percent", "computer_record", "consumer_command"],
+      "additionalProperties": false,
+      "properties": {
+        "library": {"type": "string"},
+        "exact_environment_id": {"type": "string"},
+        "environment_id": {"type": "string"},
+        "computer_copy_id": {"type": "string"},
+        "publication_id": {"type": ["string", "null"]},
+        "uploaded_files": {"type": "integer", "minimum": 0},
+        "total_blob_bytes": {"type": "integer", "minimum": 0},
+        "uploaded_bytes": {"type": "integer", "minimum": 0},
+        "reused_bytes": {"type": "integer", "minimum": 0},
+        "reuse_percent": {"type": "number", "minimum": 0, "maximum": 100},
+        "computer_record": {"type": "object"},
+        "consumer_command": {"type": "string"}
+      }
+    },
+    "failure": {
+      "type": "object",
+      "required": ["phase", "registry", "status_code", "retryable", "published", "partial", "credential_source", "username", "hint", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "phase": {"type": "string"},
+        "registry": {"type": "string"},
+        "status_code": {"type": ["integer", "null"]},
+        "retryable": {"type": "boolean"},
+        "published": {"type": "boolean"},
+        "partial": {"type": "boolean"},
+        "credential_source": {"type": "string"},
+        "username": {"type": ["string", "null"]},
+        "hint": {"type": ["string", "null"]},
+        "message": {"type": "string"}
+      }
+    }
+  }
+}

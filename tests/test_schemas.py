@@ -42,6 +42,7 @@ def test_every_v1_schema_compiles_eagerly() -> None:
         "inspect-v1.schema",
         "matrix-v1.schema",
         "profile-v1.schema",
+        "publication-v1.schema",
         "verify-v1.schema",
     }
     for path in paths:
@@ -78,6 +79,7 @@ def test_every_v1_schema_accepts_its_closed_error_envelope() -> None:
         "inspect": "lean-runtime.inspect/v1",
         "matrix": "lean-runtime.matrix/v1",
         "profile": "lean-runtime.profile/v1",
+        "publication": "lean-runtime.publication/v1",
         "verify": "lean-runtime.verify/v1",
     }
     for name, identifier in schemas.items():
@@ -119,6 +121,62 @@ def test_inspect_and_gc_success_fixtures_are_closed() -> None:
         },
     )
     _validator("cleanup-v1.schema.json").validate(gc)
+
+
+def test_publication_access_and_failure_fixtures_match_v1_schema() -> None:
+    validator = _validator("publication-v1.schema.json")
+    validator.validate(
+        envelope(
+            "lean-runtime.publication/v1",
+            ok=True,
+            data={
+                "registry": "oci://ghcr.io/owner/cache",
+                "username": "owner",
+                "credential_source": "GitHub CLI",
+                "push_verified": True,
+            },
+        )
+    )
+    validator.validate(
+        envelope(
+            "lean-runtime.publication/v1",
+            ok=True,
+            data={
+                "library": "oci://ghcr.io/owner/cache",
+                "exact_environment_id": "lock_abc",
+                "environment_id": "env_abc",
+                "computer_copy_id": "sha256:" + "a" * 64,
+                "publication_id": "sha256:" + "b" * 64,
+                "uploaded_files": 1,
+                "total_blob_bytes": 10,
+                "uploaded_bytes": 4,
+                "reused_bytes": 6,
+                "reuse_percent": 60.0,
+                "computer_record": {},
+                "consumer_command": "lean-runtime download environment.lock.json",
+            },
+        )
+    )
+    failure = {
+        "phase": "access_preflight",
+        "registry": "oci://ghcr.io/owner/cache",
+        "status_code": 403,
+        "retryable": False,
+        "published": False,
+        "partial": False,
+        "credential_source": "GitHub CLI",
+        "username": "owner",
+        "hint": "refresh scopes",
+        "message": "registry denied push access",
+    }
+    validator.validate(
+        envelope(
+            "lean-runtime.publication/v1",
+            ok=False,
+            data=failure,
+            errors=[error("publication_failed", failure["message"], details=failure)],
+        )
+    )
 
 
 def test_timing_phase_vocabulary_and_duration_are_bounded() -> None:
