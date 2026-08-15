@@ -29,7 +29,10 @@ lean-runtime check ./my-project/MyProject/Main.lean
 ```
 
 The actual project-relative file is passed to `lake env lean`, so imports of
-local modules retain normal Lake semantics. Checking a source string writes a
+local modules retain normal Lake semantics. A successful file check does not
+itself write that file's `.olean`; if another checked file imports a local
+module whose artifact is missing, Lean Runtime asks Lake to build that module's
+`leanArts` target and retries once. Checking a source string writes a
 uniquely named disposable file under `.lake/lean-runtime/` and removes it after
 execution:
 

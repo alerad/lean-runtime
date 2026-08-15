@@ -188,6 +188,17 @@ def test_version_does_not_require_a_command(capsys) -> None:
     assert capsys.readouterr().out.startswith("lean-runtime 2.")
 
 
+def test_standalone_check_error_suggests_an_exact_toolchain(tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := by trivial\n")
+
+    assert main(["--home", str(tmp_path / "runtime"), "check", str(source)]) == 2
+
+    error = capsys.readouterr().err
+    assert "--toolchain v4.33.0" in error
+    assert "Traceback" not in error
+
+
 def test_progress_prints_sparse_frame_and_byte_counters(capsys) -> None:
     _progress(
         RuntimeEvent(

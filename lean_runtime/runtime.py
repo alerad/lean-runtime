@@ -1107,9 +1107,14 @@ class Runtime:
                     source_path, policy=selected_policy, cancel=cancel
                 )
             if toolchain is None:
-                return self.project(source_path).check_file(
-                    source_path, policy=selected_policy, cancel=cancel
-                )
+                try:
+                    local_project = self.project(source_path)
+                except ProjectError as exc:
+                    raise ProjectError(
+                        f"{exc}\nFor a standalone Lean file, pass an exact toolchain, for example "
+                        "`lean-runtime check FILE --toolchain v4.33.0`."
+                    ) from exc
+                return local_project.check_file(source_path, policy=selected_policy, cancel=cancel)
         return self.check(
             source_path.read_text(encoding="utf-8"),
             filename=source_path.name,
@@ -2058,7 +2063,7 @@ class Runtime:
         timeout: float = 900,
         cancel: threading.Event | None = None,
     ) -> EnvironmentLock:
-        """Freeze a clean, remotely available GitHub project into an exact lock."""
+        """Freeze a clean project available from its Git origin into an exact lock."""
         plan = self.inspect_project_publication(
             path, module=module, check_remote=True
         ).require_ready()

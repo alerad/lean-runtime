@@ -115,6 +115,11 @@ lean-run Main.lean
 then lets Lean determine which candidate accepts the source. Use
 `--lock-out environment.lock.json` to pin the successful environment.
 
+The lower-level `lean-runtime check Main.lean` command does not guess a
+toolchain for a standalone file. Pass one explicitly, for example
+`lean-runtime check Main.lean --toolchain v4.33.0`, or use `lean-run` for
+catalog discovery.
+
 Strict TOML frontmatter remains available when the context is already known:
 
 ```lean

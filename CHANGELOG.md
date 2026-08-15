@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Make standalone `check FILE` failures point directly to `--toolchain`, and
+  have project checks ask Lake to materialize a missing local import before one
+  automatic retry.
+- Accept any fetchable Git origin for immutable project locks and local exports,
+  including self-hosted and local bare repositories; GitHub origins retain
+  their canonical `github:` convenience reference.
+
 ## 2.8.0 - 2026-08-14
 
 - Cut repeated project-check latency with capability-probed Lean header snapshots;

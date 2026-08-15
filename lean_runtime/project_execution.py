@@ -9,11 +9,13 @@ its artifact cache without changing the public ``Runtime`` API.
 
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,11 +26,42 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
     import tomli as tomllib
 
 from .errors import ProjectError
-from .models import ExecutionResult
+from .models import ExecutionResult, PhaseTiming
 from .policies import ExecutionPolicy
 from .project_sharing import project_sharing_enabled
 from .projects import ProjectContext
 from .serialization import sha256_text
+
+_MISSING_MODULE = re.compile(
+    r"object file .*? of module [`'\"]?(?P<module>[A-Za-z_][A-Za-z0-9_'.]*)[`'\"]? "
+    r"does not exist"
+)
+_MODULE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*")
+_IMPORT = re.compile(r"^\s*(?:public\s+)?import\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _source_imports(source: str) -> tuple[str, ...]:
+    imports: list[str] = []
+    for match in _IMPORT.finditer(source):
+        for token in match.group(1).split():
+            if _MODULE_NAME.fullmatch(token) is not None and token not in imports:
+                imports.append(token)
+    return tuple(imports)
+
+
+def _local_module_exists(root: Path, module: str) -> bool:
+    relative = Path(*module.split(".")).with_suffix(".lean")
+    if (root / relative).is_file():
+        return True
+    for current, directories, filenames in os.walk(root):
+        directories[:] = [name for name in directories if name not in {".git", ".lake"}]
+        if relative.name not in filenames:
+            continue
+        candidate = Path(current) / relative.name
+        if candidate.parts[-len(relative.parts) :] == relative.parts:
+            return True
+    return False
+
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -54,20 +87,24 @@ class ProjectExecutor:
         )
         text = source.read_text(encoding="utf-8")
         provenance = context.provenance()
-        with self.runtime.header_cache.command(
-            context.toolchain, provenance.workspace_digest, text, command
-        ) as selected_command:
-            result = self.runtime._raw_result(
-                selected_command,
-                cwd=context.root,
-                toolchain=context.toolchain,
-                source_digest=sha256_text(text),
-                policy=policy,
-                project=provenance,
-                packages=context.package_provenance(),
-                logical_command=("lake", "env", "lean", relative),
-                cancel=cancel,
-            )
+
+        def run() -> ExecutionResult:
+            with self.runtime.header_cache.command(
+                context.toolchain, provenance.workspace_digest, text, command
+            ) as selected_command:
+                return self.runtime._raw_result(
+                    selected_command,
+                    cwd=context.root,
+                    toolchain=context.toolchain,
+                    source_digest=sha256_text(text),
+                    policy=policy,
+                    project=provenance,
+                    packages=context.package_provenance(),
+                    logical_command=("lake", "env", "lean", relative),
+                    cancel=cancel,
+                )
+
+        result = self._build_missing_local_import(context, text, run(), run, policy, cancel)
         return self._with_identifier_hints(context, result)
 
     def check_source(
@@ -92,22 +129,79 @@ class ProjectExecutor:
                 context.toolchain, "lake", "env", "lean", relative
             )
             provenance = context.provenance()
-            with self.runtime.header_cache.command(
-                context.toolchain, provenance.workspace_digest, source, command
-            ) as selected_command:
-                result = self.runtime._raw_result(
-                    selected_command,
-                    cwd=context.root,
-                    toolchain=context.toolchain,
-                    source_digest=sha256_text(source),
-                    policy=policy,
-                    project=provenance,
-                    packages=context.package_provenance(),
-                    logical_command=("lake", "env", "lean", safe_filename),
-                    path_map={relative: safe_filename, str(source_path): safe_filename},
-                    cancel=cancel,
-                )
+
+            def run() -> ExecutionResult:
+                with self.runtime.header_cache.command(
+                    context.toolchain, provenance.workspace_digest, source, command
+                ) as selected_command:
+                    return self.runtime._raw_result(
+                        selected_command,
+                        cwd=context.root,
+                        toolchain=context.toolchain,
+                        source_digest=sha256_text(source),
+                        policy=policy,
+                        project=provenance,
+                        packages=context.package_provenance(),
+                        logical_command=("lake", "env", "lean", safe_filename),
+                        path_map={relative: safe_filename, str(source_path): safe_filename},
+                        cancel=cancel,
+                    )
+
+            result = self._build_missing_local_import(context, source, run(), run, policy, cancel)
             return self._with_identifier_hints(context, result)
+
+    def _build_missing_local_import(
+        self,
+        context: ProjectContext,
+        source: str,
+        result: ExecutionResult,
+        retry: Callable[[], ExecutionResult],
+        policy: ExecutionPolicy,
+        cancel: threading.Event | None,
+    ) -> ExecutionResult:
+        """Let Lake materialize one missing local import, then retry the check once."""
+        if result.ok or result.cancelled:
+            return result
+        output = "\n".join(
+            (result.stdout, result.stderr, *(item.message for item in result.diagnostics))
+        )
+        candidates = [match.group("module") for match in _MISSING_MODULE.finditer(output)]
+        if "unknown module prefix" in output or (
+            "failed to open file" in output and ".olean" in output and "No such file" in output
+        ):
+            candidates.extend(_source_imports(source))
+        modules: list[str] = []
+        for module in candidates:
+            if _local_module_exists(context.root, module) and module not in modules:
+                modules.append(module)
+        if not modules:
+            return result
+        self.runtime.events.emit(
+            "project.check_dependency_build_started",
+            f"Building missing local import artifacts: {', '.join(modules)}",
+            phase="build",
+            modules=modules,
+        )
+        built = self.build(
+            context,
+            targets=tuple(f"{module}:leanArts" for module in modules),
+            policy=policy,
+            cancel=cancel,
+        )
+        preparation_seconds = result.elapsed_seconds + built.elapsed_seconds
+        preparation_timing = PhaseTiming("build", round(preparation_seconds * 1000))
+        if not built.ok:
+            return replace(
+                built,
+                elapsed_seconds=preparation_seconds,
+                timings=(preparation_timing,),
+            )
+        retried = retry()
+        return replace(
+            retried,
+            elapsed_seconds=preparation_seconds + retried.elapsed_seconds,
+            timings=(preparation_timing, *retried.timings),
+        )
 
     def _with_identifier_hints(
         self, context: ProjectContext, result: ExecutionResult
