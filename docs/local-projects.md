@@ -66,7 +66,9 @@ copy. `build` retains Lake's complete target semantics.
 
 The generated files are a standard Lake project plus a small
 `lean-runtime.toml`. Root build outputs stay local; exact dependencies are
-shared. The newest stable cataloged Mathlib is selected by default. Select a
+shared. The generated root imports only its local `Basic` module, leaving
+implementation files free to select precise Mathlib modules. The newest stable
+cataloged Mathlib is selected by default. Select a
 release with `--mathlib 4.33.0`, or use `--core` for a core-only library.
 `init` also creates an `AGENTS.md` describing the safe
 build and dependency workflow unless `--no-agents` is passed; it never

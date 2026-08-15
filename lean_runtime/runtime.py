@@ -1908,14 +1908,6 @@ class Runtime:
                         'git = "https://github.com/leanprover-community/mathlib4.git"\n'
                         f'rev = "v{version}"\n'
                     )
-                roots = [source for source in staging.glob("*.lean") if source.name != "Main.lean"]
-                if len(roots) != 1:
-                    raise ProjectError("Lake did not create one unambiguous library root")
-                root_source = roots[0]
-                root_source.write_text(
-                    "import Mathlib\n" + root_source.read_text(encoding="utf-8"),
-                    encoding="utf-8",
-                )
             manifest_path.write_text(
                 json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )

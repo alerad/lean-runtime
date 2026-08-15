@@ -248,14 +248,32 @@ def _cli_source_name(path: Path) -> str:
     return path.as_posix()
 
 
-def _emit_result(result: ExecutionResult, as_json: bool) -> None:
+def _display_result_text(text: str, result: ExecutionResult, display_path: str | None) -> str:
+    """Rewrite only the staged entrypoint when the CLI has a logical input name."""
+    if display_path is None or not result.command:
+        return text
+    staged = result.command[-1]
+    candidates = {staged}
+    staged_path = Path(staged)
+    if not staged_path.is_absolute():
+        candidates.add(str(Path(result.cwd) / staged_path))
+    for candidate in sorted(candidates, key=len, reverse=True):
+        text = text.replace(candidate, display_path)
+    return text
+
+
+def _emit_result(
+    result: ExecutionResult, as_json: bool, *, display_path: str | None = None
+) -> None:
     if as_json:
         _json(serialize_execution_v1(result))
         return
     if result.stdout:
-        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+        stdout = _display_result_text(result.stdout, result, display_path)
+        print(stdout, end="" if stdout.endswith("\n") else "\n")
     if result.stderr:
-        print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
+        stderr = _display_result_text(result.stderr, result, display_path)
+        print(stderr, end="" if stderr.endswith("\n") else "\n", file=sys.stderr)
     status = "accepted" if result.ok else "rejected"
     environment = f" environment={result.environment_id}" if result.environment_id else ""
     print(
@@ -658,6 +676,7 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     operation_started = time.monotonic()
+    display_path: str | None = None
     try:
         selected_availability = (
             "local" if args.command in {"init", "update"} and args.offline else args.availability
@@ -714,7 +733,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Shared packages: {init_result.packages}")
                 if args.agents:
                     print(f"Agent guide: {init_result.root / 'AGENTS.md'}")
-                print(f"Next: cd {init_result.root} && lean-runtime build")
+                project_name = init_plan.project_name or init_result.root.name
+                print(
+                    f"Next: cd {init_result.root} && lean-runtime check {project_name}/Basic.lean"
+                )
             return 0
         if args.command == "scan":
             scan_result = runtime.scan_projects(args.path, recursive=args.recursive)
@@ -1214,6 +1236,7 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError("local project checks do not accept --include")
                 source_file = Path(args.inputs[0])
                 if str(source_file) == "-":
+                    display_path = "<stdin>"
                     result = runtime.check(
                         sys.stdin.read(),
                         toolchain=args.toolchain,
@@ -1253,6 +1276,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
         elif args.command == "check-file":
             if str(args.file) == "-":
+                display_path = "<stdin>"
                 result = runtime.check(
                     sys.stdin.read(),
                     toolchain=args.toolchain,
@@ -1309,7 +1333,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"lean-runtime: {exc}", file=sys.stderr)
         return 2
-    _emit_result(result, args.json)
+    _emit_result(result, args.json, display_path=display_path)
     if args.timings:
         print(render_timings(result.timings), file=sys.stderr)
     return 0 if result.ok else 1
