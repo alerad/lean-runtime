@@ -15,7 +15,13 @@ from typing import Any, cast
 
 from .console import styler_for
 from .environments import ExecutionCapture
-from .errors import LeanRuntimeError, MaterializationError, ProjectError, ResolutionError
+from .errors import (
+    LeanRuntimeError,
+    MaterializationError,
+    ProjectError,
+    PublicationError,
+    ResolutionError,
+)
 from .events import RuntimeEvent
 from .health import DoctorReport
 from .lake import ROOT_MODULE
@@ -276,6 +282,31 @@ def _print_operation_failure(exc: ResolutionError | MaterializationError, *, ver
         print(exc.output.rstrip(), file=sys.stderr)
 
 
+def _print_publication_failure(exc: PublicationError) -> None:
+    status = f" (HTTP {exc.status_code})" if exc.status_code is not None else ""
+    print(
+        f"✗ Publication failed at {exc.registry} during {exc.phase}{status}",
+        file=sys.stderr,
+    )
+    print(f"  {exc}", file=sys.stderr)
+    identity = exc.username or "anonymous"
+    print(
+        f"  Authentication: {identity} (source: {exc.credential_source})",
+        file=sys.stderr,
+    )
+    if exc.partial:
+        print(
+            "  No verified final release was produced; immutable platform content may exist.",
+            file=sys.stderr,
+        )
+        print("  Safe to retry the publication; verified content will be reused.", file=sys.stderr)
+    else:
+        print("  Nothing was published: no manifest or index was finalized.", file=sys.stderr)
+        print("  Safe to retry; completed blobs will be reused.", file=sys.stderr)
+    if exc.hint:
+        print(f"  Fix: {exc.hint}", file=sys.stderr)
+
+
 def _cli_source_name(path: Path) -> str:
     if path.is_absolute():
         return path.name
@@ -400,7 +431,7 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     publish = commands.add_parser("publish", help="publish an environment, toolchain, or program")
     publish_kinds = publish.add_subparsers(dest="publish_kind", required=True)
     publish_environment = publish_kinds.add_parser("environment")
-    publish_environment.add_argument("lock", type=Path)
+    publish_environment.add_argument("lock", nargs="?", type=Path)
     publish_environment.add_argument("--publish-to", required=True)
     publish_environment.add_argument("--tag", action="append", default=[])
     publish_environment.add_argument("--name")
@@ -409,6 +440,11 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     publish_environment.add_argument("--accelerate", action="store_true")
     publish_environment.add_argument("--sign", action="store_true")
     publish_environment.add_argument("--attest", action="store_true")
+    publish_environment.add_argument(
+        "--check-access",
+        action="store_true",
+        help="verify registry push access without building or publishing",
+    )
     publish_toolchain = publish_kinds.add_parser("toolchain")
     publish_toolchain.add_argument("toolchain")
     publish_toolchain.add_argument("--library", required=True)
@@ -464,7 +500,7 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     push = commands.add_parser(
         "build-and-publish", help="build an exact environment and publish it to a library"
     )
-    push.add_argument("lock", type=Path)
+    push.add_argument("lock", nargs="?", type=Path)
     push.add_argument("--publish-to", required=True)
     push.add_argument("--tag", action="append", default=[])
     push.add_argument("--name")
@@ -489,6 +525,11 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     push.add_argument("--sign", action="store_true", help="sign the published lock index")
     push.add_argument(
         "--attest", action="store_true", help="publish a signed source/probe attestation"
+    )
+    push.add_argument(
+        "--check-access",
+        action="store_true",
+        help="verify registry push access without building or publishing",
     )
 
     publish_index = commands.add_parser(
@@ -1144,22 +1185,30 @@ def main(argv: list[str] | None = None) -> int:
             _json(environment.inspect().to_dict())
             return 0
         if args.command == "build-and-publish":
+            access = runtime.check_publication_access(args.publish_to)
+            if args.check_access:
+                _json(access.to_dict())
+                return 0
+            if args.lock is None:
+                raise ValueError("publish environment requires LOCK unless --check-access is used")
             environment = runtime.open_exact(
                 EnvironmentLock.load(args.lock),
                 name=args.name,
                 build_timeout=args.timeout,
                 accelerate=args.accelerate,
             )
-            _json(
-                runtime.publish_environment(
-                    environment.id,
-                    args.publish_to,
-                    tags=args.tag,
-                    finalize=not args.platform_only,
-                    sign=args.sign,
-                    attest=args.attest,
-                ).to_dict()
+            publication = runtime.publish_environment(
+                environment.id,
+                args.publish_to,
+                tags=args.tag,
+                finalize=not args.platform_only,
+                sign=args.sign,
+                attest=args.attest,
+            ).to_dict()
+            publication["consumer_command"] = (
+                f"lean-runtime --library {args.publish_to} download {args.lock}"
             )
+            _json(publication)
             return 0
         if args.command == "finalize-publication":
             descriptors = []
@@ -1631,6 +1680,19 @@ def main(argv: list[str] | None = None) -> int:
         else:
             _print_operation_failure(exc, verbose=args.verbose)
         return 2
+    except PublicationError as exc:
+        if getattr(args, "json", False):
+            _json(
+                envelope(
+                    _schema_for(args.command),
+                    ok=False,
+                    data={"publication": exc.to_dict()},
+                    errors=[error("publication_failed", str(exc), details=exc.to_dict())],
+                )
+            )
+        else:
+            _print_publication_failure(exc)
+        return exc.exit_code
     except (LeanRuntimeError, OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         if getattr(args, "json", False):
             _json(

@@ -113,24 +113,68 @@ Signature failure is an integrity failure and never triggers source fallback.
 
 ## Publishing
 
+Check push access without building or uploading an environment:
+
+```bash
+lean-runtime publish environment \
+  --publish-to ghcr.io/alerad/leancert-runtime \
+  --check-access
+```
+
+For GHCR, credentials are selected in this order: the
+`LEAN_RUNTIME_REGISTRY_USERNAME` / `LEAN_RUNTIME_REGISTRY_PASSWORD` pair, an
+authenticated GitHub CLI session, then anonymous access. The access report names
+the selected account and source but never prints the token. Lean Runtime does not
+implicitly read Docker's credential store. To give the GitHub CLI package access,
+run:
+
+```bash
+gh auth refresh -s write:packages,read:packages
+```
+
 Publish the current platform after ensuring the lock:
 
 ```bash
 export LEAN_RUNTIME_REGISTRY_USERNAME=alerad
 export LEAN_RUNTIME_REGISTRY_PASSWORD="$GHCR_TOKEN"
 
-lean-runtime build-and-publish environment.lock.json \
+lean-runtime publish environment environment.lock.json \
   --publish-to ghcr.io/alerad/leancert-runtime \
   --tag v4.32.2.4 \
   --sign --attest
 ```
 
-The publisher checks for existing blobs, uploads only missing content, publishes
-the platform manifest by digest, and updates the canonical `lock_<sha>` index
-tag last. Human tags are aliases to that same index. This follows the
+The same push-access probe runs automatically before the environment is built,
+so a missing scope fails in seconds instead of after export. The probe starts
+and immediately cancels an empty OCI upload session; it publishes no manifest or
+index. The publisher then checks for existing blobs, uploads only missing
+content, publishes the platform manifest by digest, and updates the canonical
+`lock_<sha>` index tag last. Every manifest is fetched back and its digest is
+verified before success is reported. Human tags are aliases to that same index.
+This follows the
 [OCI Distribution Specification](https://github.com/opencontainers/distribution-spec/blob/main/spec.md)
 and uses an [OCI image index](https://github.com/opencontainers/image-spec/blob/main/image-index.md)
 for platform selection.
+
+Publication has stable failure codes for CI:
+
+| Exit | Meaning | Retry? |
+|---:|---|---|
+| `2` | Invalid invocation or local input | Fix the invocation |
+| `3` | Registry authentication or permission denial | Fix credentials/scopes first |
+| `4` | Retryable network, throttling, or registry 5xx failure | Yes, with backoff |
+| `5` | Partial or indeterminate publication state | Inspect the terminal state, then retry safely |
+
+An unpublished failure explicitly states that no manifest or index was
+finalized; already uploaded content-addressed blobs are unreferenced and safe to
+reuse on retry. Once a manifest write has been attempted, any failure that
+cannot prove the resulting remote state is reported as partial/indeterminate;
+it is never reported as success. Registries do not use status codes
+uniformly: in particular, GHCR can return 403 for missing permissions as well as
+an inaccessible or not-yet-created package namespace, so diagnostics describe
+these as likely causes rather than certainties. Automation can consume the same
+state from the terminal `library.publish_failed` or `library.published` runtime
+event.
 
 Repository authors can use the bundled composite action after checking out the
 repository and generating or retaining a lock:

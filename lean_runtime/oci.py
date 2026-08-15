@@ -8,15 +8,18 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 from .bundles import (
     CAPSULE_BUNDLE_SCHEMA,
@@ -25,7 +28,13 @@ from .bundles import (
     _capsule_config_object,
 )
 from .capsules import CapsuleManifest
-from .errors import DownloadLimitExceeded, DownloadUnavailable, EnvironmentError
+from .errors import (
+    DownloadLimitExceeded,
+    DownloadUnavailable,
+    EnvironmentError,
+    PublicationError,
+    RegistryRequestError,
+)
 from .events import EventEmitter
 from .lockfiles import EnvironmentLock
 from .locking import FileLock
@@ -53,6 +62,73 @@ _DIGEST = re.compile(r"sha256:([0-9a-f]{64})")
 _ACCEPT = ", ".join((INDEX_MEDIA_TYPE, MANIFEST_MEDIA_TYPE))
 DEFAULT_ENVIRONMENT_LIBRARIES = ("oci://ghcr.io/alerad/lean-runtime-cache",)
 _BLOB_INTEGRITY_ATTEMPTS = 4
+_T = TypeVar("_T")
+
+
+@dataclass(frozen=True, slots=True)
+class RegistryCredential:
+    username: str | None
+    password: str | None
+    source: str
+
+    @property
+    def authenticated(self) -> bool:
+        return self.username is not None and self.password is not None
+
+    @classmethod
+    def discover(cls, repository: OCIRepository) -> RegistryCredential:
+        username = os.environ.get("LEAN_RUNTIME_REGISTRY_USERNAME")
+        password = os.environ.get("LEAN_RUNTIME_REGISTRY_PASSWORD")
+        if username is not None or password is not None:
+            if not username or not password:
+                raise EnvironmentError(
+                    "registry credentials require both LEAN_RUNTIME_REGISTRY_USERNAME "
+                    "and LEAN_RUNTIME_REGISTRY_PASSWORD"
+                )
+            return cls(username, password, "environment")
+        if repository.registry == "ghcr.io" and shutil.which("gh") is not None:
+            try:
+                token = subprocess.run(
+                    ("gh", "auth", "token", "--hostname", "github.com"),
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                identity = subprocess.run(
+                    ("gh", "api", "user", "--jq", ".login"),
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            else:
+                selected_token = token.stdout.strip()
+                selected_username = identity.stdout.strip()
+                if (
+                    token.returncode == 0
+                    and identity.returncode == 0
+                    and selected_token
+                    and selected_username
+                ):
+                    return cls(selected_username, selected_token, "GitHub CLI")
+        return cls(None, None, "anonymous")
+
+
+def _request_failure(operation: str, exc: BaseException) -> RegistryRequestError:
+    if isinstance(exc, urllib.error.HTTPError):
+        retryable = exc.code in {408, 429} or 500 <= exc.code < 600
+        return RegistryRequestError(
+            f"OCI {operation} failed: HTTP {exc.code}",
+            operation=operation,
+            status_code=exc.code,
+            retryable=retryable,
+        )
+    return RegistryRequestError(
+        f"OCI {operation} failed: {exc}", operation=operation, retryable=True
+    )
 
 
 def capsule_reference(lock_id: str) -> str:
@@ -218,6 +294,30 @@ class OCIRegistryClient:
             )
             retry.add_header("Authorization", f"Bearer {token}")
             return self._opener.open(retry, timeout=self.timeout)
+
+    def check_push_access(self) -> None:
+        """Prove repository push access with an empty, immediately cancelled upload."""
+        request = urllib.request.Request(self._url("blobs/uploads/"), data=b"", method="POST")
+        try:
+            with self._request(request) as response:
+                # A registry may complete a zero-byte upload immediately.
+                if response.status == 201:
+                    return
+                if response.status != 202:
+                    raise EnvironmentError("OCI registry did not accept the access probe")
+                location = response.headers.get("Location")
+                upload_url = urllib.parse.urljoin(response.url, location) if location else None
+            if upload_url is not None:
+                cleanup = urllib.request.Request(upload_url, method="DELETE")
+                try:
+                    with self._request(cleanup):
+                        pass
+                except (urllib.error.HTTPError, OSError):
+                    # Upload sessions expire and contain no content. Cleanup is
+                    # best-effort because registries vary on DELETE support.
+                    pass
+        except (urllib.error.HTTPError, OSError) as exc:
+            raise _request_failure("push access probe", exc) from exc
 
     def manifest(self, reference: str) -> ManifestResponse:
         encoded = urllib.parse.quote(reference, safe=":")
@@ -491,9 +591,9 @@ class OCIRegistryClient:
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return False
-            raise DownloadUnavailable(f"OCI blob lookup failed: HTTP {exc.code}") from exc
+            raise _request_failure("blob lookup", exc) from exc
         except OSError as exc:
-            raise DownloadUnavailable(f"OCI registry is unavailable: {exc}") from exc
+            raise _request_failure("blob lookup", exc) from exc
 
     def manifest_exists(self, digest: str) -> bool:
         encoded = urllib.parse.quote(digest, safe=":")
@@ -506,9 +606,9 @@ class OCIRegistryClient:
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return False
-            raise DownloadUnavailable(f"OCI manifest lookup failed: HTTP {exc.code}") from exc
+            raise _request_failure("manifest lookup", exc) from exc
         except OSError as exc:
-            raise DownloadUnavailable(f"OCI registry is unavailable: {exc}") from exc
+            raise _request_failure("manifest lookup", exc) from exc
 
     def upload_blob(self, path: Path, digest: str) -> None:
         if _digest_path(path) != digest:
@@ -534,9 +634,9 @@ class OCIRegistryClient:
                     if response.status != 201:
                         raise EnvironmentError("OCI registry did not accept the blob upload")
         except urllib.error.HTTPError as exc:
-            raise DownloadUnavailable(f"OCI blob upload failed: HTTP {exc.code}") from exc
+            raise _request_failure("blob upload", exc) from exc
         except OSError as exc:
-            raise DownloadUnavailable(f"OCI blob upload failed: {exc}") from exc
+            raise _request_failure("blob upload", exc) from exc
 
     def publish_manifest(self, reference: str, data: bytes, media_type: str) -> str:
         digest = "sha256:" + hashlib.sha256(data).hexdigest()
@@ -550,12 +650,24 @@ class OCIRegistryClient:
                     raise EnvironmentError("OCI registry did not accept the manifest")
                 recorded = response.headers.get("Docker-Content-Digest")
         except urllib.error.HTTPError as exc:
-            raise DownloadUnavailable(f"OCI manifest upload failed: HTTP {exc.code}") from exc
+            raise _request_failure("manifest upload", exc) from exc
         except OSError as exc:
-            raise DownloadUnavailable(f"OCI manifest upload failed: {exc}") from exc
+            raise _request_failure("manifest upload", exc) from exc
         if recorded is not None and recorded != digest:
             raise EnvironmentError("OCI registry reported a mismatched published manifest digest")
-        return digest
+        last_error: DownloadUnavailable | None = None
+        for attempt in range(4):
+            try:
+                remote = self.manifest(reference)
+            except DownloadUnavailable as exc:
+                last_error = exc
+            else:
+                if remote.digest == digest:
+                    return digest
+            if attempt < 3:
+                time.sleep(0.25 * (2**attempt))
+        detail = f": {last_error}" if last_error is not None else ""
+        raise EnvironmentError(f"published OCI manifest failed remote digest verification{detail}")
 
 
 def _json_object(data: bytes, label: str) -> dict[str, Any]:
@@ -1068,6 +1180,22 @@ class PublicationInfo:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PublicationAccess:
+    registry: str
+    username: str | None
+    credential_source: str
+    push_verified: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "registry": self.registry,
+            "username": self.username,
+            "credential_source": self.credential_source,
+            "push_verified": self.push_verified,
+        }
+
+
 class OCIEnvironmentPublisher:
     def __init__(
         self,
@@ -1080,7 +1208,146 @@ class OCIEnvironmentPublisher:
         self.store = store
         self.bundles = bundles
         self.events = events
-        self.client = OCIRegistryClient(repository)
+        self.credential = RegistryCredential.discover(repository)
+        self.client = OCIRegistryClient(
+            repository,
+            username=self.credential.username,
+            password=self.credential.password,
+        )
+        self._access: PublicationAccess | None = None
+        self._manifest_attempted = False
+        self._platform_published = False
+        self._index_published = False
+
+    def _auth_hint(self, status_code: int | None) -> str | None:
+        if status_code not in {401, 403}:
+            return None
+        if self.repository.registry == "ghcr.io":
+            if self.credential.source == "GitHub CLI":
+                return "run `gh auth refresh -s write:packages,read:packages`, then retry"
+            if self.credential.source == "environment":
+                return (
+                    "set LEAN_RUNTIME_REGISTRY_USERNAME and "
+                    "LEAN_RUNTIME_REGISTRY_PASSWORD to a token with write:packages"
+                )
+            return (
+                "authenticate with `gh auth login`, then run "
+                "`gh auth refresh -s write:packages,read:packages`"
+            )
+        return (
+            "set LEAN_RUNTIME_REGISTRY_USERNAME and LEAN_RUNTIME_REGISTRY_PASSWORD "
+            "for this registry"
+        )
+
+    def _publication_failure(self, exc: BaseException, *, phase: str) -> PublicationError:
+        status_code = exc.status_code if isinstance(exc, RegistryRequestError) else None
+        retryable = (
+            exc.retryable if isinstance(exc, RegistryRequestError) else isinstance(exc, OSError)
+        )
+        partial = self._manifest_attempted or self._platform_published or self._index_published
+        if status_code in {401, 403}:
+            identity = self.credential.username or "anonymous"
+            qualification = (
+                "; GHCR may also return 403 for an inaccessible or not-yet-created "
+                "package namespace"
+                if self.repository.registry == "ghcr.io" and status_code == 403
+                else ""
+            )
+            message = (
+                f"registry denied {phase} for {self.repository.display} as {identity} "
+                f"(HTTP {status_code}); most likely the credentials lack repository push access"
+                f"{qualification}"
+            )
+        elif partial:
+            message = (
+                f"publication was not finalized during {phase}: {exc}; immutable platform "
+                "content may exist, but no verified final release was produced"
+            )
+        else:
+            message = f"publication failed during {phase}: {exc}"
+        failure = PublicationError(
+            message,
+            phase=phase,
+            registry=self.repository.display,
+            status_code=status_code,
+            retryable=retryable,
+            published=False,
+            partial=partial,
+            credential_source=self.credential.source,
+            username=self.credential.username,
+            hint=self._auth_hint(status_code),
+        )
+        self.events.emit(
+            "library.publish_failed",
+            message,
+            phase=phase,
+            registry=failure.registry,
+            status_code=failure.status_code,
+            retryable=failure.retryable,
+            published=False,
+            partial=failure.partial,
+            credential_source=failure.credential_source,
+            username=failure.username,
+            hint=failure.hint,
+        )
+        return failure
+
+    def fail(self, exc: BaseException, *, phase: str) -> PublicationError:
+        """Record a required post-publication phase as a terminal failure."""
+        return self._publication_failure(exc, phase=phase)
+
+    def complete(self, result: PublicationInfo) -> None:
+        """Emit success only after every requested publication phase has passed."""
+        digest = result.publication_id or result.computer_copy_id
+        self.events.emit(
+            "library.published",
+            "Published and remotely verified downloadable environment",
+            registry=self.repository.display,
+            reference=f"{self.repository.display}@{digest}",
+            exact_environment_id=result.exact_environment_id,
+            environment_id=result.environment_id,
+            index_digest=result.publication_id,
+            uploaded_bytes=result.uploaded_bytes,
+            reused_bytes=result.reused_bytes,
+            published=True,
+            partial=False,
+            remotely_verified=True,
+        )
+
+    def _required(self, phase: str, operation: Callable[[], _T]) -> _T:
+        try:
+            return operation()
+        except PublicationError:
+            raise
+        except (EnvironmentError, OSError) as exc:
+            raise self._publication_failure(exc, phase=phase) from exc
+
+    def check_access(self) -> PublicationAccess:
+        if self._access is not None:
+            return self._access
+        identity = self.credential.username or "anonymous"
+        self.events.emit(
+            "library.publish_auth_selected",
+            f"Authenticating to {self.repository.registry} as {identity} "
+            f"(source: {self.credential.source})",
+            registry=self.repository.display,
+            username=self.credential.username,
+            credential_source=self.credential.source,
+            authenticated=self.credential.authenticated,
+        )
+        self._required("access_preflight", self.client.check_push_access)
+        self._access = PublicationAccess(
+            self.repository.display,
+            self.credential.username,
+            self.credential.source,
+            True,
+        )
+        self.events.emit(
+            "library.publish_access_verified",
+            "Registry push access verified",
+            **self._access.to_dict(),
+        )
+        return self._access
 
     def publish(
         self,
@@ -1090,8 +1357,29 @@ class OCIEnvironmentPublisher:
         finalize: bool = True,
         profile: str = "full",
     ) -> PublicationInfo:
+        try:
+            return self._publish(
+                environment_id,
+                tags=tags,
+                finalize=finalize,
+                profile=profile,
+            )
+        except PublicationError:
+            raise
+        except (EnvironmentError, OSError) as exc:
+            raise self._publication_failure(exc, phase="local_preparation") from exc
+
+    def _publish(
+        self,
+        environment_id: str,
+        *,
+        tags: tuple[str, ...] = (),
+        finalize: bool = True,
+        profile: str = "full",
+    ) -> PublicationInfo:
         if profile not in {"full", "check-capsule"}:
             raise ValueError("publication profile must be 'full' or 'check-capsule'")
+        self.check_access()
         with tempfile.TemporaryDirectory(prefix="lean-runtime-publish-") as temporary:
             temporary_root = Path(temporary)
             layout_root = temporary_root / "layout"
@@ -1154,14 +1442,17 @@ class OCIEnvironmentPublisher:
                 if not isinstance(size, int) or size < 0 or blob.stat().st_size != size:
                     raise EnvironmentError("exported OCI blob descriptor has an invalid size")
                 total_blob_bytes += size
-                existed = self.client.blob_exists(digest)
+                existed = self._required("blob_lookup", partial(self.client.blob_exists, digest))
                 self.events.emit(
                     "library.layer_reused" if existed else "library.layer_upload_started",
                     "Reusing remote OCI blob" if existed else "Uploading OCI blob",
                     digest=digest,
                     size=size,
                 )
-                self.client.upload_blob(blob, digest)
+                self._required(
+                    "blob_upload",
+                    partial(self.client.upload_blob, blob, digest),
+                )
                 uploaded += int(not existed)
                 uploaded_bytes += 0 if existed else size
                 if not existed:
@@ -1171,11 +1462,16 @@ class OCIEnvironmentPublisher:
                         digest=digest,
                         size=size,
                     )
-            manifest_digest = self.client.publish_manifest(
-                str(manifest_descriptor["digest"]), manifest_data, MANIFEST_MEDIA_TYPE
+            self._manifest_attempted = True
+            manifest_digest = self._required(
+                "platform_manifest",
+                lambda: self.client.publish_manifest(
+                    str(manifest_descriptor["digest"]), manifest_data, MANIFEST_MEDIA_TYPE
+                ),
             )
             if manifest_digest != manifest_descriptor["digest"]:
                 raise EnvironmentError("published platform manifest digest changed")
+            self._platform_published = True
             self.events.emit(
                 "library.platform_manifest_published",
                 "Published the computer-specific OCI manifest",
@@ -1189,14 +1485,6 @@ class OCIEnvironmentPublisher:
                 )
                 if finalize
                 else None
-            )
-            self.events.emit(
-                "library.published",
-                "Published downloadable environment",
-                registry=self.repository.display,
-                exact_environment_id=bundle_info.exact_environment_id,
-                environment_id=environment_id,
-                index_digest=index_digest,
             )
             return PublicationInfo(
                 self.repository.display,
@@ -1223,6 +1511,7 @@ class OCIEnvironmentPublisher:
             raise ValueError(f"invalid lock identity: {lock_id!r}")
         if not platform_descriptors:
             raise ValueError("an OCI index requires at least one platform manifest")
+        self.check_access()
         platforms: set[tuple[str, str, str]] = set()
         for descriptor in platform_descriptors:
             if descriptor.get("mediaType") != MANIFEST_MEDIA_TYPE:
@@ -1240,7 +1529,10 @@ class OCIEnvironmentPublisher:
                 raise ValueError(f"duplicate OCI platform result: {'/'.join(key)}")
             platforms.add(key)
             digest = descriptor.get("digest")
-            if not isinstance(digest, str) or not self.client.manifest_exists(digest):
+            if not isinstance(digest, str) or not self._required(
+                "platform_manifest_verification",
+                partial(self.client.manifest_exists, digest),
+            ):
                 raise EnvironmentError(f"platform manifest is not published: {digest!r}")
         selected_profile = profile or (
             "check-capsule"
@@ -1269,9 +1561,19 @@ class OCIEnvironmentPublisher:
             }
         )
         reference = capsule_reference(lock_id) if selected_profile == "check-capsule" else lock_id
-        index_digest = self.client.publish_manifest(reference, index_data, INDEX_MEDIA_TYPE)
         for tag in tags:
             if not tag or len(tag) > 128 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", tag):
                 raise ValueError(f"invalid OCI tag: {tag!r}")
-            self.client.publish_manifest(tag, index_data, INDEX_MEDIA_TYPE)
+        self._manifest_attempted = True
+        index_digest = self._required(
+            "index_finalization",
+            lambda: self.client.publish_manifest(reference, index_data, INDEX_MEDIA_TYPE),
+        )
+        self._index_published = True
+        for tag in tags:
+            self._manifest_attempted = True
+            self._required(
+                "tag_finalization",
+                partial(self.client.publish_manifest, tag, index_data, INDEX_MEDIA_TYPE),
+            )
         return index_digest

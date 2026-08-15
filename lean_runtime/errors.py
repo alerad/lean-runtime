@@ -64,6 +64,76 @@ class DownloadUnavailable(EnvironmentError):
     """A prebuilt cache had no usable artifact or could not be reached."""
 
 
+class RegistryRequestError(DownloadUnavailable):
+    """An OCI registry request failed with machine-readable retry semantics."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        operation: str,
+        status_code: int | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.operation = operation
+        self.status_code = status_code
+        self.retryable = retryable
+
+
+class PublicationError(EnvironmentError):
+    """A required publication did not reach a remotely verified terminal state."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        phase: str,
+        registry: str,
+        status_code: int | None = None,
+        retryable: bool = False,
+        published: bool = False,
+        partial: bool = False,
+        credential_source: str = "anonymous",
+        username: str | None = None,
+        hint: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.phase = phase
+        self.registry = registry
+        self.status_code = status_code
+        self.retryable = retryable
+        self.published = published
+        self.partial = partial
+        self.credential_source = credential_source
+        self.username = username
+        self.hint = hint
+
+    @property
+    def exit_code(self) -> int:
+        if self.partial:
+            return 5
+        if self.status_code in {401, 403}:
+            return 3
+        if self.retryable:
+            return 4
+        return 5
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "phase": self.phase,
+            "registry": self.registry,
+            "status_code": self.status_code,
+            "retryable": self.retryable,
+            "published": self.published,
+            "partial": self.partial,
+            "credential_source": self.credential_source,
+            "username": self.username,
+            "hint": self.hint,
+            "message": str(self),
+        }
+
+
 class DownloadLimitExceeded(EnvironmentError):
     """An acquisition needs more bytes than the configured download limit.
 

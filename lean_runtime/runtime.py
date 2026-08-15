@@ -57,6 +57,7 @@ from .oci import (
     OCIEnvironmentCache,
     OCIEnvironmentPublisher,
     OCIRepository,
+    PublicationAccess,
     PublicationInfo,
 )
 from .policies import ExecutionPolicy, parse_byte_size
@@ -646,6 +647,8 @@ class Runtime:
         attest: bool = False,
     ) -> PublicationInfo:
         """Publish a built environment to an environment library."""
+        if sign and not finalize:
+            raise ValueError("platform-only publishing cannot sign a lock index")
         environment = self.environment(identifier)
         publisher = OCIEnvironmentPublisher(
             OCIRepository.parse(library), self.store, self.bundles, self.events
@@ -656,31 +659,43 @@ class Runtime:
             finalize=finalize,
             profile="check-capsule",
         )
-        if sign:
-            if result.publication_id is None:
-                raise ValueError("platform-only publishing cannot sign a lock index")
-            CosignVerifier(executable=self.verification_executable).sign(
-                publisher.repository, result.publication_id
-            )
-        if attest:
-            self.events.emit(
-                "library.attestation_started",
-                "Verifying and attesting the published environment",
-                environment_id=environment.id,
-            )
-            report = self.verify(environment.id)
-            report.raise_for_error()
-            CosignVerifier(executable=self.verification_executable).attest(
-                publisher.repository,
-                result.publication_id or result.computer_copy_id,
-                report.to_dict(),
-            )
-            self.events.emit(
-                "library.attestation_published",
-                "Published the signed environment attestation",
-                digest=result.publication_id or result.computer_copy_id,
-            )
+        phase = "signing"
+        try:
+            if sign:
+                assert result.publication_id is not None
+                CosignVerifier(executable=self.verification_executable).sign(
+                    publisher.repository, result.publication_id
+                )
+            phase = "attestation"
+            if attest:
+                self.events.emit(
+                    "library.attestation_started",
+                    "Verifying and attesting the published environment",
+                    environment_id=environment.id,
+                )
+                report = self.verify(environment.id)
+                report.raise_for_error()
+                CosignVerifier(executable=self.verification_executable).attest(
+                    publisher.repository,
+                    result.publication_id or result.computer_copy_id,
+                    report.to_dict(),
+                )
+                self.events.emit(
+                    "library.attestation_published",
+                    "Published the signed environment attestation",
+                    digest=result.publication_id or result.computer_copy_id,
+                )
+        except (EnvironmentError, OSError) as exc:
+            raise publisher.fail(exc, phase=phase) from exc
+        publisher.complete(result)
         return result
+
+    def check_publication_access(self, library: str) -> PublicationAccess:
+        """Prove registry push access without building or publishing content."""
+        publisher = OCIEnvironmentPublisher(
+            OCIRepository.parse(library), self.store, self.bundles, self.events
+        )
+        return publisher.check_access()
 
     def publish_toolchain(self, toolchain: str, library: str) -> ToolchainPublication:
         """Publish one verified platform check-toolchain manifest."""

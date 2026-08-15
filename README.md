@@ -222,9 +222,15 @@ Environment libraries may be public or private. For example:
 
 ```bash
 lean-runtime --library ghcr.io/owner/lean-environments download environment.lock.json
-lean-runtime build-and-publish environment.lock.json \
+lean-runtime publish environment environment.lock.json \
   --publish-to ghcr.io/owner/lean-environments
 ```
+
+Publication verifies push access before doing an expensive build and reports
+which credential source it selected. Run `lean-runtime publish environment
+--publish-to ghcr.io/owner/lean-environments --check-access` to test access by
+itself. A registry denial is a nonzero, machine-distinct failure; success is not
+reported until the remote manifest digest is read back and verified.
 
 To publish an existing clean Git-backed Lean project, inspect it and
 generate the maintained multi-platform workflow:

@@ -21,6 +21,8 @@ from .errors import (
     MaterializationError,
     PolicyError,
     ProjectError,
+    PublicationError,
+    RegistryRequestError,
     ResolutionError,
     SpecificationError,
     ToolchainError,
@@ -49,7 +51,7 @@ from .models import (
     PhaseTiming,
     ProjectProvenance,
 )
-from .oci import DEFAULT_ENVIRONMENT_LIBRARIES, PublicationInfo
+from .oci import DEFAULT_ENVIRONMENT_LIBRARIES, PublicationAccess, PublicationInfo
 from .policies import ExecutionPolicy
 from .profiling import ProfileReport
 from .programs import ProgramDescription, ProgramInfo, ReadyProgram
@@ -142,6 +144,9 @@ __all__ = [
     "PreparedEnvironment",
     "PolicyError",
     "PublicationInfo",
+    "PublicationAccess",
+    "PublicationError",
+    "RegistryRequestError",
     "DownloadUnavailable",
     "ProjectError",
     "ResolutionError",
