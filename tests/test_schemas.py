@@ -43,6 +43,7 @@ def test_every_v1_schema_compiles_eagerly() -> None:
         "cleanup-v1.schema",
         "inspect-v1.schema",
         "matrix-v1.schema",
+        "plan-v1.schema",
         "profile-v1.schema",
         "publication-v1.schema",
         "verify-v1.schema",
@@ -76,9 +77,41 @@ def test_execution_success_fixture_matches_v1_schema() -> None:
     )
 
 
+def test_plan_success_fixture_matches_v1_schema() -> None:
+    plan = envelope(
+        "lean-runtime.plan/v1",
+        ok=True,
+        data={
+            "lock_id": "lock_" + "a" * 64,
+            "toolchain": "leanprover/lean4:v4.32.0",
+            "environment_id": "env_" + "b" * 64,
+            "environment_ready": False,
+            "environment_download_bytes": 600 * 2**20,
+            "toolchain_installed": True,
+            "toolchain_download_bytes": 0,
+            "toolchain_libraries": [],
+            "max_download_bytes": 500 * 2**20,
+            "download_bytes": 600 * 2**20,
+            "download_bytes_complete": True,
+            "libraries": [
+                {
+                    "library": "oci://ghcr.io/owner/cache",
+                    "available": True,
+                    "total_bytes": 700 * 2**20,
+                    "cached_bytes": 100 * 2**20,
+                    "download_bytes": 600 * 2**20,
+                }
+            ],
+            "candidate": "mathlib-4.32",
+        },
+    )
+    _validator("plan-v1.schema.json").validate(plan)
+
+
 def test_every_v1_schema_accepts_its_closed_error_envelope() -> None:
     schemas = {
         "check-batch": "lean-runtime.check-batch/v1",
+        "plan": "lean-runtime.plan/v1",
         "comparison": "lean-runtime.comparison/v1",
         "execution": "lean-runtime.execution/v1",
         "cleanup": "lean-runtime.cleanup/v1",

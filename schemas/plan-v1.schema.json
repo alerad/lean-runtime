@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lean-runtime.dev/schemas/plan-v1.schema.json",
+  "type": "object",
+  "required": ["schema", "ok", "data", "warnings", "errors"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "lean-runtime.plan/v1"},
+    "ok": {"type": "boolean"},
+    "data": {
+      "type": "object",
+      "anyOf": [
+        {"required": ["lock_id", "toolchain", "environment_id", "environment_ready", "toolchain_installed", "download_bytes", "download_bytes_complete", "libraries"]},
+        {"maxProperties": 0}
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "lock_id": {"type": "string", "pattern": "^lock_[0-9a-f]{64}$"},
+        "toolchain": {"type": "string"},
+        "environment_id": {"type": "string"},
+        "environment_ready": {"type": "boolean"},
+        "environment_download_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "toolchain_installed": {"type": "boolean"},
+        "toolchain_download_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "toolchain_libraries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["library"],
+            "properties": {
+              "library": {"type": "string"},
+              "available": {"type": "boolean"}
+            }
+          }
+        },
+        "max_download_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "download_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "download_bytes_complete": {"type": "boolean"},
+        "libraries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["library"],
+            "properties": {
+              "library": {"type": "string"},
+              "available": {"type": "boolean"}
+            }
+          }
+        },
+        "candidate": {"type": "string"}
+      }
+    },
+    "warnings": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"},
+    "errors": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"}
+  }
+}

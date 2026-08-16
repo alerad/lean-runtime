@@ -53,7 +53,8 @@ result = lean.replay("execution.capture.json")
 
 ## Environment discovery
 
-The `lean-run` command performs discovery automatically for context-free
+`lean-runtime run` and its `lean-run` shortcut perform discovery
+automatically for context-free
 standalone files. Applications can use the same bounded planner and
 compiler-authoritative search explicitly:
 

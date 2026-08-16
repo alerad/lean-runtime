@@ -422,3 +422,77 @@ def test_lean_run_rejects_invalid_download_limit(monkeypatch, tmp_path: Path, ca
     else:
         raise AssertionError("argparse should reject an invalid size")
     assert "--max-download" in capsys.readouterr().err
+
+
+def test_run_subcommand_matches_lean_run_output(monkeypatch, tmp_path: Path, capsys) -> None:
+    from lean_runtime.cli import main as lean_runtime_main
+
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := by trivial\n")
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
+    assert main([str(source), "--json"]) == 0
+    alias_document = json.loads(capsys.readouterr().out)
+    assert lean_runtime_main(["run", str(source), "--json"]) == 0
+    canonical_document = json.loads(capsys.readouterr().out)
+    assert canonical_document == alias_document
+
+
+def test_run_subcommand_accepts_shared_options_in_both_positions(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    from lean_runtime.cli import main as lean_runtime_main
+
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := by trivial\n")
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
+    assert lean_runtime_main(["--quiet", "run", str(source)]) == 0
+    before = capsys.readouterr()
+    assert lean_runtime_main(["run", str(source), "--quiet"]) == 0
+    after = capsys.readouterr()
+    assert before.out == after.out
+    assert lean_runtime_main(["run", str(source), "--home", str(tmp_path / "s"), "--quiet"]) == 0
+    assert FakeRuntime.instance.kwargs["home"] == str(tmp_path / "s")
+
+
+def test_run_subcommand_reports_errors_with_the_canonical_prefix(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    from lean_runtime.cli import main as lean_runtime_main
+
+    source = tmp_path / "Main.lean"
+    source.write_text("import Mathlib\n")
+
+    class NoProjectRuntime(FakeRuntime):
+        def check_file(self, *_args, **_kwargs) -> ExecutionResult:
+            raise ProjectError("no project")
+
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", NoProjectRuntime)
+    assert lean_runtime_main(["run", str(source), "--no-discover", "--quiet"]) == 2
+    assert capsys.readouterr().err.startswith("lean-runtime run: ")
+
+
+def test_run_subcommand_rejects_contradictory_availability(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    from lean_runtime.cli import main as lean_runtime_main
+
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := by trivial\n")
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
+    assert lean_runtime_main(["--availability", "auto", "run", str(source), "--offline"]) == 2
+    assert "--offline cannot be combined" in capsys.readouterr().err
+
+
+def test_run_subcommand_forwards_global_libraries(monkeypatch, tmp_path: Path) -> None:
+    from lean_runtime.cli import main as lean_runtime_main
+
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := by trivial\n")
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
+    assert (
+        lean_runtime_main(
+            ["--library", "ghcr.io/owner/environments", "run", str(source), "--quiet"]
+        )
+        == 0
+    )
+    assert FakeRuntime.instance.kwargs["libraries"] == ("ghcr.io/owner/environments",)

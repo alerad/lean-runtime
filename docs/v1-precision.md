@@ -3,7 +3,7 @@
 Ordinary checks stay deliberately small:
 
 ```bash
-lean-run Main.lean
+lean-runtime run Main.lean
 ```
 
 The v1 precision tools are opt-in and reuse the same locks, environments, and execution
@@ -27,7 +27,7 @@ inventory differences as warnings: source/probe trust and byte equality are dist
 ## Explain context and reuse
 
 ```bash
-lean-run Main.lean --explain
+lean-runtime run Main.lean --explain
 lean-runtime inspect research-stack --explain
 ```
 
@@ -47,7 +47,7 @@ commits and unchanged trees remain separately visible.
 ## Timings and profiles
 
 ```bash
-lean-run Main.lean --timings
+lean-runtime run Main.lean --timings
 lean-runtime --timings check research-stack Main.lean
 lean-runtime profile research-stack Main.lean --warmup 1 --repeat 5
 ```
@@ -82,9 +82,10 @@ entries from beginning execution.
 
 ## Machine-readable output
 
-The versioned precision surfaces — execution results (`check`, `check-file`,
-`lean-run`), multi-file check batches, `verify`, `compare`, `profile`, `matrix`,
-`inspect`, `clean`, and `publish environment` — emit a closed envelope:
+The versioned precision surfaces — execution results (`run` and its `lean-run`
+alias, `check`, `check-file`), acquisition plans (`run --plan`), multi-file
+check batches, `verify`, `compare`, `profile`, `matrix`, `inspect`, `clean`,
+and `publish environment` — emit a closed envelope:
 
 ```json
 {

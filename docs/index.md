@@ -6,7 +6,7 @@ exact reusable environment, then returns structured results and a record of what
 was used.
 
 ```text
-lean-run FILE / lean.setup(CONTEXT)
+lean-runtime run FILE / lean-run FILE / lean.setup(CONTEXT)
                 │
                 ├── pinned local project ───────────> ProjectEnvironment
                 └── dependencies / exact lock ─────> Environment
@@ -16,6 +16,10 @@ lean-run FILE / lean.setup(CONTEXT)
                                                         ▼
                                                ExecutionResult + provenance
 ```
+
+- `lean-runtime run FILE` discovers or selects context for one file.
+- `lean-runtime check` operates in a known environment or pinned project.
+- `lean-run FILE` is a shortcut for `lean-runtime run FILE`.
 
 It deliberately does not replace the official tools:
 

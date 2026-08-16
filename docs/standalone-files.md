@@ -1,6 +1,7 @@
 # Standalone Lean files
 
-`lean-run` chooses one execution context using the following precedence:
+`lean-runtime run` — and its `lean-run` shortcut — chooses one execution
+context using the following precedence:
 
 1. `--lock` or a frontmatter `lock`;
 2. `--with` or frontmatter `requires`;

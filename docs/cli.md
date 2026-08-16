@@ -1,22 +1,33 @@
 # Command-line interface
 
-## `lean-run`
+## `lean-runtime run` and `lean-run`
 
-The front-facing command checks one file and discovers its context:
+The front door discovers a context and checks one file. `lean-runtime run FILE`
+is the canonical main-CLI spelling; `lean-run FILE` is an equivalent
+convenience alias with the same behavior, JSON contracts, and exit codes:
 
 ```bash
+lean-runtime run Main.lean
+lean-runtime run Main.lean --with mathlib@v4.32.2
+lean-runtime run Main.lean --lock environment.lock.json
+lean-runtime run Main.lean --json
+lean-runtime run Main.lean --explain
+lean-runtime run Main.lean --timings
+lean-runtime run Main.lean --lock-out environment.lock.json
+lean-runtime run Main.lean --no-source-build
+lean-runtime run Main.lean --offline
 lean-run Main.lean
-lean-run Main.lean --with mathlib@v4.32.2
-lean-run Main.lean --lock environment.lock.json
-lean-run Main.lean --json
-lean-run Main.lean --explain
-lean-run Main.lean --timings
-lean-run Main.lean --lock-out environment.lock.json
-lean-run Main.lean --no-source-build
-lean-run Main.lean --offline
 ```
 
-Without explicit context or a pinned Lake project, `lean-run` automatically
+| Command | Context behavior | Typical use |
+|---|---|---|
+| `lean-runtime run FILE` | Discovers or selects context | Standalone/front door |
+| `lean-run FILE` | Same as `run` | Short convenience spelling |
+| `lean-runtime check FILE` | Requires project or explicit context | Project iteration |
+| `lean-runtime check` | Checks all local libraries | Project-wide check |
+| `lean-runtime build` | Full Lake target build | Executables/native outputs |
+
+Without explicit context or a pinned Lake project, `run` automatically
 searches its bundled exact-environment catalog. Use `--lock-out` to retain the
 successful lock, `--no-discover` to require explicit context, and
 `--catalog PATH` to override the catalog. Three budgets bound the work:
@@ -137,7 +148,7 @@ older stores and for testing a profile before publication.
 
 ## Sparse acquisition and capabilities
 
-`lean-run FILE --plan` reads capsule metadata and reports the exact compressed
+`lean-runtime run FILE --plan` reads capsule metadata and reports the exact compressed
 frames required by `FILE`'s transitive import closure, plus the selected Lean
 check-runtime cost. The operation performs no downloads, builds, or publications; constructing
 the runtime may still initialize store metadata directories. `--max-download`
