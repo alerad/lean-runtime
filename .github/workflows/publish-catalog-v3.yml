@@ -93,9 +93,9 @@ jobs:
               --library "$LIBRARY" download "$LOCK_PATH" --name publisher
           fi
           lean-runtime --home "$runtime_home" --availability local \
-            build-and-publish "$LOCK_PATH" --publish-to "$LIBRARY" \
+            publish environment "$LOCK_PATH" --publish-to "$LIBRARY" \
             --platform-only --attest > "environment-$RESULT_SUFFIX.json"
-          lean-runtime --home "$runtime_home" toolchain-publish "$toolchain" \
+          lean-runtime --home "$runtime_home" publish toolchain "$toolchain" \
             --library "$LIBRARY" > "toolchain-$RESULT_SUFFIX.json"
       - uses: actions/upload-artifact@v7
         with:
@@ -142,9 +142,9 @@ jobs:
           print(lock.lock_id)
           PY
           )
-          lean-runtime toolchain-finalize-publication "${identity[0]}" \
+          lean-runtime finalize toolchain "${identity[0]}" \
             results/toolchain-*.json --library "$LIBRARY" --sign
-          lean-runtime finalize-publication "${identity[1]}" \
+          lean-runtime finalize environment "${identity[1]}" \
             results/environment-*.json --library "$LIBRARY" --sign
 
   verify:

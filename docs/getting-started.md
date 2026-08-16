@@ -79,13 +79,13 @@ For one existing pinned Lake project, preserve and adopt its current exact graph
 
 ```bash
 lean-runtime init .
-lean-runtime scan ~/research
+lean-runtime project scan ~/research
 ```
 
-`scan` only records exact local graphs as possible future zero-download seeds.
-The converged spelling is `lean-runtime project scan`; `project attach`,
-`project detach`, and `project update` group the other dependency-graph actions.
-Advanced bulk migration remains available through `attach`. See [Local Lake
+`project scan` only records exact local graphs as possible future zero-download
+seeds. `project attach`, `project detach`, and `project update` group the other
+dependency-graph actions, and advanced bulk migration runs through
+`project attach`. See [Local Lake
 projects](local-projects.md) for detachment, storage estimates, and the complete
 safety model.
 

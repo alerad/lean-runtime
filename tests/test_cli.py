@@ -45,15 +45,16 @@ def test_project_sharing_commands_have_safe_defaults() -> None:
     assert parser().parse_args(["init", "demo"]).mathlib_version == "latest"
     init = parser().parse_args(["init", "demo", "--mathlib-version", "4.33.0"])
     assert init.mathlib_version == "4.33.0"
-    with pytest.raises(SystemExit):
-        parser().parse_args(["init", "--mathlib", "demo"])
+    # --mathlib is no longer a declared alias; argparse still resolves it as an
+    # unambiguous abbreviation of --mathlib-version.
+    assert parser().parse_args(["init", "demo", "--mathlib", "4.33.0"]).mathlib_version == "4.33.0"
     assert init.agents
     assert parser().parse_args(["init", "demo", "--core"]).core
     assert parser().parse_args(["init", ".", "--name", "DemoProject"]).name == "DemoProject"
     assert not parser().parse_args(["init", "demo", "--no-agents"]).agents
-    attach = parser().parse_args(["attach", "projects", "--recursive"])
+    attach = parser().parse_args(["project", "attach", "projects", "--recursive"])
     assert attach.recursive and not attach.execute
-    detach = parser().parse_args(["detach", "demo"])
+    detach = parser().parse_args(["project", "detach", "demo"])
     assert not detach.execute
     build = parser().parse_args(["build", "demo"])
     assert build.shared is None
@@ -63,8 +64,9 @@ def test_project_sharing_commands_have_safe_defaults() -> None:
         ["init", "demo", "--offline", "--max-download", "500MiB", "--plan"]
     )
     assert policy.offline and policy.plan and policy.max_download == "500MiB"
-    assert parser().parse_args(["scan"]).path == Path(".")
     assert parser().parse_args(["project", "scan"]).path == Path(".")
+    with pytest.raises(SystemExit):
+        parser().parse_args(["scan"])
     assert parser().parse_args(["check"]).inputs == []
     publish = parser().parse_args(
         ["publish", "environment", "lock.json", "--publish-to", "ghcr.io/example/envs"]
@@ -230,7 +232,7 @@ def test_attach_plan_is_read_only(tmp_path: Path, capsys) -> None:
     (project / "lakefile.toml").write_text('name = "project"\n')
     (project / "lake-manifest.json").write_text(json.dumps({"version": "1.2.0", "packages": []}))
 
-    assert main(["--home", str(tmp_path / "runtime"), "attach", str(project)]) == 0
+    assert main(["--home", str(tmp_path / "runtime"), "project", "attach", str(project)]) == 0
     output = capsys.readouterr().out
     assert "1 Lake project" in output
     assert "No changes made" in output
@@ -250,7 +252,8 @@ def test_interrupted_command_has_no_traceback(monkeypatch, capsys) -> None:
 def test_build_and_publish_accepts_environment_build_timeout() -> None:
     arguments = parser().parse_args(
         [
-            "build-and-publish",
+            "publish",
+            "environment",
             "environment.lock.json",
             "--publish-to",
             "oci://cache",
@@ -427,7 +430,7 @@ def test_check_file_cli_json_result(monkeypatch, tmp_path: Path, capsys) -> None
         elapsed_seconds=0.01,
     )
     monkeypatch.setattr("lean_runtime.cli.Runtime.check", lambda *args, **kwargs: result)
-    assert main(["check-file", str(source), "--toolchain", "4.32.0", "--json"]) == 0
+    assert main(["check", str(source), "--toolchain", "4.32.0", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["schema"] == "lean-runtime.execution/v1"
@@ -487,6 +490,7 @@ def test_managed_check_cli_accepts_supporting_files(monkeypatch, tmp_path: Path,
         main(
             [
                 "check",
+                "--environment",
                 "demo",
                 str(main_source),
                 "--include",
@@ -578,7 +582,8 @@ def test_program_create_cli_loads_content_addressed_provenance(
         main(
             [
                 "--quiet",
-                "program-create",
+                "program",
+                "create",
                 str(payload),
                 "--command",
                 "bin/checker",
@@ -614,7 +619,8 @@ def test_finalize_publication_reads_computer_records(monkeypatch, tmp_path: Path
         main(
             [
                 "--quiet",
-                "finalize-publication",
+                "finalize",
+                "environment",
                 "lock_" + "c" * 64,
                 str(result),
                 "--library",
@@ -782,27 +788,11 @@ def test_two_existing_files_are_never_treated_as_a_legacy_environment(
     assert main(["--home", str(tmp_path / "runtime"), "check", str(first), str(second)]) == 0
 
 
-def test_legacy_environment_file_pair_still_works_for_missing_first_argument(
-    monkeypatch, tmp_path: Path, capsys
-) -> None:
+def test_legacy_environment_file_pair_is_rejected(tmp_path: Path, capsys) -> None:
     source = tmp_path / "Main.lean"
     source.write_text("example : True := by trivial\n")
-    opened: list[str] = []
-
-    class FakeEnvironment:
-        def check_files(self, files, *, entrypoint, policy):
-            assert entrypoint in files
-            return _check_result(True, str(tmp_path), entrypoint)
-
-    def environment(_runtime, name):
-        opened.append(name)
-        return FakeEnvironment()
-
-    monkeypatch.setattr("lean_runtime.cli.Runtime.environment", environment)
-
-    assert main(["--home", str(tmp_path / "runtime"), "check", "myenv", str(source)]) == 0
-    assert opened == ["myenv"]
-    assert "accepted:" in capsys.readouterr().out
+    assert main(["--home", str(tmp_path / "runtime"), "check", "myenv", str(source)]) == 2
+    assert "check input does not exist" in capsys.readouterr().err
 
 
 def test_environment_flag_checks_every_file_in_the_environment(
@@ -888,7 +878,8 @@ def test_completion_offers_only_public_commands() -> None:
     for shell in ("bash", "zsh", "fish"):
         words = _completion_words(_completion_script(shell), shell)
         assert {"run", "check", "init", "build", "publish"} <= words
-        for hidden in (
+        assert {"program", "toolchain"} <= words
+        for removed in (
             "check-file",
             "profile",
             "matrix",
@@ -897,8 +888,13 @@ def test_completion_offers_only_public_commands() -> None:
             "build-and-publish",
             "finalize-publication",
             "toolchain-publish",
+            "toolchain-slim",
+            "scan",
+            "attach",
+            "detach",
+            "install",
         ):
-            assert hidden not in words, (shell, hidden)
+            assert removed not in words, (shell, removed)
 
 
 def test_root_help_promotes_run_and_hides_compat_commands(capsys) -> None:
@@ -927,21 +923,57 @@ def test_check_help_points_standalone_users_to_run(capsys) -> None:
     assert "lean-runtime run" in output
 
 
-def test_compat_command_help_names_the_replacement(capsys) -> None:
-    for command, replacement in (
-        ("check-file", "lean-runtime check"),
-        ("profile", "--repeat"),
-        ("matrix", "--across"),
-        ("save-copy", "copy save"),
-        ("open-copy", "copy open"),
-        ("build-and-publish", "publish environment"),
-        ("finalize-publication", "finalize environment"),
+def test_removed_compatibility_spellings_are_rejected(capsys) -> None:
+    for command in (
+        "check-file",
+        "profile",
+        "matrix",
+        "save-copy",
+        "open-copy",
+        "build-and-publish",
+        "finalize-publication",
+        "toolchain-publish",
+        "toolchain-finalize-publication",
+        "toolchain-slim",
+        "program-create",
+        "program-save-copy",
+        "program-open-copy",
+        "program-download",
+        "program-publish",
+        "program-finalize-publication",
+        "install",
+        "scan",
+        "attach",
+        "detach",
     ):
         with pytest.raises(SystemExit):
             main([command, "--help"])
-        output = capsys.readouterr().out
-        assert "Compatibility command" in output, command
-        assert replacement in output, command
+        capsys.readouterr()
+
+
+def test_canonical_groups_replace_every_removed_spelling() -> None:
+    canonical = (
+        ["check", "Main.lean"],
+        ["copy", "save", "env", "--output", "copy.tar"],
+        ["copy", "open", "copy.tar"],
+        ["publish", "environment", "lock.json", "--publish-to", "oci://cache"],
+        ["finalize", "environment", "lock_id", "result.json", "--library", "oci://cache"],
+        ["publish", "toolchain", "v4.33.0", "--library", "oci://cache"],
+        ["finalize", "toolchain", "v4.33.0", "result.json", "--library", "oci://cache"],
+        ["program", "create", "payload", "--command", "bin/x", "--source-revision", "abc"],
+        ["program", "save", "program_id", "--output", "program.tar"],
+        ["program", "open", "program.tar"],
+        ["program", "download", "oci://programs", "revision"],
+        ["publish", "program", "program_id", "--library", "oci://programs"],
+        ["finalize", "program", "revision", "result.json", "--library", "oci://programs"],
+        ["toolchain", "install", "v4.33.0"],
+        ["toolchain", "slim", "v4.33.0"],
+        ["project", "scan"],
+        ["project", "attach"],
+        ["project", "detach"],
+    )
+    for argv in canonical:
+        assert parser().parse_args(argv) is not None, argv
 
 
 def test_lean_file_as_command_suggests_run(capsys) -> None:

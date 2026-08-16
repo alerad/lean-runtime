@@ -118,7 +118,7 @@ named repository and the Lean root module needs an explicit spelling.
 
 For an existing pinned project, `lean-runtime init .` adopts its current
 manifest without changing versions. Register a collection once with
-`lean-runtime scan ~/research`; future exact matches are preferred over
+`lean-runtime project scan ~/research`; future exact matches are preferred over
 downloads automatically.
 
 Move an adopted TOML project to the newest cataloged Mathlib explicitly:
@@ -135,15 +135,15 @@ restore the prior Lake files and attachment metadata.
 For advanced bulk onboarding, preview before changing anything:
 
 ```bash
-lean-runtime attach .
-lean-runtime attach . --execute
+lean-runtime project attach .
+lean-runtime project attach . --execute
 ```
 
 For a directory containing many projects:
 
 ```bash
-lean-runtime attach ~/research --recursive
-lean-runtime attach ~/research --recursive --execute
+lean-runtime project attach ~/research --recursive
+lean-runtime project attach ~/research --recursive --execute
 ```
 
 The preview groups exact graphs and separately reports checkout bytes removed,
@@ -159,8 +159,8 @@ original package directory.
 The project itself remains portable. To return to independent package copies:
 
 ```bash
-lean-runtime detach .
-lean-runtime detach . --execute
+lean-runtime project detach .
+lean-runtime project detach . --execute
 ```
 
 Detachment copy-on-write clones the exact packages where the filesystem allows,
@@ -215,7 +215,7 @@ included in the workspace identity. Attached projects automatically use shared
 mode when run through `lean-runtime build`; `--local` is an explicit escape
 hatch for unattached checkouts. An attached project must be detached before a
 local build, so `--local` cannot silently continue using shared links. After
-changing the manifest or a local path dependency, rerun `lean-runtime attach .
+changing the manifest or a local path dependency, rerun `lean-runtime project attach .
 --execute` to refresh the ordinary-Lake links.
 
 This differs from `lake env lean File.lean`: that command only constructs the

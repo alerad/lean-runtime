@@ -149,10 +149,10 @@ jobs:
           RESULT: platform-result-${{ matrix.platform }}.json
         run: |
           started=$SECONDS
-          lean-runtime --availability local build-and-publish environment.lock.json \
+          lean-runtime --availability local publish environment environment.lock.json \
             --publish-to "$LIBRARY" --timeout "$BUILD_TIMEOUT" --accelerate \
             --platform-only --attest > "$RESULT"
-          lean-runtime toolchain-publish "${{ needs.resolve.outputs.toolchain }}" \
+          lean-runtime publish toolchain "${{ needs.resolve.outputs.toolchain }}" \
             --library "$LIBRARY" > "toolchain-result-${{ matrix.platform }}.json"
           elapsed=$((SECONDS - started))
           python - "$RESULT" "$elapsed" <<'PY'
@@ -221,10 +221,10 @@ jobs:
           LOCK_ID: ${{ needs.resolve.outputs.lock-id }}
           ALIAS_TAG: ${{ inputs.tag }}
         run: |
-          lean-runtime toolchain-finalize-publication \
+          lean-runtime finalize toolchain \
             "${{ needs.resolve.outputs.toolchain }}" results/toolchain-result-*.json \
             --library "$LIBRARY" --sign
-          args=(finalize-publication "$LOCK_ID" results/platform-result-*.json \
+          args=(finalize environment "$LOCK_ID" results/platform-result-*.json \
             --library "$LIBRARY" --sign)
           if [[ -n "$ALIAS_TAG" ]]; then args+=(--tag "$ALIAS_TAG"); fi
           lean-runtime "${args[@]}" > publication.json
