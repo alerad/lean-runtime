@@ -68,10 +68,19 @@ stays silent. Only root-project outputs enter this cache: locked dependencies
 continue to use the verified shared workspace, avoiding a second multi-gigabyte
 copy. `build` retains Lake's complete target semantics.
 
-Repeated file checks reuse Lean's native header snapshots, keyed by the exact
-toolchain, project identity, and import block. Body-only edits therefore avoid
-reloading the unchanged import environment. `--watch` is a thin save loop over
-the same ordinary check/result contract. Failed checks may add exact-graph
+Repeated checks of one file can reuse Lean's native header snapshots, keyed by
+the exact toolchain, project identity, module, and import block. Body-only
+edits therefore avoid reloading the unchanged import environment. Snapshots are
+used automatically by `--watch` and `--repeat`; set
+`LEAN_RUNTIME_HEADER_SNAPSHOTS=1` to enable them for one-shot checks (or `=0`
+to disable them everywhere). A check that fails or times out under a snapshot
+is retried once without it, and the snapshot is discarded. `--watch` is a thin
+save loop over the same ordinary check/result contract. `check` also accepts
+several files or directories and checks each independently, in parallel with
+`--concurrency`. When one invocation must wait on another, the console names
+the holder (for example `Waiting for shared workspace lock held by PID 512
+(shared build of mathlib)`), and `--timings` reports `workspace_lock` and
+`header_snapshot` phases alongside the actual Lean execution time. Failed checks may add exact-graph
 identifier hints derived from pinned `.ilean` indexes; raw Lean streams remain
 unchanged.
 

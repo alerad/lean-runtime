@@ -72,3 +72,21 @@ def serialize_profile_v1(result: ProfileReport) -> dict[str, Any]:
 
 def serialize_matrix_v1(result: MatrixResult) -> dict[str, Any]:
     return envelope("lean-runtime.matrix/v1", ok=result.ok, data=result.to_dict())
+
+
+def serialize_check_batch_v1(
+    entries: list[tuple[str, ExecutionResult]], duration_seconds: float
+) -> dict[str, Any]:
+    accepted = sum(1 for _, result in entries if result.ok)
+    ok = bool(entries) and accepted == len(entries)
+    return envelope(
+        "lean-runtime.check-batch/v1",
+        ok=ok,
+        data={
+            "ok": ok,
+            "duration_ms": round(duration_seconds * 1000),
+            "total": len(entries),
+            "accepted": accepted,
+            "entries": [{"path": path, "result": result.to_dict()} for path, result in entries],
+        },
+    )
