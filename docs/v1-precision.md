@@ -54,7 +54,9 @@ lean-runtime profile research-stack Main.lean --warmup 1 --repeat 5
 
 Warmups are excluded. Every measured sample remains an ordinary persisted execution with a
 unique execution ID. Profiling stops at the first rejected or failed sample. Execution JSON
-contains the same stable phase records shown by `--timings`; unperformed phases are explicit.
+contains the same stable phase records shown by `--timings`. Results list the phases
+relevant to that execution; a listed phase that was deliberately skipped is marked
+`"performed": false`, and phases that never applied are simply absent.
 
 ## Matrix checks
 
@@ -80,7 +82,9 @@ entries from beginning execution.
 
 ## Machine-readable output
 
-Public JSON commands emit a closed envelope:
+The versioned precision surfaces — execution results (`check`, `check-file`,
+`lean-run`), multi-file check batches, `verify`, `compare`, `profile`, `matrix`,
+`inspect`, `clean`, and `publish environment` — emit a closed envelope:
 
 ```json
 {
@@ -93,7 +97,9 @@ Public JSON commands emit a closed envelope:
 ```
 
 Schemas are published under `schemas/`. JSON uses stable reason codes; human wording may
-improve without a schema change. Exit code 0 means success, 1 is a completed negative
+improve without a schema change. Other `--json` commands (for example `storage`,
+`doctor`, and `environments`) currently emit raw objects and are not yet versioned v1
+contracts. Exit code 0 means success, 1 is a completed negative
 result, and 2 is invalid invocation or an exceptional runtime failure.
 
 ## Reproducible case study

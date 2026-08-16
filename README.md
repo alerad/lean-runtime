@@ -173,7 +173,8 @@ lean-runtime scan ~/research
 lean-runtime init .
 ```
 
-`init --plan` is side-effect free; `--max-download 500MiB` and `--offline`
+`init --plan` performs no downloads, installs, or builds; `--max-download
+500MiB` and `--offline`
 enforce cold-start policy. Advanced bulk migration remains available through
 `attach`, and `detach --execute` materializes an independent project again.
 For a new project, the target may be absent, empty, or an otherwise empty Git

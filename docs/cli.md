@@ -55,7 +55,9 @@ lean-runtime check Main.lean \
 `--with` is repeatable. References use
 `mathlib@REVISION`, `OWNER/REPOSITORY@REVISION`, or the explicit
 `github:OWNER/REPOSITORY@REVISION` form. Package discovery reads the root
-`lean-toolchain` and `lakefile.toml`, pins the reference to a full commit, and
+`lean-toolchain` and a root Lake configuration (`lakefile.toml` or
+`lakefile.lean`, translated with the package's pinned Lake), pins the
+reference to a full commit, and
 then uses the normal lock and environment pipeline. Multiple discovered
 packages must declare the same toolchain unless `--toolchain` explicitly
 selects the compatibility build.
@@ -137,7 +139,8 @@ older stores and for testing a profile before publication.
 
 `lean-run FILE --plan` reads capsule metadata and reports the exact compressed
 frames required by `FILE`'s transitive import closure, plus the selected Lean
-check-runtime cost. The operation has no store side effects. `--max-download`
+check-runtime cost. The operation performs no downloads, builds, or publications; constructing
+the runtime may still initialize store metadata directories. `--max-download`
 applies before acquisition to the combined known cost; an unknown component is
 reported explicitly instead of treated as zero.
 
@@ -147,7 +150,13 @@ guesswork: Lean 4.32 and 4.33 reject ordinary imports when the corresponding
 server/private or IR facets are omitted. `.ilean` editor indexes are a separate
 on-demand capability through `Environment.require_capabilities(["editor"],
 imports=[...])`. Native compilation and development builds require a full
-environment and full toolchain; check capsules reject those requests clearly.
+environment and full toolchain. Requesting them through
+`require_capabilities(["native"])` or `["development"]` is currently
+rejected for every managed environment; a full environment provides those
+capabilities through its ordinary built workspace instead. Sparse handles do
+not yet reject `build()` or arbitrary `execute()` early: against an
+incomplete capsule workspace such operations typically fail mid-run, so open
+or build the full environment for them.
 
 ## Replay
 
@@ -256,6 +265,6 @@ self-hosted HTTPS/SSH, and local bare repositories are supported.
 publication and clean-consumer workflow. See
 [Publishing a Lean project](project-publishing.md).
 
-Use global `--publisher_verification required --trusted-publisher ID --trusted-issuer ISSUER`
+Use global `--publisher-verification required --trusted-publisher ID --trusted-issuer ISSUER`
 to require a verified publisher. `build-and-publish --sign` records the trusted
 publisher using the configured Cosign identity.

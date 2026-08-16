@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Align documentation with the implementation: correct `--publisher-verification`
+  spelling, document `capsule-lock_<sha>` canonical publication references, name
+  the actual verification check codes, scope the attestation predicate and
+  credential-retention claims, note `lakefile.lean` package-reference support,
+  qualify offline behavior for sparse projections and capture replay, scope the
+  closed JSON-envelope claim to the versioned precision surfaces, and replace
+  "side-effect-free" planning claims with the precise guarantee.
+
 ## 2.10.0 - 2026-08-16
 
 - Make header snapshots opt-in (`LEAN_RUNTIME_HEADER_SNAPSHOTS=1`; `--watch` and

@@ -9,7 +9,9 @@ Lean Runtime separates three states:
 3. `Environment` is a platform-specific, built, published environment.
 
 The separation lets one process resolve a lock and another materialize it. A
-completed environment can subsequently be opened offline.
+completed environment can subsequently be opened offline; for a sparse
+capsule, checking is offline for already projected import closures, while a
+new import may extend the projection from configured libraries.
 
 Downloadable environments may use the legacy full-workspace representation or
 the current sparse check-capsule representation. Both resolve to the same exact
@@ -44,7 +46,11 @@ GitPackage(
 - `name` is the Lake package identity.
 - `url` is a Git remote.
 - `rev` is a full commit hash; `GitPackage.tag(...)` and TOML `tag = "..."`
-  provide a friendly input that resolution converts to an exact commit.
+  provide a friendly input that resolution converts to an exact commit. The
+  resolved lock always contains the exact commit and tree, while the
+  requested tag may remain alongside it as requested-revision metadata (and,
+  for manually authored tagged specifications, in the recorded specification
+  digest).
 - `root_module` is imported by the synthetic root library, ensuring the
   dependency's Lean artifacts are built.
 - `subdir` records a safe relative package subdirectory.
@@ -60,7 +66,9 @@ through the locked toolchain.
 The environment identity includes the complete lock, a versioned platform
 compatibility record, and the implemented build profile. Informational details
 such as the Python platform and OS patch release are retained in metadata but
-are not identity inputs. The runtime currently supports only the `release` profile;
+are not identity inputs. Full environments and portable imports record that
+informational platform record; sparse registry downloads currently persist
+only the versioned compatibility record. The runtime currently supports only the `release` profile;
 other values are rejected rather than producing misleadingly distinct IDs for
 identical builds.
 
@@ -105,7 +113,9 @@ CAS and hardlinked into environment projections when the filesystem permits.
 its logical byte count can overlap environment projections and should not be
 added to their logical sizes as an estimate of physical disk use.
 `clean --include-downloads` reclaims old OCI blobs and unleased CAS artifacts;
-per-artifact locks and recency updates prevent collection during projection.
+per-artifact locks and recency updates make collection during an active
+projection unlikely, though projection does not yet hold a strict lease
+across unpack-and-project.
 
 ```python
 report = runtime.clean(dry_run=True)

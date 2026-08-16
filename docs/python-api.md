@@ -37,8 +37,11 @@ environment.require_capabilities(
 )
 ```
 
-Native and development capabilities require a full built environment and are
-rejected by check capsules with an actionable error.
+Native and development capabilities require a full built environment.
+`require_capabilities(["native"])` and `["development"]` are currently
+rejected for every managed environment with an actionable error; a full
+environment provides those capabilities through its ordinary built workspace
+without a capability request.
 
 One-shot helpers use the same routing:
 
@@ -130,6 +133,11 @@ published = runtime.publish_environment(
 )
 ```
 
+`availability="local"` is intended to forbid every registry download. One
+current caveat: extending a sparse environment's import closure still
+consults configured libraries, so a strictly offline runtime should also
+pass `libraries=()` — the `lean-run --offline` CLI does exactly that.
+
 Package-reference discovery is also exposed in separable stages:
 
 ```python
@@ -141,8 +149,10 @@ environment = runtime.open_references(
 )
 ```
 
-Discovery requires a root `lean-toolchain`, a root `lakefile.toml`, and at
-least one `[[lean_lib]]`. The convenience specification contains the resolved
+Discovery requires a root `lean-toolchain`, a root Lake configuration
+(`lakefile.toml` or `lakefile.lean`), and at least one importable library. A
+`lakefile.lean` is translated with the package's pinned Lake, so one-shot
+reference discovery may install that pinned toolchain. The convenience specification contains the resolved
 commit, so all downstream identities retain the same exact semantics as a
 manually authored `EnvironmentSpec`.
 
@@ -173,6 +183,12 @@ command = environment.execute(["lake", "exe", "my_tool", "--flag"])
 info = environment.inspect()
 capture = environment.capture(source, expected_ok=True)
 ```
+
+On a sparse check-capsule handle, the `check*` and `capture` methods are
+fully supported. `build()` and arbitrary `execute()` are not
+representation-guarded yet: they run against the projected sparse workspace
+and typically fail against its incomplete inputs, so use a full environment
+for building and running tools.
 
 Asynchronous cancellation uses a background job:
 

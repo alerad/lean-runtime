@@ -179,12 +179,18 @@ Opening a completed environment by name or digest reads only:
 No resolver or network operation runs. This is tested by deleting the original
 Git repository and reopening/checking the environment from a second process.
 
+For a sparse check capsule, this invariant covers metadata and every already
+projected import closure. Checking a new import may extend the projection
+from configured libraries; strictly offline use should pre-acquire the needed
+closure or configure no libraries (`lean-run --offline` passes an empty
+library list for this reason).
+
 ## Aliases and garbage collection
 
 Names are atomic JSON pointers to environment identities. Updating a name does
 not mutate either old or new environments. Garbage collection removes only
 old environments that are not reachable through an alias; locks and source
-snapshots are conservatively retained by store schema 1.
+snapshots are conservatively retained by the current store schema.
 Last-use records prevent recently opened or executed unnamed environments from
 being collected, and execution cloning shares the environment's deletion lock.
 
