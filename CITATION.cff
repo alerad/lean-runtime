@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "lean-runtime: run Lean 4 proofs from Python or standalone files"
+authors:
+  - family-names: "Radisic"
+    given-names: "Alejandro"
+    orcid: "https://orcid.org/0009-0001-7612-1082"
+repository-code: "https://github.com/alerad/lean-runtime"
+license: Apache-2.0
+version: "2.9.1"
+date-released: "2026-08-15"
+abstract: >-
+  lean-runtime executes Lean 4 code from Python or single .lean files
+  without per-machine Lake projects or Mathlib source builds. It resolves
+  the exact Lean environment a file needs from a catalog of prebuilt,
+  pinned environments (Mathlib and matching LeanCert releases), supports
+  reproducible environment lockfiles, downloads only the compressed module
+  frames in a source's transitive import closure, and returns structured
+  results recording the toolchain and dependencies actually used.
+keywords:
+  - "Lean 4"
+  - "theorem proving"
+  - "formal verification"
+  - "Python"
+  - "reproducibility"
+  - "package management"
