@@ -90,7 +90,7 @@ lean-runtime --home /tmp/fresh copy open research-stack.lean-environment --name 
 lean-runtime publish environment environment.lock.json --publish-to ghcr.io/owner/lean-environments
 lean-runtime publish environment --publish-to ghcr.io/owner/lean-environments --check-access
 lean-runtime publish environment --publish-to ghcr.io/owner/lean-environments --check-access --json
-lean-runtime check research-stack Main.lean --json
+lean-runtime check --environment research-stack Main.lean --json
 lean-runtime inspect research-stack --packages
 lean-runtime environments
 lean-runtime storage
@@ -228,7 +228,7 @@ capitalization such as `IntegralFramework`.
 Add supporting source files with repeatable `--include` options:
 
 ```bash
-lean-runtime check research-stack Main.lean --include Support/Defs.lean
+lean-runtime check --environment research-stack Main.lean --include Support/Defs.lean
 ```
 
 Resolution and materialization print structured lifecycle progress to stderr.

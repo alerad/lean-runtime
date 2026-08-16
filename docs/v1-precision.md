@@ -48,7 +48,7 @@ commits and unchanged trees remain separately visible.
 
 ```bash
 lean-runtime run Main.lean --timings
-lean-runtime --timings check research-stack Main.lean
+lean-runtime --timings check --environment research-stack Main.lean
 lean-runtime check --environment research-stack Main.lean --warmup 1 --repeat 5
 ```
 
