@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.9.2 - 2026-08-16
+
 - Keep one fail-closed publication authentication session from push preflight through
   upload, propagate explicit publication timeouts to credential and registry I/O,
   and report credential-provider failures without labeling them anonymous.
