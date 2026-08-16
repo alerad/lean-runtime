@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.10.0 - 2026-08-16
+
 - Make header snapshots opt-in (`LEAN_RUNTIME_HEADER_SNAPSHOTS=1`; `--watch` and
   `--repeat` enable them automatically), key them by module identity, load
   existing snapshots without holding the creation lock, cancel lock waits
