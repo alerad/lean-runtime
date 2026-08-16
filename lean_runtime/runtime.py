@@ -1144,7 +1144,9 @@ class Runtime:
                     local_project = self.project(source_path)
                 except ProjectError as exc:
                     raise ProjectError(
-                        f"{exc}\nFor a standalone Lean file, pass an exact toolchain, for example "
+                        f"{exc}\nFor automatic standalone context discovery, use "
+                        "`lean-runtime run FILE` (or `lean-run FILE`).\n"
+                        "To select core Lean explicitly, pass an exact toolchain: "
                         "`lean-runtime check FILE --toolchain v4.33.0`."
                     ) from exc
                 return local_project.check_file(source_path, policy=selected_policy, cancel=cancel)
@@ -2243,7 +2245,10 @@ class Runtime:
         if selected is None and project_root is not None:
             selected = project_toolchain(project_root)
         if selected is None:
-            raise ToolchainError("check requires an environment, toolchain, or pinned project")
+            raise ToolchainError(
+                "check requires an environment, explicit toolchain, or pinned project; "
+                "use `lean-runtime run FILE` for standalone context discovery"
+            )
         safe_filename = Path(filename).name
         if not safe_filename.endswith(".lean"):
             safe_filename += ".lean"

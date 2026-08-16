@@ -21,10 +21,12 @@ currently requires `LEAN_RUNTIME_ELAN`.
 
 ## Run one Lean file
 
-Inside an existing pinned Lake project, just pass the file:
+Lean Runtime's main command is `lean-runtime`; its `run` subcommand discovers a
+context and checks one file. Inside an existing pinned Lake project, just pass
+the file:
 
 ```bash
-lean-run MyProject/Main.lean
+lean-runtime run MyProject/Main.lean
 ```
 
 Standalone files do not need a throwaway Lake project or dependency declaration:
@@ -36,17 +38,21 @@ example : 2 + 2 = 4 := by norm_num
 ```
 
 ```bash
-lean-run Main.lean
+lean-runtime run Main.lean
 ```
 
-When no explicit context or pinned Lake project exists, `lean-run` analyzes imports,
+The shorter `lean-run Main.lean` spelling is an equivalent, permanently
+supported convenience alias; both call the same implementation and produce the
+same results, JSON envelopes, and exit codes.
+
+When no explicit context or pinned Lake project exists, `run` analyzes imports,
 ranks a bounded set of exact environments from its bundled catalog, and asks Lean to
 check each candidate. The successful exact lock is retained by Runtime. Pin it for
 portable reuse whenever desired:
 
 ```bash
-lean-run Main.lean --lock-out environment.lock.json
-lean-run Main.lean --lock environment.lock.json
+lean-runtime run Main.lean --lock-out environment.lock.json
+lean-runtime run Main.lean --lock environment.lock.json
 ```
 
 The bundled catalog covers Mathlib v4.30.0 through v4.33.0 and matching LeanCert
@@ -173,7 +179,8 @@ lean-runtime scan ~/research
 lean-runtime init .
 ```
 
-`init --plan` is side-effect free; `--max-download 500MiB` and `--offline`
+`init --plan` performs no downloads, installs, or builds; `--max-download
+500MiB` and `--offline`
 enforce cold-start policy. Advanced bulk migration remains available through
 `attach`, and `detach --execute` materializes an independent project again.
 For a new project, the target may be absent, empty, or an otherwise empty Git

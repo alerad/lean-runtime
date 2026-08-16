@@ -872,3 +872,81 @@ def test_environment_flag_rejects_conflicting_selectors(tmp_path: Path, capsys) 
         == 2
     )
     assert "--environment cannot be combined" in capsys.readouterr().err
+
+
+def _completion_words(script: str, shell: str) -> set[str]:
+    if shell == "bash":
+        return set(script.split("'")[1].split())
+    if shell == "zsh":
+        return set(script.split("(", 1)[1].split(")", 1)[0].split())
+    return {line.rsplit(" ", 1)[-1] for line in script.strip().splitlines()}
+
+
+def test_completion_offers_only_public_commands() -> None:
+    from lean_runtime.cli import _completion_script
+
+    for shell in ("bash", "zsh", "fish"):
+        words = _completion_words(_completion_script(shell), shell)
+        assert {"run", "check", "init", "build", "publish"} <= words
+        for hidden in (
+            "check-file",
+            "profile",
+            "matrix",
+            "save-copy",
+            "open-copy",
+            "build-and-publish",
+            "finalize-publication",
+            "toolchain-publish",
+        ):
+            assert hidden not in words, (shell, hidden)
+
+
+def test_root_help_promotes_run_and_hides_compat_commands(capsys) -> None:
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    output = capsys.readouterr().out
+    assert "discover context and check one Lean file" in output
+    assert "lean-run FILE" in output
+    assert "check-file" not in output
+    assert "build-and-publish" not in output
+    assert "save-copy" not in output
+
+
+def test_run_help_documents_precedence_and_shortcut(capsys) -> None:
+    with pytest.raises(SystemExit):
+        main(["run", "--help"])
+    output = capsys.readouterr().out
+    assert "context precedence" in output
+    assert "lean-run Main.lean" in output
+
+
+def test_check_help_points_standalone_users_to_run(capsys) -> None:
+    with pytest.raises(SystemExit):
+        main(["check", "--help"])
+    output = capsys.readouterr().out
+    assert "lean-runtime run" in output
+
+
+def test_compat_command_help_names_the_replacement(capsys) -> None:
+    for command, replacement in (
+        ("check-file", "lean-runtime check"),
+        ("profile", "--repeat"),
+        ("matrix", "--across"),
+        ("save-copy", "copy save"),
+        ("open-copy", "copy open"),
+        ("build-and-publish", "publish environment"),
+        ("finalize-publication", "finalize environment"),
+    ):
+        with pytest.raises(SystemExit):
+            main([command, "--help"])
+        output = capsys.readouterr().out
+        assert "Compatibility command" in output, command
+        assert replacement in output, command
+
+
+def test_lean_file_as_command_suggests_run(capsys) -> None:
+    assert main(["Main.lean"]) == 2
+    output = capsys.readouterr().err
+    assert "is a Lean file, not a command" in output
+    assert "lean-runtime run Main.lean" in output
+    assert "lean-run Main.lean" in output

@@ -94,7 +94,7 @@ safety model.
 For a file inside a pinned Lake project:
 
 ```bash
-lean-run MyProject/Main.lean
+lean-runtime run MyProject/Main.lean
 ```
 
 Lean Runtime walks upward to the nearest `lakefile.toml` or `lakefile.lean` with
@@ -108,17 +108,20 @@ example : 2 + 2 = 4 := by norm_num
 ```
 
 ```bash
-lean-run Main.lean
+lean-runtime run Main.lean
 ```
 
-`lean-run` uses its bundled catalog to rank a bounded set of exact environments,
+`lean-run Main.lean` is the shorter equivalent.
+
+`lean-runtime run` uses its bundled catalog to rank a bounded set of exact environments,
 then lets Lean determine which candidate accepts the source. Use
 `--lock-out environment.lock.json` to pin the successful environment.
 
-The lower-level `lean-runtime check Main.lean` command does not guess a
-toolchain for a standalone file. Pass one explicitly, for example
-`lean-runtime check Main.lean --toolchain v4.33.0`, or use `lean-run` for
-catalog discovery.
+`lean-runtime run` performs bounded standalone discovery. The lower-level
+`lean-runtime check` command operates in a pinned project or explicit context
+and does not search the standalone catalog. Pass a toolchain explicitly, for
+example `lean-runtime check Main.lean --toolchain v4.33.0`, or use
+`lean-runtime run` for catalog discovery.
 
 Strict TOML frontmatter remains available when the context is already known:
 

@@ -15,7 +15,9 @@ result = Runtime().replay_capture("result.execution.json")
 Captures are manifests, not portable binary archives. They do not currently
 embed Git repositories or compiled artifacts. A clean machine may need network
 access to acquire exact locked commits before its first replay; a machine with
-the environment already published can replay offline.
+the environment already published can replay offline. For a sparse capsule
+environment, offline replay additionally requires the capture's imported
+modules to be projected locally already.
 
 ## Identity semantics
 

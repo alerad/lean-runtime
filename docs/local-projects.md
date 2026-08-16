@@ -95,7 +95,8 @@ build and dependency workflow unless `--no-agents` is passed; it never
 overwrites an existing guide.
 
 Initialization acquires and verifies the exact graph before publishing the
-target directory. Use `--plan` for a side-effect-free cost report, `--offline`
+target directory. Use `--plan` for a cost report that performs no downloads,
+installs, or builds, `--offline`
 to require local data, `--max-download SIZE` to enforce a transfer ceiling, or
 `--seed-from PROJECT` to name an exact local donor.
 Offline planning never queries configured registries. A missing exact local

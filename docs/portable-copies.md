@@ -85,7 +85,10 @@ lean-runtime clean --include-downloads --execute
 
 Full OCI blobs referenced by ready legacy environments are retained. Sparse CAS
 artifacts may be reclaimed because ready projections hold their own hardlink or
-copy; active projection leases and per-artifact locks prevent races.
+copy; per-artifact locks and recency updates make collection during an
+active projection unlikely, but they are not a strict lease, so avoid
+running `clean --include-downloads` concurrently with a first sparse
+acquisition.
 
 ### Required publisher verification
 
@@ -103,7 +106,7 @@ runtime = Runtime(
 )
 ```
 
-CLI equivalents are `--publisher_verification required`, `--trusted-publisher`, and
+CLI equivalents are `--publisher-verification required`, `--trusted-publisher`, and
 `--trusted-issuer`. Verification uses an installed Cosign 2.6.2 or 3.0.4+ and
 binds the canonical lock-index digest, certificate identity, issuer, and
 transparency-log claims. Older versions are rejected because of the patched
@@ -137,9 +140,13 @@ gh auth refresh -s write:packages,read:packages
 
 Credential discovery is fail-closed: a configured provider that times out or
 returns an unusable token stops publication before any registry request. The same
-verified credential is retained from preflight through upload; it is not rediscovered
-after a long environment build. An explicitly supplied publication `--timeout`
-also applies to credential discovery and registry network operations.
+verified credential is retained from OCI preflight through upload; it is not
+rediscovered after a long environment build. `--sign` and `--attest` run
+Cosign as a separate process that authenticates with the explicit
+`LEAN_RUNTIME_REGISTRY_USERNAME` / `LEAN_RUNTIME_REGISTRY_PASSWORD` pair or
+its own ambient registry credentials, not with a retained GitHub CLI
+credential. An explicitly supplied publication `--timeout` also applies to
+credential discovery and registry network operations.
 
 Publish the current platform after ensuring the lock:
 
@@ -158,8 +165,11 @@ so a missing scope fails in seconds instead of after export. The probe starts
 and immediately cancels an empty OCI upload session; it publishes no manifest or
 index. The publisher then checks for existing blobs, uploads only missing
 content, publishes the platform manifest by digest, and updates the canonical
-`lock_<sha>` index tag last. Every manifest is fetched back and its digest is
-verified before success is reported. Human tags are aliases to that same index.
+index tag last. Check capsules use `capsule-lock_<sha>` as that canonical
+reference; the legacy full representation uses `lock_<sha>`, and consumers
+try the capsule reference first. Every manifest is fetched back and its
+digest is verified before success is reported. Human tags are aliases to the
+same index.
 This follows the
 [OCI Distribution Specification](https://github.com/opencontainers/distribution-spec/blob/main/spec.md)
 and uses an [OCI image index](https://github.com/opencontainers/image-spec/blob/main/image-index.md)
@@ -226,15 +236,19 @@ The finalizer rejects duplicate OS/architecture/ABI entries. Publishing the
 index only after every required platform succeeds prevents partial build
 matrices from replacing a complete cache release.
 
-`--attest` runs package-source verification and the Lean import probe, records a
-stable inventory of all Lake build outputs, and publishes that predicate as a
-keyless Cosign attestation bound to the platform manifest (or finalized index).
-It requires Cosign and an OIDC-capable publishing environment.
+`--attest` runs the ordinary environment verification (package-source or
+capsule-artifact checks plus the Lean import probe) and publishes that
+verification report as a keyless Cosign attestation of type
+`https://lean-runtime.dev/attestation/environment/v1`, bound to the platform
+manifest (or finalized index). The predicate does not include a normalized
+build-output inventory; artifact inventory digests are compared only by
+`verify --rebuild`. Attestation requires Cosign and an OIDC-capable
+publishing environment.
 
 ## Auditing
 
 Verify the embedded source markers, Git commits and trees, root lock material,
-Lean probe, and build-output inventory at any time:
+and Lean probe at any time:
 
 ```bash
 lean-runtime verify research-stack
@@ -247,10 +261,14 @@ store and compare normalized artifact inventories:
 lean-runtime verify research-stack --rebuild
 ```
 
-`source_verified` and `probe_passed` are the trust result. `artifact_match` is a
-separate byte-reproducibility measurement: a mismatch is reported but is not
-treated as failed source/proof verification, because native toolchains and package build
-steps are not promised to produce byte-identical artifacts.
+The report's named checks are the trust result: `package_trees_verified` for
+full bundles or `capsule_artifacts_verified` for sparse capsules, plus
+`lean_probe_passed`. `artifact_match` is a separate byte-reproducibility
+measurement produced by `--rebuild`: it compares normalized artifact
+inventory digests (the inventory itself is not exported), and a mismatch is
+reported but is not treated as failed source/proof verification, because
+native toolchains and package build steps are not promised to produce
+byte-identical artifacts.
 
 ## Advanced storage details
 

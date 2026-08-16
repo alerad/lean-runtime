@@ -40,7 +40,9 @@ locked sources faithfully. Registry authentication is not a builder signature.
 Required Cosign policy authenticates the expected publisher workflow and both
 capsule and toolchain index digests, but still trusts that workflow to compile
 the locked sources faithfully.
-Publishers can attach a signed source/probe/build-inventory attestation, and
+Publishers can attach a signed verification-report attestation covering
+source and probe results (a normalized build-inventory comparison is
+produced by `verify --rebuild`, not embedded in that attestation), and
 `lean-runtime verify --rebuild` independently reacquires the locked sources,
 rebuilds them, reruns the Lean probe, and compares artifact inventories.
 

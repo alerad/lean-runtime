@@ -1,22 +1,33 @@
 # Command-line interface
 
-## `lean-run`
+## `lean-runtime run` and `lean-run`
 
-The front-facing command checks one file and discovers its context:
+The front door discovers a context and checks one file. `lean-runtime run FILE`
+is the canonical main-CLI spelling; `lean-run FILE` is an equivalent
+convenience alias with the same behavior, JSON contracts, and exit codes:
 
 ```bash
+lean-runtime run Main.lean
+lean-runtime run Main.lean --with mathlib@v4.32.2
+lean-runtime run Main.lean --lock environment.lock.json
+lean-runtime run Main.lean --json
+lean-runtime run Main.lean --explain
+lean-runtime run Main.lean --timings
+lean-runtime run Main.lean --lock-out environment.lock.json
+lean-runtime run Main.lean --no-source-build
+lean-runtime run Main.lean --offline
 lean-run Main.lean
-lean-run Main.lean --with mathlib@v4.32.2
-lean-run Main.lean --lock environment.lock.json
-lean-run Main.lean --json
-lean-run Main.lean --explain
-lean-run Main.lean --timings
-lean-run Main.lean --lock-out environment.lock.json
-lean-run Main.lean --no-source-build
-lean-run Main.lean --offline
 ```
 
-Without explicit context or a pinned Lake project, `lean-run` automatically
+| Command | Context behavior | Typical use |
+|---|---|---|
+| `lean-runtime run FILE` | Discovers or selects context | Standalone/front door |
+| `lean-run FILE` | Same as `run` | Short convenience spelling |
+| `lean-runtime check FILE` | Requires project or explicit context | Project iteration |
+| `lean-runtime check` | Checks all local libraries | Project-wide check |
+| `lean-runtime build` | Full Lake target build | Executables/native outputs |
+
+Without explicit context or a pinned Lake project, `run` automatically
 searches its bundled exact-environment catalog. Use `--lock-out` to retain the
 successful lock, `--no-discover` to require explicit context, and
 `--catalog PATH` to override the catalog. Three budgets bound the work:
@@ -55,7 +66,9 @@ lean-runtime check Main.lean \
 `--with` is repeatable. References use
 `mathlib@REVISION`, `OWNER/REPOSITORY@REVISION`, or the explicit
 `github:OWNER/REPOSITORY@REVISION` form. Package discovery reads the root
-`lean-toolchain` and `lakefile.toml`, pins the reference to a full commit, and
+`lean-toolchain` and a root Lake configuration (`lakefile.toml` or
+`lakefile.lean`, translated with the package's pinned Lake), pins the
+reference to a full commit, and
 then uses the normal lock and environment pipeline. Multiple discovered
 packages must declare the same toolchain unless `--toolchain` explicitly
 selects the compatibility build.
@@ -135,9 +148,10 @@ older stores and for testing a profile before publication.
 
 ## Sparse acquisition and capabilities
 
-`lean-run FILE --plan` reads capsule metadata and reports the exact compressed
+`lean-runtime run FILE --plan` reads capsule metadata and reports the exact compressed
 frames required by `FILE`'s transitive import closure, plus the selected Lean
-check-runtime cost. The operation has no store side effects. `--max-download`
+check-runtime cost. The operation performs no downloads, builds, or publications; constructing
+the runtime may still initialize store metadata directories. `--max-download`
 applies before acquisition to the combined known cost; an unknown component is
 reported explicitly instead of treated as zero.
 
@@ -147,7 +161,13 @@ guesswork: Lean 4.32 and 4.33 reject ordinary imports when the corresponding
 server/private or IR facets are omitted. `.ilean` editor indexes are a separate
 on-demand capability through `Environment.require_capabilities(["editor"],
 imports=[...])`. Native compilation and development builds require a full
-environment and full toolchain; check capsules reject those requests clearly.
+environment and full toolchain. Requesting them through
+`require_capabilities(["native"])` or `["development"]` is currently
+rejected for every managed environment; a full environment provides those
+capabilities through its ordinary built workspace instead. Sparse handles do
+not yet reject `build()` or arbitrary `execute()` early: against an
+incomplete capsule workspace such operations typically fail mid-run, so open
+or build the full environment for them.
 
 ## Replay
 
@@ -256,6 +276,6 @@ self-hosted HTTPS/SSH, and local bare repositories are supported.
 publication and clean-consumer workflow. See
 [Publishing a Lean project](project-publishing.md).
 
-Use global `--publisher_verification required --trusted-publisher ID --trusted-issuer ISSUER`
+Use global `--publisher-verification required --trusted-publisher ID --trusted-issuer ISSUER`
 to require a verified publisher. `build-and-publish --sign` records the trusted
 publisher using the configured Cosign identity.

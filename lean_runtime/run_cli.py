@@ -32,31 +32,37 @@ from .timings import render_timings
 from .wire import envelope, error, serialize_execution_v1
 
 
-def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="lean-run", description="Check one Lean file")
-    root.add_argument("file", type=Path)
-    root.add_argument("--with", dest="requires", action="append", default=[])
-    root.add_argument("--lock", type=Path, help="use an exact environment lock")
-    root.add_argument("--lock-out", type=Path, help="write the resolved exact lock")
-    root.add_argument("--toolchain", help="Lean version for a core-only file")
-    root.add_argument("--catalog", type=Path, help="override the bundled discovery catalog")
-    root.add_argument(
+def add_run_arguments(parser: argparse.ArgumentParser, *, standalone: bool = True) -> None:
+    """Register the front-door arguments shared by `lean-run` and `lean-runtime run`.
+
+    With ``standalone=False`` the options that also exist as `lean-runtime`
+    global options use ``argparse.SUPPRESS`` defaults, so a value parsed by the
+    root parser survives unless it is repeated after the subcommand.
+    """
+    shared: dict[str, Any] = {} if standalone else {"default": argparse.SUPPRESS}
+    parser.add_argument("file", type=Path)
+    parser.add_argument("--with", dest="requires", action="append", default=[])
+    parser.add_argument("--lock", type=Path, help="use an exact environment lock")
+    parser.add_argument("--lock-out", type=Path, help="write the resolved exact lock")
+    parser.add_argument("--toolchain", help="Lean version for a core-only file")
+    parser.add_argument("--catalog", type=Path, help="override the bundled discovery catalog")
+    parser.add_argument(
         "--no-discover",
         action="store_true",
         help="require explicit context or a pinned Lake project",
     )
-    root.add_argument(
+    parser.add_argument(
         "--offline",
         action="store_true",
         help="use retained local environments only",
     )
-    root.add_argument(
+    parser.add_argument(
         "--no-source-build",
         action="store_true",
         help="allow verified downloads but do not build missing environments",
     )
-    root.add_argument("--max-candidates", type=int, default=3)
-    root.add_argument(
+    parser.add_argument("--max-candidates", type=int, default=3)
+    parser.add_argument(
         "--search-timeout",
         "--discovery-timeout",
         dest="search_timeout",
@@ -64,41 +70,47 @@ def parser() -> argparse.ArgumentParser:
         default=90.0,
         help="budget for ranking and compiler probes (--discovery-timeout is a deprecated alias)",
     )
-    root.add_argument(
+    parser.add_argument(
         "--acquire-timeout",
         type=float,
         default=1800.0,
         help="budget for downloading, installing, or building one candidate environment",
     )
-    root.add_argument("--home", help="runtime store root")
-    root.add_argument("--json", action="store_true")
-    root.add_argument(
+    parser.add_argument("--home", help="runtime store root", **shared)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument(
         "--json-events",
         action="store_true",
         help="stream runtime lifecycle events to stderr as JSON lines",
     )
-    root.add_argument("--quiet", action="store_true")
-    root.add_argument(
-        "--verbose", action="store_true", help="show every runtime event while preparing"
+    parser.add_argument("--quiet", action="store_true", **shared)
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="show every runtime event while preparing",
+        **shared,
     )
-    root.add_argument(
+    parser.add_argument(
         "--max-download",
         type=parse_byte_size,
         metavar="SIZE",
         help="fail instead of downloading more than SIZE (e.g. 500MiB)",
     )
-    root.add_argument(
+    parser.add_argument(
         "--plan",
         action="store_true",
         help="report the acquisition cost without downloading or checking",
     )
-    root.add_argument(
+    parser.add_argument(
         "--explain", action="store_true", help="explain context selection without running"
     )
-    root.add_argument(
-        "--timings", action="store_true", help="show preparation and execution timings"
+    parser.add_argument(
+        "--timings",
+        action="store_true",
+        help="show preparation and execution timings",
+        **shared,
     )
-    root.add_argument(
+    parser.add_argument(
         "--check-timeout",
         "--timeout",
         dest="check_timeout",
@@ -106,7 +118,36 @@ def parser() -> argparse.ArgumentParser:
         default=300,
         help="budget for one Lean invocation (--timeout is a deprecated alias)",
     )
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(
+        prog="lean-run",
+        description=(
+            "Discover or select an exact Lean context and check one file. "
+            "Shortcut for `lean-runtime run`."
+        ),
+        epilog="Equivalent canonical spelling: lean-runtime run FILE",
+    )
+    add_run_arguments(root, standalone=True)
     return root
+
+
+def _selected_policy(arguments: argparse.Namespace) -> tuple[str, tuple[str, ...] | None]:
+    """Resolve availability and libraries from run flags and any global options."""
+    global_availability = getattr(arguments, "availability", None)
+    global_libraries = getattr(arguments, "libraries", None)
+    if arguments.offline and global_availability in {"auto", "required"}:
+        raise SpecificationError(
+            "--offline cannot be combined with --availability auto or required"
+        )
+    if arguments.no_source_build and global_availability == "local":
+        raise SpecificationError("--no-source-build cannot be combined with --availability local")
+    if arguments.offline:
+        return "local", ()
+    availability = "required" if arguments.no_source_build else (global_availability or "auto")
+    libraries = tuple(global_libraries) if global_libraries else None
+    return availability, libraries
 
 
 def _catalog(path: Path | None) -> Catalog:
@@ -296,8 +337,8 @@ def _render_plan(report: dict[str, Any], *, as_json: bool) -> None:
         print(f"Download limit: {format_byte_size(limit)} ({'ok' if allowed else 'exceeded'})")
 
 
-def main(argv: list[str] | None = None) -> int:
-    arguments = parser().parse_args(argv)
+def run(arguments: argparse.Namespace, *, command_name: str = "lean-run") -> int:
+    """Execute the shared front-door workflow for `lean-run` and `lean-runtime run`."""
     source_path = arguments.file.expanduser().resolve()
     renderer = ConsoleRenderer(
         mode="quiet" if arguments.quiet or arguments.json else None,
@@ -375,10 +416,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if arguments.plan:
             lock, candidate_id = _plan_lock(arguments, context, source, source_path)
+            _, plan_libraries = _selected_policy(arguments)
             runtime = Runtime(
                 home=arguments.home,
                 max_download_bytes=arguments.max_download,
-                libraries=() if arguments.offline else None,
+                libraries=plan_libraries,
             )
             report = runtime.plan_exact(lock, import_roots=analyze_source(source).imports)
             if candidate_id is not None:
@@ -396,14 +438,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
             renderer(event)
 
-        availability = (
-            "local" if arguments.offline else ("required" if arguments.no_source_build else "auto")
-        )
+        availability, libraries = _selected_policy(arguments)
         runtime = Runtime(
             home=arguments.home,
             on_event=observe,
             availability=availability,
-            libraries=() if arguments.offline else None,
+            libraries=libraries,
             max_download_bytes=arguments.max_download,
         )
         policy = ExecutionPolicy(timeout_seconds=arguments.check_timeout)
@@ -507,8 +547,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         else:
-            print(f"lean-run: {exc}", file=sys.stderr)
+            print(f"{command_name}: {exc}", file=sys.stderr)
         return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(parser().parse_args(argv), command_name="lean-run")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Make `lean-runtime run FILE` the canonical front-door spelling; `lean-run`
+  remains a permanently supported alias sharing one parser and implementation,
+  with identical results, envelopes, and exit codes. Global `--home`,
+  `--quiet`, `--verbose`, and `--timings` are accepted both before and after
+  `run`, and global `--library`/`--availability` now reach the front door with
+  explicit conflict errors against `--offline` and `--no-source-build`.
+- Derive shell completion from an explicit public-command list so hidden
+  compatibility commands no longer leak; compatibility command help now names
+  the preferred replacement, `check`/`open`/`prepare`/`download`/`build` help
+  disambiguates the vocabulary, and a misplaced `lean-runtime FILE.lean`
+  invocation suggests `lean-runtime run`.
+- Publish `lean-runtime.plan/v1` as an installed schema and register the
+  `check-batch` schema with the schema resources API.
+- Align documentation with the implementation: correct `--publisher-verification`
+  spelling, document `capsule-lock_<sha>` canonical publication references, name
+  the actual verification check codes, scope the attestation predicate and
+  credential-retention claims, note `lakefile.lean` package-reference support,
+  qualify offline behavior for sparse projections and capture replay, scope the
+  closed JSON-envelope claim to the versioned precision surfaces, and replace
+  "side-effect-free" planning claims with the precise guarantee.
+
 ## 2.10.0 - 2026-08-16
 
 - Make header snapshots opt-in (`LEAN_RUNTIME_HEADER_SNAPSHOTS=1`; `--watch` and

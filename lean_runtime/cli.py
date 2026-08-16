@@ -35,6 +35,8 @@ from .policies import ExecutionPolicy, format_byte_size, parse_byte_size
 from .profiling import ProfileReport
 from .project_sharing import AdoptionPlan, ProjectInitPlan, ProjectUpdatePlan
 from .projects import discover_project, project_publication_workflow
+from .run_cli import add_run_arguments as _add_run_arguments
+from .run_cli import run as _run_front_door
 from .runtime import Runtime
 from .specs import EnvironmentSpec
 from .store import CleanupReport, DownloadCleanupReport, StoreStatus
@@ -476,8 +478,37 @@ def _mathlib_version(value: str) -> str:
     )
 
 
+# The public command vocabulary offered by shell completion and top-level help.
+# Compatibility aliases (check-file, profile, matrix, save-copy, open-copy,
+# build-and-publish, finalize-publication, program-*, toolchain-*) stay
+# accepted but are deliberately absent here.
+PUBLIC_COMMANDS = (
+    "run",
+    "init",
+    "check",
+    "build",
+    "update",
+    "project",
+    "prepare",
+    "open",
+    "download",
+    "environments",
+    "inspect",
+    "verify",
+    "compare",
+    "storage",
+    "clean",
+    "doctor",
+    "publish",
+    "finalize",
+    "copy",
+    "replay",
+    "completion",
+)
+
+
 def _completion_script(shell: str) -> str:
-    command_names = sorted(cast(Any, parser())._subparsers._group_actions[0].choices)
+    command_names = sorted(PUBLIC_COMMANDS)
     words = " ".join(command_names)
     if shell == "bash":
         return f"complete -W '{words}' lean-runtime\n"
@@ -505,11 +536,19 @@ def parser() -> argparse.ArgumentParser:
         prog="lean-runtime",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Common workflows:
-  Daily         init · check · build · update
+  One file      run
+  Daily project init · check · build · update
   Project       project scan · attach · detach · update
   Environments  environments · inspect · storage · clean · doctor
   Publishing    project init-publish · publish · finalize
 
+Examples:
+  lean-runtime run Main.lean
+  lean-runtime init MyProof
+  lean-runtime check MyProof/Basic.lean
+  lean-runtime build
+
+The shorter `lean-run FILE` command is an alias for `lean-runtime run FILE`.
 Run `lean-runtime COMMAND --help` for examples and options.""",
     )
     root.add_argument(
@@ -533,6 +572,38 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     root.add_argument("--trusted-issuer")
     root.add_argument("--verification-tool", default="cosign")
     commands = root.add_subparsers(dest="command", required=True, metavar="COMMAND")
+
+    front_door = commands.add_parser(
+        "run",
+        help="discover context and check one Lean file",
+        description=(
+            "Discover or select an exact Lean context, then check one Lean file. "
+            "The shorter `lean-run` command is an equivalent convenience alias."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""context precedence:
+  1. --lock or frontmatter lock
+  2. --with or frontmatter requires
+  3. --toolchain or frontmatter toolchain
+  4. nearest pinned Lake project
+  5. bounded exact-environment discovery
+
+examples:
+  lean-runtime run Main.lean
+  lean-runtime run Main.lean --with mathlib@v4.33.0
+  lean-runtime run Main.lean --lock environment.lock.json
+  lean-runtime run Main.lean --lock-out environment.lock.json
+  lean-runtime run Main.lean --plan
+  lean-runtime run Main.lean --offline
+
+Shortcut:
+  lean-run Main.lean
+
+Environment-library options are global and precede `run`:
+  lean-runtime --library ghcr.io/owner/environments \\
+    --availability required run Main.lean""",
+    )
+    _add_run_arguments(front_door, standalone=False)
 
     completion = commands.add_parser("completion", help="generate shell completion")
     completion.add_argument("shell", choices=("bash", "zsh", "fish"))
@@ -601,21 +672,45 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     copy_open.add_argument("--name")
     copy_open.add_argument("--no-probe", action="store_true", help="skip the Lean import probe")
 
-    resolve = commands.add_parser("prepare", help="prepare an exact environment description")
+    resolve = commands.add_parser(
+        "prepare",
+        help="resolve an environment specification into an exact lock",
+        description=(
+            "Resolve an environment specification into an exact lock. This does "
+            "not check a Lean source file; use `run` or `check` for that."
+        ),
+    )
     resolve.add_argument("spec", type=Path)
     resolve.add_argument("--output", type=Path)
     resolve.add_argument("--timeout", type=float, default=900)
 
-    ensure = commands.add_parser("open", help="open or build an exact environment")
+    ensure = commands.add_parser(
+        "open",
+        help="open or materialize an exact environment from a lock",
+        description=(
+            "Open an exact environment lock, downloading or building it if "
+            "needed. This does not check a Lean source file; use `run` or "
+            "`check` for that."
+        ),
+    )
     ensure.add_argument("lock", type=Path)
     ensure.add_argument("--name")
 
-    pull = commands.add_parser("download", help="download an exact environment from a library")
+    pull = commands.add_parser(
+        "download",
+        help="download and verify an exact environment from a configured library",
+        description=(
+            "Download and verify an exact environment from a configured "
+            "library. This does not check a Lean source file."
+        ),
+    )
     pull.add_argument("lock", type=Path)
     pull.add_argument("--name")
 
     push = commands.add_parser(
-        "build-and-publish", help="build an exact environment and publish it to a library"
+        "build-and-publish",
+        help="build an exact environment and publish it to a library",
+        description="Compatibility command. Prefer: lean-runtime publish environment ...",
     )
     push.add_argument("lock", nargs="?", type=Path)
     push.add_argument("--publish-to", required=True)
@@ -651,7 +746,9 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     )
 
     publish_index = commands.add_parser(
-        "finalize-publication", help="combine computer-specific publication results"
+        "finalize-publication",
+        help="combine computer-specific publication results",
+        description="Compatibility command. Prefer: lean-runtime finalize environment ...",
     )
     publish_index.add_argument("lock_id")
     publish_index.add_argument("platform_results", nargs="+", type=Path)
@@ -674,12 +771,18 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     toolchain_finalize.add_argument("--library", required=True)
     toolchain_finalize.add_argument("--sign", action="store_true")
 
-    export = commands.add_parser("save-copy", help="save a verified portable environment copy")
+    export = commands.add_parser(
+        "save-copy",
+        help="save a verified portable environment copy",
+        description="Compatibility command. Prefer: lean-runtime copy save ...",
+    )
     export.add_argument("environment")
     export.add_argument("--output", required=True, type=Path)
 
     import_bundle = commands.add_parser(
-        "open-copy", help="verify and open a portable environment copy"
+        "open-copy",
+        help="verify and open a portable environment copy",
+        description="Compatibility command. Prefer: lean-runtime copy open ...",
     )
     import_bundle.add_argument("copy", type=Path)
     import_bundle.add_argument("--name")
@@ -738,9 +841,17 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
 
     check = commands.add_parser(
         "check",
-        help="check Lean files or all local libraries",
+        help="check files in a pinned Lake project or explicit environment",
+        description=(
+            "Check one or more files in a known context, or check every local "
+            "library in a pinned Lake project. Unlike `run`, this command does "
+            "not automatically search the standalone environment catalog when "
+            "no context is available; use `lean-runtime run FILE` for automatic "
+            "standalone context discovery."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
+  lean-runtime run Foo.lean                   discover an exact context for a standalone file
   lean-runtime check                          check every local library of this project
   lean-runtime check Foo.lean                 check one file in its discovered project
   lean-runtime check Foo.lean Bar.lean        check several files, one result per file
@@ -833,14 +944,22 @@ LEAN_RUNTIME_HEADER_SNAPSHOTS=1 to enable them for one-shot checks.""",
         "native compilation need the full toolchain again",
     )
 
-    profile = commands.add_parser("profile", help="measure repeated checks in one environment")
+    profile = commands.add_parser(
+        "profile",
+        help="measure repeated checks in one environment",
+        description="Compatibility command. Prefer: lean-runtime check FILE --repeat N",
+    )
     profile.add_argument("environment", help="environment name or exact lock path")
     profile.add_argument("file", type=Path)
     profile.add_argument("--warmup", type=int, default=1)
     profile.add_argument("--repeat", type=int, default=5)
     profile.add_argument("--json", action="store_true")
 
-    matrix = commands.add_parser("matrix", help="check one file across exact contexts")
+    matrix = commands.add_parser(
+        "matrix",
+        help="check one file across exact contexts",
+        description="Compatibility command. Prefer: lean-runtime check FILE --across MATRIX.toml",
+    )
     matrix.add_argument("configuration", type=Path)
     matrix.add_argument("file", type=Path)
     matrix.add_argument("--concurrency", type=int, default=1)
@@ -865,7 +984,12 @@ LEAN_RUNTIME_HEADER_SNAPSHOTS=1 to enable them for one-shot checks.""",
     gc.add_argument("--json", action="store_true")
 
     raw = commands.add_parser(
-        "check-file", help="check a file, discovering its local Lake project when possible"
+        "check-file",
+        help="check a file, discovering its local Lake project when possible",
+        description=(
+            "Compatibility command. Prefer: lean-runtime check FILE, or "
+            "lean-runtime run FILE for standalone discovery."
+        ),
     )
     raw.add_argument("file", type=Path, help="Lean source file, or - for stdin")
     raw.add_argument("--toolchain")
@@ -873,7 +997,14 @@ LEAN_RUNTIME_HEADER_SNAPSHOTS=1 to enable them for one-shot checks.""",
     raw.add_argument("--json", action="store_true")
     _add_policy(raw)
 
-    build = commands.add_parser("build", help="build an existing Lake project")
+    build = commands.add_parser(
+        "build",
+        help="build an existing Lake project",
+        description=(
+            "Run a complete Lake-compatible build of a pinned local project. "
+            "For proof checking without project targets, use `check`."
+        ),
+    )
     build.add_argument("project", type=Path, nargs="?", default=Path("."))
     build.add_argument("targets", nargs="*")
     build.add_argument("--toolchain")
@@ -1023,6 +1154,7 @@ LEAN_RUNTIME_HEADER_SNAPSHOTS=1 to enable them for one-shot checks.""",
     project_update.add_argument("--max-download", metavar="SIZE")
     project_update.add_argument("--json", action="store_true")
     visible = {
+        "run",
         "init",
         "check",
         "build",
@@ -1052,7 +1184,19 @@ LEAN_RUNTIME_HEADER_SNAPSHOTS=1 to enable them for one-shot checks.""",
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parser().parse_args(argv)
+    raw_arguments = list(sys.argv[1:]) if argv is None else list(argv)
+    first_positional = next((token for token in raw_arguments if not token.startswith("-")), None)
+    if first_positional is not None and first_positional.endswith(".lean"):
+        print(
+            f"lean-runtime: {first_positional!r} is a Lean file, not a command.\n"
+            f"Try: lean-runtime run {first_positional}\n"
+            f"Shortcut: lean-run {first_positional}",
+            file=sys.stderr,
+        )
+        return 2
+    args = parser().parse_args(raw_arguments)
+    if args.command == "run":
+        return _run_front_door(args, command_name="lean-runtime run")
     if args.command == "publish":
         args.command = {
             "environment": "build-and-publish",

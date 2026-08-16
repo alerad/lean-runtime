@@ -134,7 +134,7 @@ For standalone source, configure the library and use the exact GitHub reference:
 ```bash
 export LEAN_RUNTIME_LIBRARIES=ghcr.io/OWNER/my-project-environments
 
-lean-run Main.lean \
+lean-runtime run Main.lean \
   --with github:OWNER/REPOSITORY@FULL_COMMIT \
   --no-source-build
 ```
