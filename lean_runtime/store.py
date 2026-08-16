@@ -163,6 +163,38 @@ def _tree_bytes(root: Path) -> int:
     return total
 
 
+class WorkspaceLease:
+    """Process-held ownership for disposable store workspaces."""
+
+    def __init__(self, store: EnvironmentStore, path: Path, kind: str) -> None:
+        self.store = store
+        self.path = path
+        self.kind = kind
+        self._lock = FileLock(store._workspace_lock_path(path))
+        self.path.mkdir(parents=True, exist_ok=True)
+        self._lock.__enter__()
+        try:
+            write_json_atomic(
+                self.path / ".lean-runtime-workspace.json",
+                {
+                    "schema": "lean-runtime.workspace/v1",
+                    "kind": kind,
+                    "pid": os.getpid(),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        except BaseException:
+            self._lock.__exit__(None, None, None)
+            raise
+
+    def close(self) -> None:
+        try:
+            if self.path.exists():
+                remove_tree(self.path)
+        finally:
+            self._lock.__exit__(None, None, None)
+
+
 @dataclass(frozen=True, slots=True)
 class CleanupReport:
     candidates: tuple[str, ...]
@@ -243,6 +275,8 @@ class StoreStatus:
     project_packages_bytes: int = 0
     toolchains_bytes: int = 0
     executions_bytes: int = 0
+    scratch_workspaces: int = 0
+    scratch_bytes: int = 0
     environment_usage: tuple[EnvironmentUsage, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -265,6 +299,8 @@ class StoreStatus:
             "project_packages_bytes": self.project_packages_bytes,
             "toolchains_bytes": self.toolchains_bytes,
             "executions_bytes": self.executions_bytes,
+            "scratch_workspaces": self.scratch_workspaces,
+            "scratch_bytes": self.scratch_bytes,
             "environment_usage": [usage.to_dict() for usage in self.environment_usage],
         }
 
@@ -321,6 +357,29 @@ class EnvironmentStore:
 
     def lock_path(self, lock_id: str) -> Path:
         return self.locks / lock_id / "environment.lock.json"
+
+    def _workspace_lock_path(self, path: Path) -> Path:
+        identity = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
+        return self.lock_dir / f"workspace-{identity}.lock"
+
+    def lease_workspace(self, path: Path, kind: str) -> WorkspaceLease:
+        return WorkspaceLease(self, path, kind)
+
+    def _scratch_paths(self) -> tuple[Path, ...]:
+        resolution = self.home / "resolution"
+        return tuple(
+            [path for path in self.jobs.glob("execution_*") if path.is_dir()]
+            + [path for path in self.jobs.glob(".trash-execution_*") if path.is_dir()]
+            + [path for path in resolution.glob("resolve-*") if path.is_dir()]
+            + [path for path in resolution.glob(".trash-resolve-*") if path.is_dir()]
+        )
+
+    def _workspace_active(self, path: Path) -> bool:
+        try:
+            with FileLock(self._workspace_lock_path(path), timeout=0):
+                return False
+        except EnvironmentError:
+            return True
 
     def publish_lock(self, lock: EnvironmentLock) -> Path:
         destination = self.lock_path(lock.lock_id)
@@ -642,6 +701,8 @@ class EnvironmentStore:
             self.home / "project-workspaces",
             self.home / "elan",
             self.home / "toolchains",
+            self.jobs,
+            self.home / "resolution",
         )
         fingerprint: list[list[object]] = []
         for root in roots:
@@ -703,6 +764,8 @@ class EnvironmentStore:
         )
         toolchains_bytes = _tree_bytes(self.home / "elan") + _tree_bytes(self.home / "toolchains")
         executions_bytes = _tree_bytes(self.executions)
+        scratch_paths = self._scratch_paths()
+        scratch_bytes = sum(_tree_bytes(path) for path in scratch_paths)
         bytes_used = sum(
             (
                 environments_bytes,
@@ -712,6 +775,7 @@ class EnvironmentStore:
                 project_packages_bytes,
                 toolchains_bytes,
                 executions_bytes,
+                scratch_bytes,
                 _tree_bytes(self.locks),
                 _tree_bytes(self.names),
             )
@@ -739,6 +803,8 @@ class EnvironmentStore:
             project_packages_bytes=project_packages_bytes,
             toolchains_bytes=toolchains_bytes,
             executions_bytes=executions_bytes,
+            scratch_workspaces=len(scratch_paths),
+            scratch_bytes=scratch_bytes,
             environment_usage=tuple(usage),
         )
         write_json_atomic(ledger, {"fingerprint": fingerprint, "status": status.to_dict()})
@@ -832,6 +898,62 @@ class EnvironmentStore:
             dry_run,
             candidate_bytes=candidate_bytes,
             reclaimed_bytes=reclaimed_bytes,
+        )
+
+    def clean_scratch(
+        self,
+        *,
+        dry_run: bool = True,
+        minimum_age_seconds: float = 3600,
+        include_legacy: bool = True,
+    ) -> CleanupReport:
+        """Remove disposable workspaces whose process ownership lease is no longer held."""
+        now = time.time()
+        candidates: list[str] = []
+        retained: list[str] = []
+        removed: list[str] = []
+        candidate_bytes = 0
+        reclaimed_bytes = 0
+        with FileLock(self.lock_dir / "scratch-gc.lock"):
+            for path in self._scratch_paths():
+                try:
+                    age = now - path.stat().st_mtime
+                except OSError:
+                    continue
+                label = f"{path.parent.name}/{path.name}"
+                marker = path / ".lean-runtime-workspace.json"
+                if (
+                    age < minimum_age_seconds
+                    or (not include_legacy and not marker.is_file())
+                    or self._workspace_active(path)
+                ):
+                    retained.append(label)
+                    continue
+                size = _tree_bytes(path)
+                candidates.append(label)
+                candidate_bytes += size
+                if dry_run:
+                    continue
+                if path.name.startswith(".trash-"):
+                    remove_tree(path)
+                    removed.append(label)
+                    reclaimed_bytes += size
+                    continue
+                tombstone = path.with_name(f".trash-{path.name}-{uuid.uuid4().hex}")
+                try:
+                    path.replace(tombstone)
+                except FileNotFoundError:
+                    continue
+                remove_tree(tombstone)
+                removed.append(label)
+                reclaimed_bytes += size
+        return CleanupReport(
+            tuple(candidates),
+            tuple(removed),
+            tuple(retained),
+            dry_run,
+            candidate_bytes,
+            reclaimed_bytes,
         )
 
     def clean_downloads(

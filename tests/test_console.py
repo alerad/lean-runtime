@@ -62,6 +62,18 @@ def test_quiet_mode_prints_nothing_ever() -> None:
     assert stream.getvalue() == ""
 
 
+def test_check_progress_is_compact_and_tty_only() -> None:
+    tty, tty_stream = _renderer("tty")
+    tty(_event("check.started", subject="Basic.lean"))
+    tty(_event("check.completed", ok=True))
+    assert "Checking Basic.lean…" in tty_stream.getvalue()
+
+    plain, plain_stream = _renderer("plain")
+    plain(_event("check.started", subject="Basic.lean"))
+    plain(_event("check.completed", ok=True))
+    assert plain_stream.getvalue() == ""
+
+
 def test_plain_mode_prints_plan_and_checkpoints() -> None:
     renderer, stream = _renderer("plain")
     renderer(

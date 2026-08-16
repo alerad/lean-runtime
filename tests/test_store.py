@@ -74,6 +74,41 @@ def test_aliases_and_garbage_collection(tmp_path: Path) -> None:
     assert not candidate.exists()
 
 
+def test_scratch_cleanup_retains_leased_and_reclaims_abandoned_workspaces(
+    tmp_path: Path,
+) -> None:
+    store = EnvironmentStore(tmp_path / "runtime")
+    active = store.jobs / ("execution_" + "a" * 64)
+    lease = store.lease_workspace(active, "test")
+    (active / "payload").write_bytes(b"active")
+    abandoned = store.jobs / ("execution_" + "b" * 64)
+    abandoned.mkdir()
+    (abandoned / "payload").write_bytes(b"abandoned")
+
+    preview = store.clean_scratch(dry_run=True, minimum_age_seconds=0)
+    assert f"jobs/{abandoned.name}" in preview.candidates
+    assert f"jobs/{active.name}" in preview.retained
+
+    applied = store.clean_scratch(dry_run=False, minimum_age_seconds=0)
+    assert f"jobs/{abandoned.name}" in applied.removed
+    assert active.is_dir()
+    assert not abandoned.exists()
+    lease.close()
+
+
+def test_storage_status_counts_scratch_workspaces(tmp_path: Path) -> None:
+    store = EnvironmentStore(tmp_path / "runtime")
+    abandoned = store.home / "resolution" / "resolve-old"
+    abandoned.mkdir(parents=True)
+    (abandoned / "payload").write_bytes(b"scratch")
+
+    status = store.status(verify=True)
+
+    assert status.scratch_workspaces == 1
+    assert status.scratch_bytes >= len(b"scratch")
+    assert status.bytes_used >= status.scratch_bytes
+
+
 def test_alias_update_does_not_mutate_environment(tmp_path: Path) -> None:
     store = EnvironmentStore(tmp_path)
     first = store.environment_path(FIRST)

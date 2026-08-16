@@ -93,6 +93,12 @@ Short-lived execution leases prevent deletion during cloning without
 serializing concurrent checks. Locks and source snapshots remain retained in
 the current store schema.
 
+Disposable execution and dependency-resolution workspaces carry their own
+process-held ownership leases. `storage` includes them under `Scratch`, and
+`clean` previews and reclaims abandoned workspaces while retaining every
+workspace with a live owner. Legacy scratch directories created before ownership
+metadata are removed only by an explicit `clean --execute` after the safety grace.
+
 Sparse downloads are stored once by artifact digest under the shared module
 CAS and hardlinked into environment projections when the filesystem permits.
 `lean-runtime storage` reports this category separately. Because it is shared,

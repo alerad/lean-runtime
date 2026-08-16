@@ -707,14 +707,11 @@ class Environment:
             },
         )
         job_parent = self.manager.store.jobs / execution_id
-        job_parent.mkdir(parents=True, exist_ok=True)
+        workspace_lease = self.manager.store.lease_workspace(job_parent, "interactive-environment")
         instance = job_parent / f"instance-{uuid.uuid4().hex}"
 
         def cleanup() -> None:
-            if instance.exists():
-                remove_tree(instance)
-            with suppress(OSError):
-                job_parent.rmdir()
+            workspace_lease.close()
 
         try:
             with self.manager.store.execution_lease(self.id):
@@ -844,7 +841,7 @@ class Environment:
             },
         )
         job_parent = self.manager.store.jobs / execution_id
-        job_parent.mkdir(parents=True, exist_ok=True)
+        workspace_lease = self.manager.store.lease_workspace(job_parent, f"environment-{operation}")
         instance = job_parent / f"instance-{uuid.uuid4().hex}"
         try:
             instance_started = time.monotonic()
@@ -994,10 +991,7 @@ class Environment:
             )
             return result
         finally:
-            if instance.exists():
-                remove_tree(instance)
-            with suppress(OSError):
-                job_parent.rmdir()
+            workspace_lease.close()
 
     def _result(
         self,

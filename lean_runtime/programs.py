@@ -13,7 +13,6 @@ import re
 import tempfile
 import uuid
 from collections.abc import Mapping, Sequence
-from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -270,14 +269,11 @@ class ReadyProgram:
             {"request_digest": request_digest, "started_at": started_at, "nonce": uuid.uuid4().hex},
         )
         job_parent = self.store.jobs / execution_id
-        job_parent.mkdir(parents=True, exist_ok=True)
+        workspace_lease = self.store.lease_workspace(job_parent, "interactive-program")
         instance = job_parent / f"program-{uuid.uuid4().hex}"
 
         def cleanup() -> None:
-            if instance.exists():
-                remove_tree(instance)
-            with suppress(OSError):
-                job_parent.rmdir()
+            workspace_lease.close()
 
         try:
             clone_tree(self.root / "payload", instance)

@@ -277,7 +277,12 @@ def test_publish_access_denial_exits_three_without_opening_environment(monkeypat
     def unexpected_open(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("environment opened before publication access was verified")
 
-    monkeypatch.setattr("lean_runtime.cli.Runtime.check_publication_access", denied)
+    monkeypatch.setattr(
+        "lean_runtime.cli.Runtime.begin_publication",
+        lambda self, library, **_kwargs: SimpleNamespace(
+            check_access=lambda: denied(self, library)
+        ),
+    )
     monkeypatch.setattr("lean_runtime.cli.Runtime.open_exact", unexpected_open)
 
     result = main(
@@ -301,7 +306,12 @@ def test_publish_check_access_needs_no_lock(monkeypatch, capsys) -> None:
     def allowed(_self, _library: str) -> PublicationAccess:
         return PublicationAccess("ghcr.io/owner/cache", "owner", "GitHub CLI", True)
 
-    monkeypatch.setattr("lean_runtime.cli.Runtime.check_publication_access", allowed)
+    monkeypatch.setattr(
+        "lean_runtime.cli.Runtime.begin_publication",
+        lambda self, library, **_kwargs: SimpleNamespace(
+            check_access=lambda: allowed(self, library)
+        ),
+    )
     result = main(
         [
             "publish",
@@ -330,7 +340,12 @@ def test_publish_failure_json_is_a_versioned_envelope(monkeypatch, capsys) -> No
             hint="refresh scopes",
         )
 
-    monkeypatch.setattr("lean_runtime.cli.Runtime.check_publication_access", denied)
+    monkeypatch.setattr(
+        "lean_runtime.cli.Runtime.begin_publication",
+        lambda self, library, **_kwargs: SimpleNamespace(
+            check_access=lambda: denied(self, library)
+        ),
+    )
     result = main(
         [
             "publish",
@@ -353,9 +368,11 @@ def test_publish_failure_json_is_a_versioned_envelope(monkeypatch, capsys) -> No
 
 def test_publish_access_json_is_a_versioned_envelope(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
-        "lean_runtime.cli.Runtime.check_publication_access",
-        lambda _self, _library: PublicationAccess(
-            "ghcr.io/owner/cache", "owner", "GitHub CLI", True
+        "lean_runtime.cli.Runtime.begin_publication",
+        lambda _self, _library, **_kwargs: SimpleNamespace(
+            check_access=lambda: PublicationAccess(
+                "ghcr.io/owner/cache", "owner", "GitHub CLI", True
+            )
         ),
     )
     result = main(

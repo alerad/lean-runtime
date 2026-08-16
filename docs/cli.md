@@ -215,6 +215,9 @@ lean-runtime check research-stack Main.lean --include Support/Defs.lean
 ```
 
 Resolution and materialization print structured lifecycle progress to stderr.
+One-shot checks show a compact in-place status on interactive terminals while Lean
+is working. Redirected output, `--json`, and `--quiet` remain free of human progress;
+`--timings` separates command preparation from Lean execution.
 Pass global `--quiet` before the subcommand to suppress it.
 
 Pass global `--timings` before the subcommand for stable phase timing output. Machine-readable

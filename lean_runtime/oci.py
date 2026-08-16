@@ -29,6 +29,7 @@ from .bundles import (
 )
 from .capsules import CapsuleManifest
 from .errors import (
+    CredentialAcquisitionError,
     DownloadLimitExceeded,
     DownloadUnavailable,
     EnvironmentError,
@@ -76,14 +77,19 @@ class RegistryCredential:
         return self.username is not None and self.password is not None
 
     @classmethod
-    def discover(cls, repository: OCIRepository) -> RegistryCredential:
+    def discover(
+        cls, repository: OCIRepository, *, timeout: float = 10
+    ) -> RegistryCredential:
         username = os.environ.get("LEAN_RUNTIME_REGISTRY_USERNAME")
         password = os.environ.get("LEAN_RUNTIME_REGISTRY_PASSWORD")
         if username is not None or password is not None:
             if not username or not password:
-                raise EnvironmentError(
+                raise CredentialAcquisitionError(
                     "registry credentials require both LEAN_RUNTIME_REGISTRY_USERNAME "
-                    "and LEAN_RUNTIME_REGISTRY_PASSWORD"
+                    "and LEAN_RUNTIME_REGISTRY_PASSWORD",
+                    provider="environment",
+                    failure_kind="invalid_configuration",
+                    retryable=False,
                 )
             return cls(username, password, "environment")
         if repository.registry == "ghcr.io" and shutil.which("gh") is not None:
@@ -102,11 +108,23 @@ class RegistryCredential:
                     ),
                     text=True,
                     capture_output=True,
-                    timeout=5,
+                    timeout=timeout,
                     check=False,
                 )
-            except (OSError, subprocess.TimeoutExpired):
-                return cls(None, None, "GitHub CLI")
+            except subprocess.TimeoutExpired as exc:
+                raise CredentialAcquisitionError(
+                    f"GitHub CLI credential acquisition timed out after {timeout:g} seconds",
+                    provider="GitHub CLI",
+                    failure_kind="timeout",
+                    retryable=True,
+                ) from exc
+            except OSError as exc:
+                raise CredentialAcquisitionError(
+                    f"GitHub CLI credential acquisition failed: {exc}",
+                    provider="GitHub CLI",
+                    failure_kind="process_error",
+                    retryable=False,
+                ) from exc
             try:
                 payload = json.loads(status.stdout)
                 accounts = payload.get("hosts", {}).get("github.com", [])
@@ -118,19 +136,44 @@ class RegistryCredential:
                     ),
                     None,
                 )
-            except (AttributeError, json.JSONDecodeError):
-                return cls(None, None, "GitHub CLI")
+            except (AttributeError, json.JSONDecodeError) as exc:
+                raise CredentialAcquisitionError(
+                    "GitHub CLI returned malformed authentication status",
+                    provider="GitHub CLI",
+                    failure_kind="invalid_response",
+                    retryable=False,
+                ) from exc
             if isinstance(active, dict):
                 selected_username = active.get("login")
                 selected_token = active.get("token")
-                if isinstance(selected_username, str) and selected_username:
+                selected_state = active.get("state")
+                if (
+                    isinstance(selected_username, str)
+                    and selected_username
+                    and isinstance(selected_token, str)
+                    and selected_token
+                    and selected_state in {None, "success"}
+                ):
                     return cls(
                         selected_username,
-                        selected_token
-                        if isinstance(selected_token, str) and selected_token
-                        else None,
+                        selected_token,
                         "GitHub CLI",
                     )
+                raise CredentialAcquisitionError(
+                    "GitHub CLI has an active account but did not provide a usable token",
+                    provider="GitHub CLI",
+                    failure_kind="token_unavailable",
+                    retryable=False,
+                )
+            if accounts:
+                detail = status.stderr.strip()
+                raise CredentialAcquisitionError(
+                    "GitHub CLI has configured accounts but none is usable"
+                    + (f": {detail}" if detail else ""),
+                    provider="GitHub CLI",
+                    failure_kind="account_unavailable",
+                    retryable=False,
+                )
         return cls(None, None, "anonymous")
 
 
@@ -251,6 +294,8 @@ class OCIRegistryClient:
         username: str | None = None,
         password: str | None = None,
     ) -> None:
+        if timeout <= 0:
+            raise ValueError("registry timeout must be positive")
         self.repository = repository
         self.timeout = timeout
         self.user_agent = user_agent
@@ -1220,14 +1265,54 @@ class OCIEnvironmentPublisher:
         store: EnvironmentStore,
         bundles: EnvironmentBundles,
         events: EventEmitter,
+        *,
+        auth_timeout: float = 10,
+        registry_timeout: float = 30,
+        credential: RegistryCredential | None = None,
     ) -> None:
+        if auth_timeout <= 0 or registry_timeout <= 0:
+            raise ValueError("publication timeouts must be positive")
         self.repository = repository
         self.store = store
         self.bundles = bundles
         self.events = events
-        self.credential = RegistryCredential.discover(repository)
+        try:
+            self.credential = credential or RegistryCredential.discover(
+                repository, timeout=auth_timeout
+            )
+        except CredentialAcquisitionError as exc:
+            failure = PublicationError(
+                f"publication authentication failed before registry access: {exc}",
+                phase="credential_acquisition",
+                registry=repository.display,
+                retryable=exc.retryable,
+                credential_source="none",
+                attempted_provider=exc.provider,
+                auth_failure_kind=exc.failure_kind,
+                hint=(
+                    "retry credential acquisition"
+                    if exc.retryable
+                    else "repair the credential provider"
+                ),
+            )
+            events.emit(
+                "library.publish_failed",
+                str(failure),
+                phase=failure.phase,
+                registry=failure.registry,
+                retryable=failure.retryable,
+                published=False,
+                partial=False,
+                credential_source="none",
+                attempted_provider=exc.provider,
+                auth_failure_kind=exc.failure_kind,
+                username=None,
+                hint=failure.hint,
+            )
+            raise failure from exc
         self.client = OCIRegistryClient(
             repository,
+            timeout=registry_timeout,
             username=self.credential.username,
             password=self.credential.password,
         )

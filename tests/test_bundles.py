@@ -31,12 +31,13 @@ from lean_runtime.bundles import (
 )
 from lean_runtime.capsules import build_manifest
 from lean_runtime.environments import ENVIRONMENT_SCHEMA
-from lean_runtime.errors import RegistryRequestError
+from lean_runtime.errors import CredentialAcquisitionError, RegistryRequestError
 from lean_runtime.events import EventEmitter, RuntimeEvent
 from lean_runtime.oci import (
     OCIEnvironmentPublisher,
     OCIRegistryClient,
     OCIRepository,
+    PublicationAccess,
     RegistryCredential,
 )
 from lean_runtime.store import (
@@ -821,6 +822,40 @@ def test_oci_publisher_reports_remote_blob_reuse(tmp_path: Path) -> None:
     assert result.reuse_percent == 100
 
 
+def test_verified_publication_session_is_reused_by_runtime(tmp_path: Path) -> None:
+    producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
+    access_checks = 0
+    publishes = 0
+
+    class VerifiedSession:
+        repository = OCIRepository.parse("oci://registry.example/owner/cache")
+
+        def check_access(self) -> PublicationAccess:
+            nonlocal access_checks
+            access_checks += 1
+            return PublicationAccess(self.repository.display, "owner", "environment", True)
+
+        def publish(self, _environment_id: str, **_kwargs: object) -> object:
+            nonlocal publishes
+            publishes += 1
+            return object()
+
+        def complete(self, _result: object) -> None:
+            pass
+
+    publisher = VerifiedSession()
+    publisher.check_access()
+    producer.publish_environment(
+        environment_id,
+        "oci://registry.example/owner/cache",
+        finalize=False,
+        publisher=publisher,  # type: ignore[arg-type]
+    )
+
+    assert access_checks == 1
+    assert publishes == 1
+
+
 def test_oci_manifest_publication_requires_remote_digest_verification() -> None:
     manifest_data = b'{"schemaVersion":2}'
 
@@ -866,8 +901,8 @@ def test_oci_publisher_denies_access_before_exporting(tmp_path: Path, monkeypatc
         producer.store,
         producer.bundles,
         EventEmitter(events.append),
+        credential=RegistryCredential("owner", "secret", "GitHub CLI"),
     )
-    publisher.credential = RegistryCredential("owner", "secret", "GitHub CLI")
 
     class DeniedClient:
         def check_push_access(self) -> None:
@@ -932,7 +967,7 @@ def test_ghcr_credential_discovery_reads_identity_and_token_once(monkeypatch) ->
     assert "api" not in calls[0]
 
 
-def test_ghcr_credential_discovery_keeps_known_identity_when_token_is_unavailable(
+def test_ghcr_credential_discovery_fails_when_token_is_unavailable(
     monkeypatch,
 ) -> None:
     monkeypatch.delenv("LEAN_RUNTIME_REGISTRY_USERNAME", raising=False)
@@ -949,8 +984,49 @@ def test_ghcr_credential_discovery_keeps_known_identity_when_token_is_unavailabl
         lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, json.dumps(payload), ""),
     )
 
-    credential = RegistryCredential.discover(OCIRepository.parse("oci://ghcr.io/owner/cache"))
-    assert credential == RegistryCredential("owner", None, "GitHub CLI")
+    with pytest.raises(CredentialAcquisitionError, match="did not provide a usable token"):
+        RegistryCredential.discover(OCIRepository.parse("oci://ghcr.io/owner/cache"))
+
+
+def test_partial_environment_credentials_fail_as_authentication_error(monkeypatch) -> None:
+    monkeypatch.setenv("LEAN_RUNTIME_REGISTRY_USERNAME", "owner")
+    monkeypatch.delenv("LEAN_RUNTIME_REGISTRY_PASSWORD", raising=False)
+
+    with pytest.raises(CredentialAcquisitionError) as raised:
+        RegistryCredential.discover(OCIRepository.parse("oci://registry.example/owner/cache"))
+
+    assert raised.value.provider == "environment"
+    assert raised.value.failure_kind == "invalid_configuration"
+    assert raised.value.retryable is False
+
+
+def test_ghcr_credential_timeout_fails_closed_as_retryable_publication(
+    tmp_path: Path, monkeypatch
+) -> None:
+    producer, _environment_id, _lock = _published_runtime(tmp_path / "producer")
+    monkeypatch.delenv("LEAN_RUNTIME_REGISTRY_USERNAME", raising=False)
+    monkeypatch.delenv("LEAN_RUNTIME_REGISTRY_PASSWORD", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/gh")
+
+    def timeout(command: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    with pytest.raises(PublicationError) as raised:
+        OCIEnvironmentPublisher(
+            OCIRepository.parse("oci://ghcr.io/owner/cache"),
+            producer.store,
+            producer.bundles,
+            producer.events,
+            auth_timeout=42,
+        )
+
+    failure = raised.value
+    assert failure.exit_code == 4
+    assert failure.phase == "credential_acquisition"
+    assert failure.credential_source == "none"
+    assert failure.attempted_provider == "GitHub CLI"
+    assert failure.auth_failure_kind == "timeout"
 
 
 def test_oci_publisher_classifies_retryable_preflight_failure(tmp_path: Path) -> None:
