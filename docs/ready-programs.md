@@ -33,22 +33,22 @@ instead of elaborating a new Lean source file for every item.
 optional flat string provenance. All three contribute to the program ID.
 Opening it later with `runtime.program(program.id)` verifies that none has
 changed. The CLI accepts the same metadata as a JSON object through
-`program-create --provenance-file`.
+`program create --provenance-file`.
 
 ## Move it or share it
 
 Save and open a portable copy:
 
 ```bash
-lean-runtime program-save-copy PROGRAM_ID --output my-program.tar.gz
-lean-runtime program-open-copy my-program.tar.gz
+lean-runtime program save PROGRAM_ID --output my-program.tar.gz
+lean-runtime program open my-program.tar.gz
 ```
 
 Or use a program library:
 
 ```bash
-lean-runtime program-download ghcr.io/example/lean-programs REVISION
-lean-runtime program-publish PROGRAM_ID --library ghcr.io/example/lean-programs
+lean-runtime program download ghcr.io/example/lean-programs REVISION
+lean-runtime publish program PROGRAM_ID --library ghcr.io/example/lean-programs
 ```
 
 A library can be public or private. Authentication follows the credentials your
@@ -56,5 +56,5 @@ library host already provides. OCI is the underlying transfer format, but it is
 not part of the ordinary workflow or vocabulary.
 
 For releases built on several kinds of computers, publish each computer result
-and combine them with `program-finalize-publication`. Downloading then chooses
+and combine them with `finalize program`. Downloading then chooses
 the compatible result automatically.

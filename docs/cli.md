@@ -34,9 +34,7 @@ successful lock, `--no-discover` to require explicit context, and
 `--search-timeout` covers ranking and compiler probes, `--check-timeout`
 covers each Lean invocation, and `--acquire-timeout` independently bounds
 downloading, installing, or building one candidate environment, so a slow
-first-time download cannot expire the search. `--discovery-timeout` and
-`--timeout` remain as deprecated aliases of `--search-timeout` and
-`--check-timeout`. See
+first-time download cannot expire the search. See
 [Standalone Lean files](standalone-files.md) for routing and policy details.
 
 ## `lean-runtime`
@@ -44,9 +42,9 @@ first-time download cannot expire the search. `--discovery-timeout` and
 All commands accept `--home PATH` before the subcommand to select a store.
 
 For project iteration, `check FILE --watch` rechecks on save with warm native
-import snapshots. `check FILE --repeat N` measures the same path, and
-`check FILE --across matrix.toml` checks exact contexts. The older `profile`
-and `matrix` commands remain compatibility aliases.
+import snapshots. `check FILE --repeat N` measures the same path (add
+`--environment NAME` to profile inside a managed environment), and
+`check FILE --across matrix.toml` checks exact contexts.
 
 `storage` reads a fingerprinted ledger after its first inventory, so large
 stores remain an instant-information command. `storage --verify` explicitly
@@ -99,8 +97,8 @@ lean-runtime storage
 lean-runtime doctor
 lean-runtime verify research-stack --offline
 lean-runtime compare old.lock.json new.lock.json
-lean-runtime profile research-stack Main.lean --repeat 5
-lean-runtime matrix matrix.toml Main.lean
+lean-runtime check --environment research-stack Main.lean --repeat 5
+lean-runtime check Main.lean --across matrix.toml
 lean-runtime clean
 lean-runtime clean --execute
 ```
@@ -109,8 +107,7 @@ lean-runtime clean --execute
 
 `copy save` creates a portable environment file. `copy open` verifies its exact
 identity, package Git trees, computer compatibility, and Lean probe before
-making the environment available. The former `save-copy` and `open-copy`
-spellings remain compatibility aliases. See [Portable copies and environment
+making the environment available. See [Portable copies and environment
 libraries](portable-copies.md) for its trust boundary.
 
 ## Slim toolchains
@@ -120,11 +117,11 @@ not need all of it: editor indexes, static libraries, the bundled LLVM/clang,
 and toolchain sources are only used by editors and native compilation.
 
 ```bash
-lean-runtime toolchain-slim v4.32.2
-lean-runtime toolchain-slim v4.32.2 --prune-original
+lean-runtime toolchain slim v4.32.2
+lean-runtime toolchain slim v4.32.2 --prune-original
 ```
 
-`toolchain-slim` materializes a separate check-profile copy by hardlinking the
+`toolchain slim` materializes a separate check-profile copy by hardlinking the
 kept files (near-zero extra disk), then verifies it against a capability
 corpus — elaboration, core tactics, `decide`, `#eval`, metaprogramming, and
 `Std` imports — using the slim copy's own `lean`. A copy that fails any probe
@@ -137,13 +134,13 @@ per-module IR during ordinary elaboration, so those artifact classes must
 stay; larger reductions require upstream facet-loading changes.
 
 After pruning, source builds of *new* environments and native compilation
-need the full toolchain again; reinstall it with `lean-runtime install`.
+need the full toolchain again; reinstall it with `lean-runtime toolchain install`.
 
 Libraries produced by the current publication workflow also carry this
 verified check profile directly. A cold consumer downloads that compressed
 profile instead of first transferring the full official release. If the
 library has no compatible published check runtime, Lean Runtime falls back to
-the official Elan installation path. Local `toolchain-slim` remains useful for
+the official Elan installation path. Local `toolchain slim` remains useful for
 older stores and for testing a profile before publication.
 
 ## Sparse acquisition and capabilities
@@ -189,15 +186,15 @@ lean-runtime init MyProof
 lean-runtime init MyProof --core
 lean-runtime init --plan --max-download 500MiB
 lean-runtime update --plan
-lean-runtime scan ~/research
-lean-runtime attach ~/research --recursive
-lean-runtime attach ~/research --recursive --execute
-lean-runtime detach ./existing-project --execute
-lean-runtime install 4.32.2
+lean-runtime project scan ~/research
+lean-runtime project attach ~/research --recursive
+lean-runtime project attach ~/research --recursive --execute
+lean-runtime project detach ./existing-project --execute
+lean-runtime toolchain install 4.32.2
 ```
 
-`check FILE` is the direct standalone/local-project route; the legacy
-`check ENVIRONMENT FILE` spelling remains accepted. When no
+`check FILE` is the direct standalone/local-project route, and
+`check --environment NAME FILE` checks inside a managed environment. When no
 `--project` or `--toolchain` is supplied, it discovers the nearest directory
 containing a Lake configuration and `lean-toolchain`, then passes the actual
 project-relative file to `lake env lean`.
@@ -277,5 +274,5 @@ publication and clean-consumer workflow. See
 [Publishing a Lean project](project-publishing.md).
 
 Use global `--publisher-verification required --trusted-publisher ID --trusted-issuer ISSUER`
-to require a verified publisher. `build-and-publish --sign` records the trusted
+to require a verified publisher. `publish environment --sign` records the trusted
 publisher using the configured Cosign identity.

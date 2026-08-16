@@ -175,14 +175,15 @@ current exact graph without running `lake update`. If you already have many
 Lake checkouts, register them once as local dependency seeds:
 
 ```bash
-lean-runtime scan ~/research
+lean-runtime project scan ~/research
 lean-runtime init .
 ```
 
 `init --plan` performs no downloads, installs, or builds; `--max-download
 500MiB` and `--offline`
 enforce cold-start policy. Advanced bulk migration remains available through
-`attach`, and `detach --execute` materializes an independent project again.
+`project attach`, and `project detach --execute` materializes an independent
+project again.
 For a new project, the target may be absent, empty, or an otherwise empty Git
 repository root; existing Git identity and index state are preserved. A custom
 `AGENTS.md` is also allowed and retained. Other existing contents are rejected
@@ -205,8 +206,8 @@ compare, and measure the same exact contexts:
 ```bash
 lean-runtime verify research-stack --offline
 lean-runtime compare previous.lock.json environment.lock.json
-lean-runtime profile research-stack Main.lean --repeat 5
-lean-runtime matrix compatibility.toml Main.lean
+lean-runtime check --environment research-stack Main.lean --repeat 5
+lean-runtime check Main.lean --across compatibility.toml
 ```
 
 Use `lean-run Main.lean --explain` to inspect context routing without executing Lean, and

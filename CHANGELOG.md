@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Removed (breaking)
+
+- Removed the hidden hyphenated compatibility spellings. Every accepted command
+  is now public and appears in help and shell completion:
+
+  | Removed | Canonical replacement |
+  |---|---|
+  | `save-copy` / `open-copy` | `copy save` / `copy open` |
+  | `build-and-publish` / `finalize-publication` | `publish environment` / `finalize environment` |
+  | `toolchain-publish` / `toolchain-finalize-publication` | `publish toolchain` / `finalize toolchain` |
+  | `toolchain-slim` / `install` | `toolchain slim` / `toolchain install` |
+  | `program-create` / `program-save-copy` / `program-open-copy` / `program-download` | `program create` / `program save` / `program open` / `program download` |
+  | `program-publish` / `program-finalize-publication` | `publish program` / `finalize program` |
+  | `check-file FILE` | `check FILE` (or `run FILE` for standalone discovery) |
+  | `profile ENV FILE` | `check --environment ENV FILE --repeat N` |
+  | `matrix MATRIX FILE` | `check FILE --across MATRIX` |
+  | top-level `scan` / `attach` / `detach` | `project scan` / `project attach` / `project detach` |
+
+- Removed the legacy positional `check ENVIRONMENT FILE` form; use
+  `check --environment NAME FILE`.
+- Removed the deprecated `run` aliases `--discovery-timeout` and `--timeout`;
+  use `--search-timeout` and `--check-timeout`. Removed the undeclared
+  `init --mathlib` alias in favor of `--mathlib-version`.
+
+### Changed
+
+- `check --repeat` now accepts `--environment NAME`, covering everything the
+  removed `profile` command did.
+- Internal dispatch uses canonical command identities (`publish-environment`,
+  `copy-save`, `program-create`, `toolchain-slim`, …) instead of rewriting
+  canonical invocations back onto legacy spellings.
+- Shell completion and top-level help are both derived from one public command
+  list; the private argparse help-hiding hack is gone.
+- Bundled GitHub workflows and the `publish-environment` composite action use
+  the canonical publication commands.
+
 - Make `lean-runtime run FILE` the canonical front-door spelling; `lean-run`
   remains a permanently supported alias sharing one parser and implementation,
   with identical results, envelopes, and exit codes. Global `--home`,

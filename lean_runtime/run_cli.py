@@ -64,11 +64,10 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, standalone: bool = Tru
     parser.add_argument("--max-candidates", type=int, default=3)
     parser.add_argument(
         "--search-timeout",
-        "--discovery-timeout",
         dest="search_timeout",
         type=float,
         default=90.0,
-        help="budget for ranking and compiler probes (--discovery-timeout is a deprecated alias)",
+        help="budget for ranking and compiler probes",
     )
     parser.add_argument(
         "--acquire-timeout",
@@ -112,11 +111,10 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, standalone: bool = Tru
     )
     parser.add_argument(
         "--check-timeout",
-        "--timeout",
         dest="check_timeout",
         type=float,
         default=300,
-        help="budget for one Lean invocation (--timeout is a deprecated alias)",
+        help="budget for one Lean invocation",
     )
 
 

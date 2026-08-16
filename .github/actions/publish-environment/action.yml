@@ -35,16 +35,16 @@ runs:
         LEAN_RUNTIME_REGISTRY_USERNAME: ${{ inputs.username }}
         LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ inputs.password }}
       run: |
-        lean-runtime build-and-publish "${{ inputs.lock }}" \
+        lean-runtime publish environment "${{ inputs.lock }}" \
           --publish-to "${{ inputs.library }}" --platform-only \
           > lean-runtime-environment-platform.json
         toolchain=$(python -c 'from lean_runtime import EnvironmentLock; import sys; print(EnvironmentLock.load(sys.argv[1]).toolchain)' "${{ inputs.lock }}")
         lock_id=$(python -c 'from lean_runtime import EnvironmentLock; import sys; print(EnvironmentLock.load(sys.argv[1]).lock_id)' "${{ inputs.lock }}")
-        lean-runtime toolchain-publish "$toolchain" --library "${{ inputs.library }}" \
+        lean-runtime publish toolchain "$toolchain" --library "${{ inputs.library }}" \
           > lean-runtime-toolchain-platform.json
-        lean-runtime toolchain-finalize-publication "$toolchain" \
+        lean-runtime finalize toolchain "$toolchain" \
           lean-runtime-toolchain-platform.json --library "${{ inputs.library }}"
-        args=(finalize-publication "$lock_id" lean-runtime-environment-platform.json \
+        args=(finalize environment "$lock_id" lean-runtime-environment-platform.json \
           --library "${{ inputs.library }}")
         if [[ -n "${{ inputs.tag }}" ]]; then args+=(--tag "${{ inputs.tag }}"); fi
         lean-runtime "${args[@]}"

@@ -83,12 +83,12 @@ jobs:
           # platform artifact into one directory, and identical filenames
           # silently overwrite each other (last write wins), collapsing the
           # published index to a single platform.
-          lean-runtime --availability local build-and-publish environment.lock.json \
+          lean-runtime --availability local publish environment environment.lock.json \
             --publish-to ghcr.io/alerad/lean-runtime-cache \
             --timeout 18000 \
             --accelerate \
             --platform-only --attest > "platform-result-${{ matrix.name }}.json"
-          lean-runtime toolchain-publish "${{ needs.resolve.outputs.toolchain }}" \
+          lean-runtime publish toolchain "${{ needs.resolve.outputs.toolchain }}" \
             --library ghcr.io/alerad/lean-runtime-cache \
             > "toolchain-result-${{ matrix.name }}.json"
       - uses: actions/upload-artifact@v4
@@ -123,10 +123,10 @@ jobs:
           LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           ALIAS_TAG: ${{ inputs.alias-tag }}
         run: |
-          lean-runtime toolchain-finalize-publication \
+          lean-runtime finalize toolchain \
             "${{ needs.resolve.outputs.toolchain }}" results/toolchain-result-*.json \
             --library ghcr.io/alerad/lean-runtime-cache --sign
-          args=(finalize-publication "${{ needs.resolve.outputs.lock-id }}" \
+          args=(finalize environment "${{ needs.resolve.outputs.lock-id }}" \
             results/platform-result-*.json \
             --library ghcr.io/alerad/lean-runtime-cache --sign)
           if [[ -n "$ALIAS_TAG" ]]; then args+=(--tag "$ALIAS_TAG"); fi

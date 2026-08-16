@@ -56,12 +56,12 @@ source-free check environment:
 lean-runtime project export . --module MyProject \
   --output MyProject.lean-environment
 
-lean-runtime open-copy MyProject.lean-environment --name MyProject
+lean-runtime copy open MyProject.lean-environment --name MyProject
 ```
 
 The export contains the selected public module's exact transitive closure, not
 the project checkout, Lake metadata, editor indexes, or native/development
-outputs. `open-copy` verifies every artifact and runs the locked import before
+outputs. `copy open` verifies every artifact and runs the locked import before
 publishing it locally. Capsules are computer-type-specific; use the reusable
 workflow for a public multi-platform environment.
 

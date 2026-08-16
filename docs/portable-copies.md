@@ -4,8 +4,8 @@ Lean Runtime can move an already built environment between compatible machines
 without rebuilding its Lake packages:
 
 ```bash
-lean-runtime save-copy research-stack --output research-stack.lean-environment
-lean-runtime --home /tmp/fresh open-copy research-stack.lean-environment --name research-stack
+lean-runtime copy save research-stack --output research-stack.lean-environment
+lean-runtime --home /tmp/fresh copy open research-stack.lean-environment --name research-stack
 ```
 
 The equivalent Python API is:
@@ -25,10 +25,10 @@ and testing; normal use should keep the probe enabled.
 Saving, opening, and downloading are disk-backed and streamed. Peak memory does
 not scale with the size of the environment.
 
-`save-copy` deliberately preserves the legacy full environment, including
+`copy save` deliberately preserves the legacy full environment, including
 sources, for users who need a self-contained development handoff. `project
 export` instead writes a source-free sparse check capsule containing only the
-selected public module's transitive closure. `open-copy` detects and verifies
+selected public module's transitive closure. `copy open` detects and verifies
 both formats. Native compilation and project development require the full
 format; proof checking should prefer the capsule.
 
@@ -218,7 +218,7 @@ For a build matrix, have each platform publish without changing the canonical
 index and retain its JSON result:
 
 ```bash
-lean-runtime build-and-publish environment.lock.json \
+lean-runtime publish environment environment.lock.json \
   --publish-to ghcr.io/alerad/leancert-runtime \
   --platform-only > platform-result.json
 ```
@@ -227,7 +227,7 @@ After collecting the result files, one final job publishes the deterministic
 multi-platform index and human aliases:
 
 ```bash
-lean-runtime finalize-publication "$LOCK_ID" results/*.json \
+lean-runtime finalize environment "$LOCK_ID" results/*.json \
   --library ghcr.io/alerad/leancert-runtime \
   --tag "$GITHUB_REF_NAME"
 ```

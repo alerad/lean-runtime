@@ -49,7 +49,7 @@ commits and unchanged trees remain separately visible.
 ```bash
 lean-runtime run Main.lean --timings
 lean-runtime --timings check research-stack Main.lean
-lean-runtime profile research-stack Main.lean --warmup 1 --repeat 5
+lean-runtime check --environment research-stack Main.lean --warmup 1 --repeat 5
 ```
 
 Warmups are excluded. Every measured sample remains an ordinary persisted execution with a
@@ -71,7 +71,7 @@ requires = ["mathlib@v4.32.2"]
 ```
 
 ```bash
-lean-runtime matrix matrix.toml Main.lean --concurrency 2
+lean-runtime check Main.lean --across matrix.toml --concurrency 2
 ```
 
 Each context uses exactly one of `requires`, `lock`, `environment`, `toolchain`, or
@@ -83,7 +83,7 @@ entries from beginning execution.
 ## Machine-readable output
 
 The versioned precision surfaces — execution results (`run` and its `lean-run`
-alias, `check`, `check-file`), acquisition plans (`run --plan`), multi-file
+alias and `check`), acquisition plans (`run --plan`), multi-file
 check batches, `verify`, `compare`, `profile`, `matrix`, `inspect`, `clean`,
 and `publish environment` — emit a closed envelope:
 

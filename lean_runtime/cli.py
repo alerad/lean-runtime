@@ -13,7 +13,7 @@ from dataclasses import replace
 from datetime import datetime
 from importlib.metadata import version as distribution_version
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from .console import ConsoleRenderer, styler_for
 from .environments import ExecutionCapture
@@ -61,7 +61,7 @@ def _schema_for(command: str) -> str:
         "matrix": "lean-runtime.matrix/v1",
         "clean": "lean-runtime.cleanup/v1",
         "inspect": "lean-runtime.inspect/v1",
-        "build-and-publish": "lean-runtime.publication/v1",
+        "publish-environment": "lean-runtime.publication/v1",
     }.get(command, "lean-runtime.execution/v1")
 
 
@@ -478,10 +478,9 @@ def _mathlib_version(value: str) -> str:
     )
 
 
-# The public command vocabulary offered by shell completion and top-level help.
-# Compatibility aliases (check-file, profile, matrix, save-copy, open-copy,
-# build-and-publish, finalize-publication, program-*, toolchain-*) stay
-# accepted but are deliberately absent here.
+# The complete public command vocabulary, used by shell completion and
+# top-level help. Every accepted command appears here: Lean Runtime 3.0 removed
+# the hidden hyphenated compatibility spellings.
 PUBLIC_COMMANDS = (
     "run",
     "init",
@@ -502,6 +501,8 @@ PUBLIC_COMMANDS = (
     "publish",
     "finalize",
     "copy",
+    "program",
+    "toolchain",
     "replay",
     "completion",
 )
@@ -707,89 +708,13 @@ Environment-library options are global and precede `run`:
     pull.add_argument("lock", type=Path)
     pull.add_argument("--name")
 
-    push = commands.add_parser(
-        "build-and-publish",
-        help="build an exact environment and publish it to a library",
-        description="Compatibility command. Prefer: lean-runtime publish environment ...",
+    program = commands.add_parser(
+        "program",
+        help="create, copy, or download a verified ready-to-run program",
     )
-    push.add_argument("lock", nargs="?", type=Path)
-    push.add_argument("--publish-to", required=True)
-    push.add_argument("--tag", action="append", default=[])
-    push.add_argument("--name")
-    push.add_argument(
-        "--timeout",
-        type=float,
-        default=None,
-        help="override timeouts for credential, registry, hydration, and build operations",
-    )
-    push.add_argument(
-        "--platform-only",
-        action="store_true",
-        help="publish blobs and platform manifest without updating the lock index",
-    )
-    push.add_argument(
-        "--accelerate",
-        action="store_true",
-        help="hydrate artifacts from known package caches (e.g. Mathlib's) for locked "
-        "packages without an artifact command; the lock identity is unchanged and the "
-        "built environment is still probe-verified before publication",
-    )
-    push.add_argument("--sign", action="store_true", help="sign the published lock index")
-    push.add_argument(
-        "--attest", action="store_true", help="publish a signed source/probe attestation"
-    )
-    push.add_argument("--json", action="store_true", help="emit a versioned JSON envelope")
-    push.add_argument(
-        "--check-access",
-        action="store_true",
-        help="verify registry push access without building or publishing",
-    )
-
-    publish_index = commands.add_parser(
-        "finalize-publication",
-        help="combine computer-specific publication results",
-        description="Compatibility command. Prefer: lean-runtime finalize environment ...",
-    )
-    publish_index.add_argument("lock_id")
-    publish_index.add_argument("platform_results", nargs="+", type=Path)
-    publish_index.add_argument("--library", required=True)
-    publish_index.add_argument("--tag", action="append", default=[])
-    publish_index.add_argument("--sign", action="store_true")
-
-    toolchain_publish = commands.add_parser(
-        "toolchain-publish", help="publish this platform's verified check-only Lean toolchain"
-    )
-    toolchain_publish.add_argument("toolchain")
-    toolchain_publish.add_argument("--library", required=True)
-
-    toolchain_finalize = commands.add_parser(
-        "toolchain-finalize-publication",
-        help="combine platform check-toolchain manifests",
-    )
-    toolchain_finalize.add_argument("toolchain")
-    toolchain_finalize.add_argument("platform_results", nargs="+", type=Path)
-    toolchain_finalize.add_argument("--library", required=True)
-    toolchain_finalize.add_argument("--sign", action="store_true")
-
-    export = commands.add_parser(
-        "save-copy",
-        help="save a verified portable environment copy",
-        description="Compatibility command. Prefer: lean-runtime copy save ...",
-    )
-    export.add_argument("environment")
-    export.add_argument("--output", required=True, type=Path)
-
-    import_bundle = commands.add_parser(
-        "open-copy",
-        help="verify and open a portable environment copy",
-        description="Compatibility command. Prefer: lean-runtime copy open ...",
-    )
-    import_bundle.add_argument("copy", type=Path)
-    import_bundle.add_argument("--name")
-    import_bundle.add_argument("--no-probe", action="store_true", help="skip the Lean import probe")
-
-    program_create = commands.add_parser(
-        "program-create", help="create a verified ready-to-run program"
+    program_commands = program.add_subparsers(dest="program_operation", required=True)
+    program_create = program_commands.add_parser(
+        "create", help="create a verified ready-to-run program"
     )
     program_create.add_argument("payload", type=Path)
     program_create.add_argument("--command", dest="program_command", nargs="+", required=True)
@@ -804,40 +729,23 @@ Environment-library options are global and precede `run`:
         help="JSON object of content-addressed program provenance",
     )
 
-    program_export = commands.add_parser(
-        "program-save-copy", help="save a portable copy of a ready-to-run program"
+    program_export = program_commands.add_parser(
+        "save", help="save a portable copy of a ready-to-run program"
     )
     program_export.add_argument("program_id")
     program_export.add_argument("--output", required=True, type=Path)
 
-    program_import = commands.add_parser(
-        "program-open-copy", help="verify and open a portable program copy"
+    program_import = program_commands.add_parser(
+        "open", help="verify and open a portable program copy"
     )
     program_import.add_argument("copy", type=Path)
 
-    program_pull = commands.add_parser(
-        "program-download", help="download a compatible ready-to-run program"
+    program_pull = program_commands.add_parser(
+        "download", help="download a compatible ready-to-run program"
     )
     program_pull.add_argument("library")
     program_pull.add_argument("reference")
     program_pull.add_argument("--source-revision")
-
-    program_push = commands.add_parser(
-        "program-publish", help="publish this computer's ready-to-run program"
-    )
-    program_push.add_argument("program_id")
-    program_push.add_argument("--library", required=True)
-    program_push.add_argument("--tag", action="append", default=[])
-    program_push.add_argument("--sign", action="store_true")
-
-    program_index = commands.add_parser(
-        "program-finalize-publication", help="combine computer-specific program publications"
-    )
-    program_index.add_argument("source_revision")
-    program_index.add_argument("computer_results", nargs="+", type=Path)
-    program_index.add_argument("--library", required=True)
-    program_index.add_argument("--tag", action="append", default=[])
-    program_index.add_argument("--sign", action="store_true")
 
     check = commands.add_parser(
         "check",
@@ -931,8 +839,12 @@ LEAN_RUNTIME_HEADER_SNAPSHOTS=1 to enable them for one-shot checks.""",
     diff.add_argument("right")
     diff.add_argument("--json", action="store_true")
 
-    toolchain_slim = commands.add_parser(
-        "toolchain-slim",
+    toolchain = commands.add_parser("toolchain", help="install or slim a Lean toolchain")
+    toolchain_commands = toolchain.add_subparsers(dest="toolchain_operation", required=True)
+    toolchain_install = toolchain_commands.add_parser("install", help="install a Lean toolchain")
+    toolchain_install.add_argument("toolchain")
+    toolchain_slim = toolchain_commands.add_parser(
+        "slim",
         help="materialize a verified slim check-profile copy of a toolchain",
     )
     toolchain_slim.add_argument("toolchain", help="Lean toolchain, e.g. v4.32.2")
@@ -943,27 +855,6 @@ LEAN_RUNTIME_HEADER_SNAPSHOTS=1 to enable them for one-shot checks.""",
         "working through the slim copy, but source builds of new environments and "
         "native compilation need the full toolchain again",
     )
-
-    profile = commands.add_parser(
-        "profile",
-        help="measure repeated checks in one environment",
-        description="Compatibility command. Prefer: lean-runtime check FILE --repeat N",
-    )
-    profile.add_argument("environment", help="environment name or exact lock path")
-    profile.add_argument("file", type=Path)
-    profile.add_argument("--warmup", type=int, default=1)
-    profile.add_argument("--repeat", type=int, default=5)
-    profile.add_argument("--json", action="store_true")
-
-    matrix = commands.add_parser(
-        "matrix",
-        help="check one file across exact contexts",
-        description="Compatibility command. Prefer: lean-runtime check FILE --across MATRIX.toml",
-    )
-    matrix.add_argument("configuration", type=Path)
-    matrix.add_argument("file", type=Path)
-    matrix.add_argument("--concurrency", type=int, default=1)
-    matrix.add_argument("--json", action="store_true")
 
     replay = commands.add_parser("replay", help="replay a canonical execution capture")
     replay.add_argument("capture", type=Path)
@@ -982,20 +873,6 @@ LEAN_RUNTIME_HEADER_SNAPSHOTS=1 to enable them for one-shot checks.""",
         "--include-downloads", action="store_true", help="also clean unused downloaded files"
     )
     gc.add_argument("--json", action="store_true")
-
-    raw = commands.add_parser(
-        "check-file",
-        help="check a file, discovering its local Lake project when possible",
-        description=(
-            "Compatibility command. Prefer: lean-runtime check FILE, or "
-            "lean-runtime run FILE for standalone discovery."
-        ),
-    )
-    raw.add_argument("file", type=Path, help="Lean source file, or - for stdin")
-    raw.add_argument("--toolchain")
-    raw.add_argument("--project", type=Path)
-    raw.add_argument("--json", action="store_true")
-    _add_policy(raw)
 
     build = commands.add_parser(
         "build",
@@ -1033,7 +910,6 @@ LEAN_RUNTIME_HEADER_SNAPSHOTS=1 to enable them for one-shot checks.""",
     init_context = init.add_mutually_exclusive_group()
     init_context.add_argument(
         "--mathlib-version",
-        "--mathlib",
         dest="mathlib_version",
         metavar="VERSION",
         type=_mathlib_version,
@@ -1059,13 +935,6 @@ LEAN_RUNTIME_HEADER_SNAPSHOTS=1 to enable them for one-shot checks.""",
     init.add_argument("--json", action="store_true")
     init.add_argument("--ci", action="store_true", help="generate CI using the same project check")
 
-    scan = commands.add_parser(
-        "scan", help="register local Lake projects as reusable exact dependency seeds"
-    )
-    scan.add_argument("path", type=Path, nargs="?", default=Path("."))
-    scan.add_argument("--no-recursive", dest="recursive", action="store_false")
-    scan.add_argument("--json", action="store_true")
-
     update = commands.add_parser("update", help="move this project to the latest stable Mathlib")
     update.add_argument("path", type=Path, nargs="?", default=Path("."))
     update.add_argument("--seed-from", type=Path, help="reuse an exact local project or tree")
@@ -1074,24 +943,6 @@ LEAN_RUNTIME_HEADER_SNAPSHOTS=1 to enable them for one-shot checks.""",
     update.add_argument("--offline", action="store_true", help="require exact local dependencies")
     update.add_argument("--max-download", metavar="SIZE", help="fail above SIZE, e.g. 500MiB")
     update.add_argument("--json", action="store_true")
-
-    attach = commands.add_parser(
-        "attach", help="plan or adopt shared dependencies for existing Lake projects"
-    )
-    attach.add_argument("path", type=Path, nargs="?", default=Path("."))
-    attach.add_argument("--recursive", action="store_true")
-    attach.add_argument("--execute", action="store_true", help="apply the displayed plan")
-    attach.add_argument("--json", action="store_true")
-
-    detach = commands.add_parser(
-        "detach", help="plan or materialize independent dependencies for one project"
-    )
-    detach.add_argument("path", type=Path, nargs="?", default=Path("."))
-    detach.add_argument("--execute", action="store_true", help="copy dependencies locally")
-    detach.add_argument("--json", action="store_true")
-
-    install = commands.add_parser("install", help="install a Lean toolchain")
-    install.add_argument("toolchain")
 
     project = commands.add_parser(
         "project", help="inspect, freeze, or export a pinned Git-backed Lean project"
@@ -1153,33 +1004,6 @@ LEAN_RUNTIME_HEADER_SNAPSHOTS=1 to enable them for one-shot checks.""",
     project_update.add_argument("--offline", action="store_true")
     project_update.add_argument("--max-download", metavar="SIZE")
     project_update.add_argument("--json", action="store_true")
-    visible = {
-        "run",
-        "init",
-        "check",
-        "build",
-        "update",
-        "project",
-        "prepare",
-        "open",
-        "download",
-        "environments",
-        "inspect",
-        "verify",
-        "compare",
-        "storage",
-        "clean",
-        "doctor",
-        "publish",
-        "finalize",
-        "copy",
-        "replay",
-        "completion",
-    }
-    subparser_action = cast(Any, commands)
-    subparser_action._choices_actions[:] = [
-        action for action in subparser_action._choices_actions if action.dest in visible
-    ]
     return root
 
 
@@ -1198,19 +1022,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         return _run_front_door(args, command_name="lean-runtime run")
     if args.command == "publish":
-        args.command = {
-            "environment": "build-and-publish",
-            "toolchain": "toolchain-publish",
-            "program": "program-publish",
-        }[args.publish_kind]
+        args.command = f"publish-{args.publish_kind}"
     if args.command == "finalize":
-        args.command = {
-            "environment": "finalize-publication",
-            "toolchain": "toolchain-finalize-publication",
-            "program": "program-finalize-publication",
-        }[args.finalize_kind]
+        args.command = f"finalize-{args.finalize_kind}"
     if args.command == "copy":
-        args.command = {"save": "save-copy", "open": "open-copy"}[args.copy_operation]
+        args.command = f"copy-{args.copy_operation}"
+    if args.command == "program":
+        args.command = f"program-{args.program_operation}"
+    if args.command == "toolchain":
+        args.command = f"toolchain-{args.toolchain_operation}"
     if args.command == "project" and args.project_command in {"scan", "attach", "detach", "update"}:
         args.command = args.project_command
     if args.command == "init":
@@ -1430,7 +1250,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"Created {output}")
             return 0
-        if args.command == "install":
+        if args.command == "toolchain-install":
             print(runtime.toolchains.ensure_full(args.toolchain))
             return 0
         if args.command == "prepare":
@@ -1477,7 +1297,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             _json(environment.inspect().to_dict())
             return 0
-        if args.command == "build-and-publish":
+        if args.command == "publish-environment":
             timeout_override = args.timeout
             publisher = runtime.begin_publication(
                 args.publish_to,
@@ -1518,7 +1338,7 @@ def main(argv: list[str] | None = None) -> int:
                 else publication
             )
             return 0
-        if args.command == "finalize-publication":
+        if args.command == "finalize-environment":
             descriptors = []
             for path in args.platform_results:
                 value = json.loads(path.read_text(encoding="utf-8"))
@@ -1536,10 +1356,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             _json({"exact_environment_id": args.lock_id, "publication_id": digest})
             return 0
-        if args.command == "toolchain-publish":
+        if args.command == "publish-toolchain":
             _json(runtime.publish_toolchain(args.toolchain, args.library).to_dict())
             return 0
-        if args.command == "toolchain-finalize-publication":
+        if args.command == "finalize-toolchain":
             descriptors = []
             for path in args.platform_results:
                 value = json.loads(path.read_text(encoding="utf-8"))
@@ -1552,10 +1372,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             _json({"toolchain": args.toolchain, "publication_id": digest})
             return 0
-        if args.command == "save-copy":
+        if args.command == "copy-save":
             _json(runtime.save_portable_copy(args.environment, args.output).to_dict())
             return 0
-        if args.command == "open-copy":
+        if args.command == "copy-open":
             environment = runtime.open_portable_copy(
                 args.copy, name=args.name, probe=not args.no_probe
             )
@@ -1588,10 +1408,10 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
             return 0
-        if args.command == "program-save-copy":
+        if args.command == "program-save":
             _json(runtime.save_program_copy(args.program_id, args.output).to_dict())
             return 0
-        if args.command == "program-open-copy":
+        if args.command == "program-open":
             program = runtime.open_program_copy(args.copy)
             _json({"program_id": program.id, "description": program.description.to_dict()})
             return 0
@@ -1603,7 +1423,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             _json({"program_id": program.id, "description": program.description.to_dict()})
             return 0
-        if args.command == "program-publish":
+        if args.command == "publish-program":
             _json(
                 runtime.publish_program(
                     args.program_id,
@@ -1613,7 +1433,7 @@ def main(argv: list[str] | None = None) -> int:
                 ).to_dict()
             )
             return 0
-        if args.command == "program-finalize-publication":
+        if args.command == "finalize-program":
             descriptors = []
             for path in args.computer_results:
                 value = json.loads(path.read_text(encoding="utf-8"))
@@ -1839,12 +1659,28 @@ def main(argv: list[str] | None = None) -> int:
                     or args.package_refs
                     or args.include
                 ):
-                    raise ValueError("check --repeat requires exactly one project FILE")
+                    raise ValueError("check --repeat requires exactly one FILE")
                 if args.repeat < 1 or args.warmup < 0:
                     raise ValueError(
                         "check --repeat requires positive samples and nonnegative warmups"
                     )
                 repeated_file = Path(args.inputs[0])
+                if args.environment is not None:
+                    environment_report = runtime.profile(
+                        args.environment,
+                        repeated_file,
+                        warmup=args.warmup,
+                        repeat=args.repeat,
+                    )
+                    if args.json:
+                        _json(serialize_profile_v1(environment_report))
+                    else:
+                        print(f"Profile: {repeated_file.name}")
+                        print(f"Samples: {len(environment_report.results)}")
+                        for name, value in environment_report.statistics().items():
+                            if value is not None:
+                                print(f"  {name:<6} {value:g} ms")
+                    return 0 if environment_report.ok else 1
                 if os.environ.get(_HEADER_SNAPSHOTS_VARIABLE) is None:
                     runtime.header_cache.enabled = True
                 for _ in range(args.warmup):
@@ -1916,13 +1752,6 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(
                     "check --environment cannot be combined with --with, --project, or --toolchain"
                 )
-            legacy_environment = (
-                args.environment is None
-                and not args.package_refs
-                and len(args.inputs) == 2
-                and args.inputs[0] != "-"
-                and not Path(args.inputs[0]).exists()
-            )
             if not args.inputs:
                 if args.package_refs or args.include:
                     raise ValueError("project-wide check does not accept --with or --include")
@@ -1937,13 +1766,6 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError("check with --with expects exactly one FILE")
                 environment = runtime.open_references(args.package_refs, toolchain=args.toolchain)
                 source_file = Path(args.inputs[0])
-            elif legacy_environment:
-                if args.toolchain:
-                    raise ValueError("check --toolchain is only valid with --with")
-                if args.project:
-                    raise ValueError("check --project is only valid with a single FILE")
-                environment = runtime.environment(args.inputs[0])
-                source_file = Path(args.inputs[1])
             elif "-" in args.inputs:
                 if len(args.inputs) != 1:
                     raise ValueError("stdin (-) must be the only check input")
@@ -1992,22 +1814,6 @@ def main(argv: list[str] | None = None) -> int:
                 result = environment.check_files(
                     files,
                     entrypoint=_cli_source_name(source_file),
-                    policy=_policy(args),
-                )
-        elif args.command == "check-file":
-            if str(args.file) == "-":
-                display_path = "<stdin>"
-                result = runtime.check(
-                    sys.stdin.read(),
-                    toolchain=args.toolchain,
-                    project=args.project,
-                    policy=_policy(args),
-                )
-            else:
-                result = runtime.check_file(
-                    args.file,
-                    toolchain=args.toolchain,
-                    project=args.project,
                     policy=_policy(args),
                 )
         else:
@@ -2070,7 +1876,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"lean-runtime: {exc}", file=sys.stderr)
         return 2
-    if args.command in {"check", "check-file"}:
+    if args.command == "check":
         runtime.events.emit("check.completed", "Lean check completed", ok=result.ok)
         total_ms = round((time.monotonic() - operation_started) * 1000)
         accounted_ms = sum(timing.duration_ms for timing in result.timings)

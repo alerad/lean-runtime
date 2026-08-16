@@ -40,7 +40,7 @@ jobs:
           LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           TOOLCHAIN: ${{ inputs.toolchain }}
         run: |
-          lean-runtime toolchain-publish "$TOOLCHAIN" \
+          lean-runtime publish toolchain "$TOOLCHAIN" \
             --library ghcr.io/alerad/lean-runtime-cache \
             > "toolchain-${{ matrix.name }}.json"
       - uses: actions/upload-artifact@v4
@@ -70,5 +70,5 @@ jobs:
           LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           TOOLCHAIN: ${{ inputs.toolchain }}
         run: |
-          lean-runtime toolchain-finalize-publication "$TOOLCHAIN" results/*.json \
+          lean-runtime finalize toolchain "$TOOLCHAIN" results/*.json \
             --library ghcr.io/alerad/lean-runtime-cache --sign
