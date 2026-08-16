@@ -726,6 +726,7 @@ class SharedProjectManager:
         cancel: threading.Event | None = None,
         seed_packages: Path | None = None,
         seed_package_paths: dict[str, Path] | None = None,
+        display_name: str | None = None,
     ) -> SharedProjectWorkspace:
         manifest = _load_manifest(context)
         packages = manifest["packages"]
@@ -740,6 +741,7 @@ class SharedProjectManager:
         destination = self.root / workspace_id
         overrides_file = destination / "package-overrides.json"
         package_names = tuple(str(entry["name"]) for entry in packages)
+        project_name = display_name or context.root.name
         with FileLock(self.locks / f"{workspace_id}.lock", timeout=1800, cancel=cancel):
             if overrides_file.is_file():
                 try:
@@ -758,7 +760,7 @@ class SharedProjectManager:
                     ):
                         self.events.emit(
                             "project.shared.workspace_reused",
-                            f"Reusing shared dependency workspace for {context.root.name}",
+                            f"Reusing shared dependency workspace for {project_name}",
                             phase="shared-project",
                             workspace_id=workspace_id,
                             packages=len(packages),
@@ -776,8 +778,9 @@ class SharedProjectManager:
                 remove_tree(destination)
             self.events.emit(
                 "project.shared.workspace_started",
-                f"Preparing shared dependencies for {context.root.name}",
+                f"Preparing shared dependencies for {project_name}",
                 phase="shared-project",
+                project=project_name,
                 workspace_id=workspace_id,
                 packages=len(packages),
             )

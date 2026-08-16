@@ -645,15 +645,19 @@ class Runtime:
         finalize: bool = True,
         sign: bool = False,
         attest: bool = False,
+        publisher: OCIEnvironmentPublisher | None = None,
     ) -> PublicationInfo:
         """Publish a built environment to an environment library."""
         if sign and not finalize:
             raise ValueError("platform-only publishing cannot sign a lock index")
         environment = self.environment(identifier)
-        publisher = OCIEnvironmentPublisher(
-            OCIRepository.parse(library), self.store, self.bundles, self.events
+        repository = OCIRepository.parse(library)
+        selected_publisher = publisher or OCIEnvironmentPublisher(
+            repository, self.store, self.bundles, self.events
         )
-        result = publisher.publish(
+        if selected_publisher.repository != repository:
+            raise ValueError("publication session does not match the requested library")
+        result = selected_publisher.publish(
             environment.id,
             tags=tuple(tags),
             finalize=finalize,
@@ -664,7 +668,7 @@ class Runtime:
             if sign:
                 assert result.publication_id is not None
                 CosignVerifier(executable=self.verification_executable).sign(
-                    publisher.repository, result.publication_id
+                    selected_publisher.repository, result.publication_id
                 )
             phase = "attestation"
             if attest:
@@ -676,7 +680,7 @@ class Runtime:
                 report = self.verify(environment.id)
                 report.raise_for_error()
                 CosignVerifier(executable=self.verification_executable).attest(
-                    publisher.repository,
+                    selected_publisher.repository,
                     result.publication_id or result.computer_copy_id,
                     report.to_dict(),
                 )
@@ -686,16 +690,30 @@ class Runtime:
                     digest=result.publication_id or result.computer_copy_id,
                 )
         except (EnvironmentError, OSError) as exc:
-            raise publisher.fail(exc, phase=phase) from exc
-        publisher.complete(result)
+            raise selected_publisher.fail(exc, phase=phase) from exc
+        selected_publisher.complete(result)
         return result
+
+    def begin_publication(
+        self,
+        library: str,
+        *,
+        auth_timeout: float = 10,
+        registry_timeout: float = 30,
+    ) -> OCIEnvironmentPublisher:
+        """Resolve and pin publication authentication for one complete attempt."""
+        return OCIEnvironmentPublisher(
+            OCIRepository.parse(library),
+            self.store,
+            self.bundles,
+            self.events,
+            auth_timeout=auth_timeout,
+            registry_timeout=registry_timeout,
+        )
 
     def check_publication_access(self, library: str) -> PublicationAccess:
         """Prove registry push access without building or publishing content."""
-        publisher = OCIEnvironmentPublisher(
-            OCIRepository.parse(library), self.store, self.bundles, self.events
-        )
-        return publisher.check_access()
+        return self.begin_publication(library).check_access()
 
     def publish_toolchain(self, toolchain: str, library: str) -> ToolchainPublication:
         """Publish one verified platform check-toolchain manifest."""
@@ -1270,6 +1288,7 @@ class Runtime:
         seed_packages: Path | None = None,
         seed_package_paths: dict[str, Path] | None = None,
         plan: AdoptionPlan | None = None,
+        display_name: str | None = None,
     ) -> AdoptionBatchResult:
         """Adopt exact shared dependencies after a read-only plan."""
         if plan is not None:
@@ -1312,6 +1331,7 @@ class Runtime:
                         seed_package_paths=(
                             seed_package_paths if len(selected_plan.projects) == 1 else None
                         ),
+                        display_name=(display_name if len(selected_plan.projects) == 1 else None),
                     )
                 )
             except (OSError, ProjectError) as exc:
@@ -1971,6 +1991,7 @@ class Runtime:
                 staging,
                 seed_packages=seed_packages,
                 seed_package_paths=seed_package_paths,
+                display_name=plan.project_name or target.name,
             )
             if result.failures or not result.results:
                 detail = result.failures[0][1] if result.failures else "project was not attachable"
@@ -2136,6 +2157,12 @@ class Runtime:
             minimum_age_seconds=minimum_age_seconds,
             keep_last=keep_last,
         )
+
+    def clean_scratch(
+        self, *, dry_run: bool = True, minimum_age_seconds: float = 3600
+    ) -> CleanupReport:
+        """Reclaim abandoned disposable execution and resolution workspaces."""
+        return self.store.clean_scratch(dry_run=dry_run, minimum_age_seconds=minimum_age_seconds)
 
     def clean_downloads(
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000

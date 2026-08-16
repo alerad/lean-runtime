@@ -8,12 +8,13 @@ import os
 import re
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime
 from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import Any, cast
 
-from .console import styler_for
+from .console import ConsoleRenderer, styler_for
 from .environments import ExecutionCapture
 from .errors import (
     LeanRuntimeError,
@@ -89,6 +90,7 @@ def _render_storage(status: StoreStatus) -> None:
         ("Project packages", status.project_packages, status.project_packages_bytes),
         ("Toolchains", None, status.toolchains_bytes),
         ("Executions", status.executions, status.executions_bytes),
+        ("Scratch", status.scratch_workspaces, status.scratch_bytes),
     )
     for label, count, bytes_used in rows:
         counted = f"{count:>5}" if count is not None else "     "
@@ -139,7 +141,11 @@ def _render_doctor(report: DoctorReport) -> None:
         print(f"{symbols[check.status]} {check.name}: {check.message}")
 
 
-def _render_cleanup(environments: CleanupReport, downloads: DownloadCleanupReport | None) -> None:
+def _render_cleanup(
+    environments: CleanupReport,
+    downloads: DownloadCleanupReport | None,
+    scratch: CleanupReport | None = None,
+) -> None:
     style = styler_for(sys.stdout)
     retained_note = style.dim(
         f"Retained {len(environments.retained)} environment(s) (named, recent, or in use)."
@@ -169,17 +175,36 @@ def _render_cleanup(environments: CleanupReport, downloads: DownloadCleanupRepor
                 )
             else:
                 print("No unreferenced cached downloads to remove.")
+        if scratch is not None:
+            if scratch.candidates:
+                anything = True
+                print(
+                    style.bold(
+                        f"Would remove {len(scratch.candidates)} abandoned workspace(s) · "
+                        f"{format_byte_size(scratch.candidate_bytes)}"
+                    )
+                )
+            else:
+                print("No abandoned workspaces to remove.")
         print(retained_note)
         if anything:
             print()
             print("This was a preview. Re-run with --execute to delete.")
         return
     reclaimed = environments.reclaimed_bytes + (downloads.reclaimed_bytes if downloads else 0)
-    removed = len(environments.removed) + (len(downloads.removed) if downloads else 0)
+    if scratch is not None:
+        reclaimed += scratch.reclaimed_bytes
+    removed = (
+        len(environments.removed)
+        + (len(downloads.removed) if downloads else 0)
+        + (len(scratch.removed) if scratch else 0)
+    )
     if removed:
         parts = [f"{len(environments.removed)} environment(s)"]
         if downloads is not None:
             parts.append(f"{len(downloads.removed)} cached download(s)")
+        if scratch is not None:
+            parts.append(f"{len(scratch.removed)} abandoned workspace(s)")
         print(
             style.green(f"Removed {' and '.join(parts)} · reclaimed {format_byte_size(reclaimed)}")
         )
@@ -290,11 +315,15 @@ def _print_publication_failure(exc: PublicationError) -> None:
         file=sys.stderr,
     )
     print(f"  {exc}", file=sys.stderr)
-    identity = exc.username or "anonymous"
-    print(
-        f"  Authentication: {identity} (source: {exc.credential_source})",
-        file=sys.stderr,
-    )
+    if exc.attempted_provider is not None:
+        print("  Authentication: unavailable (source: none)", file=sys.stderr)
+        print(f"  Attempted provider: {exc.attempted_provider}", file=sys.stderr)
+    else:
+        identity = exc.username or "anonymous"
+        print(
+            f"  Authentication: {identity} (source: {exc.credential_source})",
+            file=sys.stderr,
+        )
     if exc.partial:
         print(
             "  No verified final release was produced; immutable platform content may exist.",
@@ -436,7 +465,12 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     publish_environment.add_argument("--publish-to", required=True)
     publish_environment.add_argument("--tag", action="append", default=[])
     publish_environment.add_argument("--name")
-    publish_environment.add_argument("--timeout", type=float, default=1800)
+    publish_environment.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="override timeouts for credential, registry, hydration, and build operations",
+    )
     publish_environment.add_argument("--platform-only", action="store_true")
     publish_environment.add_argument("--accelerate", action="store_true")
     publish_environment.add_argument("--sign", action="store_true")
@@ -511,8 +545,8 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     push.add_argument(
         "--timeout",
         type=float,
-        default=1800,
-        help="maximum seconds for each artifact hydration and the environment build",
+        default=None,
+        help="override timeouts for credential, registry, hydration, and build operations",
     )
     push.add_argument(
         "--platform-only",
@@ -933,6 +967,10 @@ def main(argv: list[str] | None = None) -> int:
         args.mathlib = None if args.core else args.mathlib_version
     operation_started = time.monotonic()
     display_path: str | None = None
+    renderer = ConsoleRenderer(
+        mode="quiet" if args.quiet or getattr(args, "json", False) else None,
+        verbose=args.verbose,
+    )
     try:
         if args.command == "completion":
             print(_completion_script(args.shell), end="")
@@ -947,7 +985,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         runtime = Runtime(
             home=args.home,
-            on_event=None if args.quiet else _progress,
+            on_event=renderer,
             availability=selected_availability,
             libraries=args.libraries,
             max_download_bytes=selected_download_limit,
@@ -1190,7 +1228,13 @@ def main(argv: list[str] | None = None) -> int:
             _json(environment.inspect().to_dict())
             return 0
         if args.command == "build-and-publish":
-            access = runtime.check_publication_access(args.publish_to)
+            timeout_override = args.timeout
+            publisher = runtime.begin_publication(
+                args.publish_to,
+                auth_timeout=timeout_override if timeout_override is not None else 10,
+                registry_timeout=timeout_override if timeout_override is not None else 30,
+            )
+            access = publisher.check_access()
             if args.check_access:
                 _json(
                     envelope(_schema_for(args.command), ok=True, data=access.to_dict())
@@ -1203,7 +1247,7 @@ def main(argv: list[str] | None = None) -> int:
             environment = runtime.open_exact(
                 EnvironmentLock.load(args.lock),
                 name=args.name,
-                build_timeout=args.timeout,
+                build_timeout=timeout_override if timeout_override is not None else 1800,
                 accelerate=args.accelerate,
             )
             publication = runtime.publish_environment(
@@ -1213,6 +1257,7 @@ def main(argv: list[str] | None = None) -> int:
                 finalize=not args.platform_only,
                 sign=args.sign,
                 attest=args.attest,
+                publisher=publisher,
             ).to_dict()
             publication["consumer_command"] = (
                 f"lean-runtime --library {args.publish_to} download {args.lock}"
@@ -1487,10 +1532,15 @@ def main(argv: list[str] | None = None) -> int:
                 if args.include_downloads
                 else None
             )
+            gc_scratch = runtime.clean_scratch(
+                dry_run=not args.execute,
+                minimum_age_seconds=min(args.minimum_age_hours * 3600, 3600),
+            )
             if args.json:
                 gc_payload: dict[str, Any] = {
                     "environments": gc_report.to_dict(),
                     "downloaded_files": gc_downloads.to_dict() if gc_downloads else None,
+                    "scratch": gc_scratch.to_dict(),
                 }
                 _json(
                     envelope(
@@ -1500,7 +1550,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
             else:
-                _render_cleanup(gc_report, gc_downloads)
+                _render_cleanup(gc_report, gc_downloads, gc_scratch)
             return 0
         if args.command == "check":
             if args.across is not None:
@@ -1590,6 +1640,14 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         _emit_result(watched_result, False)
                     time.sleep(args.watch_interval)
+            check_subject = (
+                Path(args.inputs[-1]).name
+                if args.inputs and args.inputs[-1] != "-"
+                else "stdin"
+                if args.inputs
+                else Path(args.project or ".").resolve().name
+            )
+            runtime.events.emit("check.started", "Checking Lean input", subject=check_subject)
             if args.project is not None and args.package_refs:
                 raise ValueError("check cannot combine --project with --with")
             if not args.inputs:
@@ -1672,9 +1730,11 @@ def main(argv: list[str] | None = None) -> int:
                 shared=args.shared,
             )
     except KeyboardInterrupt:
+        renderer.close()
         print("lean-runtime: interrupted", file=sys.stderr)
         return 130
     except (ResolutionError, MaterializationError) as exc:
+        renderer.close()
         details = {
             "phase": exc.phase,
             "command": list(exc.command),
@@ -1694,6 +1754,7 @@ def main(argv: list[str] | None = None) -> int:
             _print_operation_failure(exc, verbose=args.verbose)
         return 2
     except PublicationError as exc:
+        renderer.close()
         if getattr(args, "json", False):
             _json(
                 envelope(
@@ -1707,6 +1768,7 @@ def main(argv: list[str] | None = None) -> int:
             _print_publication_failure(exc)
         return exc.exit_code
     except (LeanRuntimeError, OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        renderer.close()
         if getattr(args, "json", False):
             _json(
                 envelope(
@@ -1719,6 +1781,18 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"lean-runtime: {exc}", file=sys.stderr)
         return 2
+    if args.command in {"check", "check-file"}:
+        runtime.events.emit("check.completed", "Lean check completed", ok=result.ok)
+        total_ms = round((time.monotonic() - operation_started) * 1000)
+        accounted_ms = sum(timing.duration_ms for timing in result.timings)
+        result = replace(
+            result,
+            timings=(
+                PhaseTiming("command_preparation", max(0, total_ms - accounted_ms)),
+                *result.timings,
+            ),
+        )
+    renderer.close()
     _emit_result(result, args.json, display_path=display_path)
     if args.timings:
         print(render_timings(result.timings), file=sys.stderr)

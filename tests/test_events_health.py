@@ -24,6 +24,7 @@ def test_doctor_and_empty_store_status_do_not_install_tools(tmp_path: Path) -> N
         "disk",
         "elan",
         "staging",
+        "scratch",
         "cleanup",
     }
     elan = next(check for check in report.checks if check.name == "elan")

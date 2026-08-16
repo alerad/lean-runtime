@@ -86,6 +86,18 @@ def diagnose(toolchains: ToolchainManager, store: EnvironmentStore) -> DoctorRep
     status = "warning" if staging else "pass"
     message = f"{len(staging)} incomplete staging directories" if staging else "No stale builds"
     checks.append(DoctorCheck("staging", status, message))
+    scratch = store.clean_scratch(dry_run=True, minimum_age_seconds=3600)
+    if scratch.candidates:
+        checks.append(
+            DoctorCheck(
+                "scratch",
+                "warning",
+                f"{len(scratch.candidates)} abandoned workspaces use "
+                f"{scratch.candidate_bytes // (1024**2)} MiB",
+            )
+        )
+    else:
+        checks.append(DoctorCheck("scratch", "pass", "No abandoned workspaces"))
     store_status = store.status()
     cutoff = datetime.now(timezone.utc).timestamp() - 7 * 24 * 3600
     stale = tuple(
@@ -114,6 +126,7 @@ def repair(toolchains: ToolchainManager, store: EnvironmentStore) -> DoctorRepor
     """Apply the safe remedies represented by doctor checks, then diagnose again."""
     for staging in store.environments.glob(".staging-*"):
         remove_tree(staging)
+    store.clean_scratch(dry_run=False, minimum_age_seconds=3600, include_legacy=False)
     with suppress(ToolchainError):
         toolchains.elan_path(bootstrap=True)
     return diagnose(toolchains, store)
