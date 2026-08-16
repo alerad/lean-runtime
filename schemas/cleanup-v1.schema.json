@@ -13,7 +13,8 @@
       "additionalProperties": false,
       "properties": {
         "environments": {"$ref": "#/$defs/cleanup"},
-        "downloaded_files": {"anyOf": [{"$ref": "#/$defs/downloadCleanup"}, {"type": "null"}]}
+        "downloaded_files": {"anyOf": [{"$ref": "#/$defs/downloadCleanup"}, {"type": "null"}]},
+        "scratch": {"$ref": "#/$defs/cleanup"}
       }
     },
     "warnings": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"},
@@ -28,7 +29,9 @@
         "candidates": {"type": "array", "items": {"type": "string"}},
         "removed": {"type": "array", "items": {"type": "string"}},
         "retained": {"type": "array", "items": {"type": "string"}},
-        "dry_run": {"type": "boolean"}
+        "dry_run": {"type": "boolean"},
+        "candidate_bytes": {"type": "integer", "minimum": 0},
+        "reclaimed_bytes": {"type": "integer", "minimum": 0}
       }
     },
     "downloadCleanup": {
@@ -40,7 +43,8 @@
         "removed": {"type": "array", "items": {"type": "string"}},
         "retained": {"type": "array", "items": {"type": "string"}},
         "reclaimed_bytes": {"type": "integer", "minimum": 0},
-        "dry_run": {"type": "boolean"}
+        "dry_run": {"type": "boolean"},
+        "candidate_bytes": {"type": "integer", "minimum": 0}
       }
     }
   }

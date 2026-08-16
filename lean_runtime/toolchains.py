@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -18,6 +19,7 @@ from .backends import LocalBackend
 from .errors import ToolchainError
 from .events import EventEmitter
 from .policies import ExecutionPolicy
+from .serialization import write_json_atomic
 from .toolchain_slim import (
     SLIM_PROFILE,
     SlimManifest,
@@ -80,6 +82,7 @@ class ToolchainManager:
         self.elan_home = self.home / "elan"
         self.events = events or EventEmitter()
         self.remote_ensure: Callable[[str], bool] | None = None
+        self._executable_digests: dict[str, tuple[int, int, str]] = {}
 
     @property
     def environment(self) -> dict[str, str]:
@@ -347,8 +350,34 @@ class ToolchainManager:
             binary = binary.with_suffix(".exe")
         if not binary.is_file():
             raise ToolchainError(f"toolchain {name!r} does not provide {executable!r}")
+        stat_result = binary.stat()
+        cache_key = str(binary.resolve())
+        identity = (stat_result.st_size, stat_result.st_mtime_ns)
+        cached = self._executable_digests.get(cache_key)
+        if cached is not None and cached[:2] == identity:
+            return cached[2]
+        cache_path = self.home / "toolchain-executable-digests.json"
+        try:
+            persisted = json.loads(cache_path.read_text(encoding="utf-8"))
+            entry = persisted.get(cache_key, {})
+            if entry.get("size") == identity[0] and entry.get("mtime_ns") == identity[1]:
+                value = entry.get("digest")
+                if isinstance(value, str):
+                    self._executable_digests[cache_key] = (*identity, value)
+                    return value
+        except (OSError, AttributeError, json.JSONDecodeError):
+            persisted = {}
         digest = hashlib.sha256()
         with binary.open("rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
-        return "sha256:" + digest.hexdigest()
+        value = "sha256:" + digest.hexdigest()
+        self._executable_digests[cache_key] = (*identity, value)
+        persisted[cache_key] = {
+            "size": identity[0],
+            "mtime_ns": identity[1],
+            "digest": value,
+        }
+        self.home.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(cache_path, persisted)
+        return value

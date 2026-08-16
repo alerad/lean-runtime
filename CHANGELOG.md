@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Keep one fail-closed publication authentication session from push preflight through
+  upload, propagate explicit publication timeouts to credential and registry I/O,
+  and report credential-provider failures without labeling them anonymous.
+- Use logical project names during atomic initialization, show compact TTY-only check
+  progress, cache Lean executable identities across invocations, and report check
+  command-preparation timing.
+- Track disposable execution and resolution workspaces with process-held leases;
+  include their footprint in storage reporting and reclaim abandoned workspaces with
+  `clean` while protecting active work.
+
 ## 2.9.1 - 2026-08-15
 
 - Make GHCR credential discovery a single bounded GitHub CLI status read so a

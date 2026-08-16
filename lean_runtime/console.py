@@ -215,6 +215,18 @@ class ConsoleRenderer:
     def _render_capability_required(self, event: RuntimeEvent) -> None:
         self._print(event.message)
 
+    def _render_check_started(self, event: RuntimeEvent) -> None:
+        if self.mode != "tty":
+            return
+        subject = str(event.data.get("subject") or "Lean input")
+        message = f"Checking {subject}…"
+        self.stream.write("\r" + self.style.cyan(message))
+        self.stream.flush()
+        self._line_length = len(message)
+
+    def _render_check_completed(self, _event: RuntimeEvent) -> None:
+        self._end_progress_line()
+
     # -- low-level output -----------------------------------------------
 
     def _verbose_line(self, event: RuntimeEvent) -> None:

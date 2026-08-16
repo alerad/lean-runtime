@@ -135,6 +135,12 @@ run:
 gh auth refresh -s write:packages,read:packages
 ```
 
+Credential discovery is fail-closed: a configured provider that times out or
+returns an unusable token stops publication before any registry request. The same
+verified credential is retained from preflight through upload; it is not rediscovered
+after a long environment build. An explicitly supplied publication `--timeout`
+also applies to credential discovery and registry network operations.
+
 Publish the current platform after ensuring the lock:
 
 ```bash

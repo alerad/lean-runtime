@@ -81,6 +81,23 @@ class RegistryRequestError(DownloadUnavailable):
         self.retryable = retryable
 
 
+class CredentialAcquisitionError(EnvironmentError):
+    """A configured credential provider could not produce usable credentials."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str,
+        failure_kind: str,
+        retryable: bool,
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.failure_kind = failure_kind
+        self.retryable = retryable
+
+
 class PublicationError(EnvironmentError):
     """A required publication did not reach a remotely verified terminal state."""
 
@@ -97,6 +114,8 @@ class PublicationError(EnvironmentError):
         credential_source: str = "anonymous",
         username: str | None = None,
         hint: str | None = None,
+        attempted_provider: str | None = None,
+        auth_failure_kind: str | None = None,
     ) -> None:
         super().__init__(message)
         self.phase = phase
@@ -108,11 +127,15 @@ class PublicationError(EnvironmentError):
         self.credential_source = credential_source
         self.username = username
         self.hint = hint
+        self.attempted_provider = attempted_provider
+        self.auth_failure_kind = auth_failure_kind
 
     @property
     def exit_code(self) -> int:
         if self.partial:
             return 5
+        if self.phase == "credential_acquisition":
+            return 4 if self.retryable else 3
         if self.status_code in {401, 403}:
             return 3
         if self.retryable:
@@ -130,6 +153,8 @@ class PublicationError(EnvironmentError):
             "credential_source": self.credential_source,
             "username": self.username,
             "hint": self.hint,
+            "attempted_provider": self.attempted_provider,
+            "auth_failure_kind": self.auth_failure_kind,
             "message": str(self),
         }
 

@@ -63,6 +63,8 @@
         "credential_source": {"type": "string"},
         "username": {"type": ["string", "null"]},
         "hint": {"type": ["string", "null"]},
+        "attempted_provider": {"type": ["string", "null"]},
+        "auth_failure_kind": {"type": ["string", "null"]},
         "message": {"type": "string"}
       }
     }

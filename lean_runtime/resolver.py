@@ -113,8 +113,9 @@ class EnvironmentResolver:
             return lock
         resolution_root = self.store.home / "resolution"
         resolution_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="resolve-", dir=resolution_root) as raw:
-            workspace = Path(raw)
+        workspace = Path(tempfile.mkdtemp(prefix="resolve-", dir=resolution_root))
+        workspace_lease = self.store.lease_workspace(workspace, "resolution")
+        try:
             (workspace / "lean-toolchain").write_text(toolchain + "\n", encoding="utf-8")
             (workspace / "lakefile.toml").write_text(root_lakefile, encoding="utf-8")
             (workspace / f"{ROOT_MODULE}.lean").write_text(root_module, encoding="utf-8")
@@ -171,6 +172,8 @@ class EnvironmentResolver:
                 packages=len(packages),
             )
             return lock
+        finally:
+            workspace_lease.close()
 
     def _pin_tags(
         self, spec: EnvironmentSpec, *, cancel: threading.Event | None

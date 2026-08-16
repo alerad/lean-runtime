@@ -17,6 +17,7 @@ from lean_runtime import (
     AdoptionResult,
     ProjectError,
     Runtime,
+    RuntimeEvent,
     discover_project,
 )
 from lean_runtime._git import git_command
@@ -596,9 +597,11 @@ def test_adoption_does_not_mistake_the_parent_repository_for_a_package(tmp_path:
 
 
 def test_init_core_creates_a_standard_project_atomically(tmp_path: Path) -> None:
+    events: list[RuntimeEvent] = []
     runtime = Runtime(
         toolchains=InitProjectToolchains(tmp_path / "runtime"),
         libraries=[],  # type: ignore[arg-type]
+        on_event=events.append,
     )
 
     result = runtime.init_project(tmp_path / "fresh", mathlib=None)
@@ -616,6 +619,10 @@ def test_init_core_creates_a_standard_project_atomically(tmp_path: Path) -> None
     repeated = runtime.init_project(tmp_path / "fresh", mathlib=None)
     assert repeated.action == "already-attached"
     assert repeated.workspace_id == result.workspace_id
+    shared_events = [event for event in events if event.kind == "project.shared.workspace_started"]
+    assert shared_events
+    assert "fresh" in shared_events[0].message
+    assert "lean-runtime-init" not in shared_events[0].message
 
 
 def test_init_can_skip_or_preserve_an_agents_guide(tmp_path: Path) -> None:

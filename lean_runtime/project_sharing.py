@@ -527,6 +527,7 @@ class ProjectAdopter:
         probe: Callable[[Path | None], None],
         seed_packages: Path | None = None,
         seed_package_paths: dict[str, Path] | None = None,
+        display_name: str | None = None,
     ) -> AdoptionResult:
         adoption = inspect_adoption(context.root)
         if adoption.blockers:
@@ -535,10 +536,11 @@ class ProjectAdopter:
             context,
             seed_packages=seed_packages,
             seed_package_paths=seed_package_paths,
+            display_name=display_name,
         )
         self.shared.events.emit(
             "project.attach.shared_probe_started",
-            f"Verifying shared graph for {context.root.name}",
+            f"Verifying shared graph for {display_name or context.root.name}",
             phase="project-attach",
             packages=len(workspace.package_ids),
         )
