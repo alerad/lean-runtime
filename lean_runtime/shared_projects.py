@@ -742,7 +742,13 @@ class SharedProjectManager:
         overrides_file = destination / "package-overrides.json"
         package_names = tuple(str(entry["name"]) for entry in packages)
         project_name = display_name or context.root.name
-        with FileLock(self.locks / f"{workspace_id}.lock", timeout=1800, cancel=cancel):
+        with FileLock(
+            self.locks / f"{workspace_id}.lock",
+            timeout=1800,
+            cancel=cancel,
+            owner={"operation": "workspace preparation", "project": project_name},
+            on_wait=self._announce_lock_wait,
+        ):
             if overrides_file.is_file():
                 try:
                     workspace_record = json.loads(
@@ -981,6 +987,24 @@ class SharedProjectManager:
             workspace_id, destination, overrides_file, False, package_names, tuple(package_ids)
         )
 
+    def _announce_lock_wait(self, holder: dict[str, Any] | None) -> None:
+        """Attribute a shared workspace lock wait to its current holder."""
+        details = holder or {}
+        pid = details.get("pid")
+        operation = details.get("operation")
+        subject = details.get("project") or details.get("packages")
+        if isinstance(subject, list):
+            names = [str(item) for item in subject]
+            subject = ", ".join(names[:3]) + ("…" if len(names) > 3 else "")
+        described = str(operation or "another operation") + (f" of {subject}" if subject else "")
+        held_by = f"PID {pid} ({described})" if pid else "another process"
+        self.events.emit(
+            "project.workspace_lock_wait",
+            f"Waiting for shared workspace lock held by {held_by}",
+            phase="shared-project",
+            holder=details,
+        )
+
     @contextmanager
     def build_lock(
         self,
@@ -989,9 +1013,16 @@ class SharedProjectManager:
         cancel: threading.Event | None = None,
     ) -> Any:
         """Serialize builds that may update any shared dependency artifacts."""
+        owner = {"operation": "shared build", "packages": sorted(set(workspace.packages))}
         with ExitStack() as stack:
             for package_id in sorted(set(workspace.package_ids)):
                 stack.enter_context(
-                    FileLock(self.locks / f"{package_id}-build.lock", timeout=1800, cancel=cancel)
+                    FileLock(
+                        self.locks / f"{package_id}-build.lock",
+                        timeout=1800,
+                        cancel=cancel,
+                        owner=owner,
+                        on_wait=self._announce_lock_wait,
+                    )
                 )
             yield

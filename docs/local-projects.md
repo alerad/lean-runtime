@@ -77,7 +77,10 @@ to disable them everywhere). A check that fails or times out under a snapshot
 is retried once without it, and the snapshot is discarded. `--watch` is a thin
 save loop over the same ordinary check/result contract. `check` also accepts
 several files or directories and checks each independently, in parallel with
-`--concurrency`. Failed checks may add exact-graph
+`--concurrency`. When one invocation must wait on another, the console names
+the holder (for example `Waiting for shared workspace lock held by PID 512
+(shared build of mathlib)`), and `--timings` reports `workspace_lock` and
+`header_snapshot` phases alongside the actual Lean execution time. Failed checks may add exact-graph
 identifier hints derived from pinned `.ilean` indexes; raw Lean streams remain
 unchanged.
 

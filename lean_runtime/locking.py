@@ -2,32 +2,70 @@
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 from .errors import EnvironmentError
 
 
 class FileLock:
+    """One advisory cross-process lock.
+
+    ``owner`` is a small JSON-serializable description of the acquiring
+    operation; on POSIX it is written into the lock file while the lock is
+    held so that waiters can attribute their wait. ``on_wait`` is invoked at
+    most once, on first contention, with the current holder's description (or
+    ``None`` when it cannot be read).
+    """
+
     def __init__(
         self,
         path: Path,
         timeout: float = 300,
         cancel: threading.Event | None = None,
+        owner: dict[str, Any] | None = None,
+        on_wait: Callable[[dict[str, Any] | None], None] | None = None,
     ) -> None:
         self.path = path
         self.timeout = timeout
         self.cancel = cancel
+        self.owner = owner
+        self.on_wait = on_wait
         self._handle: BinaryIO | None = None
+        self._owner_written = False
+
+    def holder(self) -> dict[str, Any] | None:
+        """Best-effort description of the current lock holder."""
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def _write_owner(self, handle: BinaryIO) -> None:
+        if self.owner is None or os.name == "nt":
+            return
+        try:
+            handle.seek(0)
+            handle.truncate()
+            handle.write(json.dumps({"pid": os.getpid(), **self.owner}).encode("utf-8"))
+            handle.flush()
+            self._owner_written = True
+        except (OSError, TypeError, ValueError):
+            self._owner_written = False
 
     def __enter__(self) -> FileLock:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.path.open("a+b")
         started = time.monotonic()
+        announced = False
         while True:
             try:
                 if os.name == "nt":
@@ -51,8 +89,13 @@ class FileLock:
                         getattr(fcntl, "LOCK_EX") | getattr(fcntl, "LOCK_NB"),  # noqa: B009
                     )
                 self._handle = handle
+                self._write_owner(handle)
                 return self
             except OSError as error:
+                if not announced:
+                    announced = True
+                    if self.on_wait is not None:
+                        self.on_wait(self.holder())
                 if self.cancel is not None and self.cancel.is_set():
                     handle.close()
                     raise EnvironmentError(
@@ -74,6 +117,12 @@ class FileLock:
         handle = self._handle
         if handle is None:
             return
+        if self._owner_written:
+            with contextlib.suppress(OSError):
+                handle.seek(0)
+                handle.truncate()
+                handle.flush()
+            self._owner_written = False
         if os.name == "nt":
             import msvcrt
 

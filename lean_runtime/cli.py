@@ -736,7 +736,27 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     program_index.add_argument("--tag", action="append", default=[])
     program_index.add_argument("--sign", action="store_true")
 
-    check = commands.add_parser("check", help="check Lean files or all local libraries")
+    check = commands.add_parser(
+        "check",
+        help="check Lean files or all local libraries",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  lean-runtime check                          check every local library of this project
+  lean-runtime check Foo.lean                 check one file in its discovered project
+  lean-runtime check Foo.lean Bar.lean        check several files, one result per file
+  lean-runtime check src --concurrency 4      check every *.lean under src in parallel
+  lean-runtime check Foo.lean --project ~/p   check a file against an explicit Lake project
+  lean-runtime check --environment NAME Foo.lean
+                                              check inside a published environment
+  lean-runtime check Foo.lean --with github:owner/repo@v1.0
+                                              check against exact package references
+  lean-runtime check Foo.lean --timeout 60    bound one Lean invocation to 60 seconds
+  lean-runtime --timings check Foo.lean       append stable phase timings to the result
+
+Multi-file checks exit nonzero if any file is rejected. Header snapshots for
+warm re-checks are used by --watch and --repeat automatically; set
+LEAN_RUNTIME_HEADER_SNAPSHOTS=1 to enable them for one-shot checks.""",
+    )
     check.add_argument(
         "inputs",
         nargs="*",

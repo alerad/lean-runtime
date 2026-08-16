@@ -231,6 +231,9 @@ class ConsoleRenderer:
         module = str(event.data.get("module") or "Lean input")
         self._print(f"Waiting for header snapshot initialization: {module}")
 
+    def _render_project_workspace_lock_wait(self, event: RuntimeEvent) -> None:
+        self._print(event.message)
+
     # -- low-level output -----------------------------------------------
 
     def _verbose_line(self, event: RuntimeEvent) -> None:

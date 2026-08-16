@@ -210,6 +210,7 @@ def test_timed_out_snapshot_checks_are_retried_without_the_snapshot(tmp_path: Pa
     )
     assert result.ok
     assert result.elapsed_seconds == pytest.approx(1.0)
+    assert result.timings[0].phase == "header_snapshot"
     assert len(calls) == 2 and calls[1] == BASE
     assert [event.kind for event in events] == ["project.header_snapshot_discarded"]
     with cache.command("v4.33.0", "workspace", "Main.lean", source, BASE) as command:
@@ -291,3 +292,38 @@ def test_disabled_cache_never_triggers_the_fallback(tmp_path: Path) -> None:
         None,  # type: ignore[arg-type]
     )
     assert not result.ok and len(calls) == 1 and calls[0] == BASE
+
+
+def test_shared_builds_record_workspace_lock_timing(tmp_path: Path) -> None:
+    from contextlib import contextmanager
+
+    @contextmanager
+    def build_lock(_workspace, *, cancel=None):
+        yield
+
+    runtime = SimpleNamespace(
+        toolchains=SimpleNamespace(command=lambda _toolchain, *args: list(args)),
+        lake_cache=SimpleNamespace(environment=lambda _context: None),
+        shared_projects=SimpleNamespace(
+            prepare=lambda _context, cancel=None: SimpleNamespace(
+                overrides_file=tmp_path / "overrides.json"
+            ),
+            build_lock=build_lock,
+        ),
+        _raw_result=lambda *_args, **_kwargs: _execution(True),
+    )
+    executor = ProjectExecutor(runtime)  # type: ignore[arg-type]
+    context = SimpleNamespace(
+        toolchain="v4.33.0",
+        root=tmp_path,
+        provenance=lambda: None,
+        package_provenance=lambda: (),
+    )
+    built = executor.build(
+        context,  # type: ignore[arg-type]
+        targets=("Demo:leanArts",),
+        policy=None,  # type: ignore[arg-type]
+        shared=True,
+    )
+    assert built.ok
+    assert built.timings[0].phase == "workspace_lock"

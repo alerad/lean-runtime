@@ -29,7 +29,7 @@
       "required": ["phase", "duration_ms", "performed"],
       "additionalProperties": false,
       "properties": {
-        "phase": {"enum": ["discovery", "toolchain", "resolution", "source_acquisition", "cache_lookup", "cache_download", "artifact_hydration", "build", "publication", "environment_open", "instance_creation", "input_staging", "command_preparation", "execution", "result_collection", "result_publication", "cleanup"]},
+        "phase": {"enum": ["discovery", "toolchain", "resolution", "source_acquisition", "cache_lookup", "cache_download", "artifact_hydration", "build", "publication", "environment_open", "instance_creation", "input_staging", "command_preparation", "workspace_lock", "header_snapshot", "execution", "result_collection", "result_publication", "cleanup"]},
         "duration_ms": {"type": "integer", "minimum": 0},
         "performed": {"type": "boolean"}
       }

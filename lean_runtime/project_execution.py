@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -102,10 +103,16 @@ class ProjectExecutor:
     ) -> ExecutionResult:
         """Run one check through the header cache, falling back to a plain check once."""
         cache = self.runtime.header_cache
+        entered = time.monotonic()
+        coordination_ms = 0
         with cache.command(
             context.toolchain, workspace_digest, module, source, command, cancel=cancel
         ) as selected:
+            coordination_ms = round((time.monotonic() - entered) * 1000)
             result = execute(selected)
+        snapshot_timing = PhaseTiming("header_snapshot", coordination_ms)
+        if selected != list(command):
+            result = replace(result, timings=(snapshot_timing, *result.timings))
         if not _snapshot_suspect(selected, result):
             return result
         cache.discard(context.toolchain, workspace_digest, module, source)
@@ -116,7 +123,11 @@ class ProjectExecutor:
             module=module,
         )
         retried = execute(list(command))
-        return replace(retried, elapsed_seconds=result.elapsed_seconds + retried.elapsed_seconds)
+        return replace(
+            retried,
+            elapsed_seconds=result.elapsed_seconds + retried.elapsed_seconds,
+            timings=(snapshot_timing, *retried.timings),
+        )
 
     def check_file(
         self,
@@ -308,8 +319,11 @@ class ProjectExecutor:
 
         if workspace is None:
             return run()
+        lock_started = time.monotonic()
         with self.runtime.shared_projects.build_lock(workspace, cancel=cancel):
-            return run()
+            waited_ms = round((time.monotonic() - lock_started) * 1000)
+            result = run()
+        return replace(result, timings=(PhaseTiming("workspace_lock", waited_ms), *result.timings))
 
     def check_project(
         self,

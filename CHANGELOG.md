@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Make header snapshots opt-in (`LEAN_RUNTIME_HEADER_SNAPSHOTS=1`; `--watch` and
+  `--repeat` enable them automatically), key them by module identity, load
+  existing snapshots without holding the creation lock, cancel lock waits
+  promptly, and retry once without a snapshot—quarantining it—when a snapshot
+  check times out or reports snapshot errors.
+- Support `check FILE...` and `check DIRECTORY...` with independent per-file
+  results, `--concurrency`, a `lean-runtime.check-batch/v1` JSON envelope, and
+  an explicit `--environment NAME`; the legacy positional `ENVIRONMENT FILE`
+  form now applies only when the first argument is not an existing path.
+- Attribute shared workspace lock waits to their holder (PID and operation),
+  announce header snapshot waits, and record `workspace_lock` and
+  `header_snapshot` phase timings so coordination cost is visible next to the
+  actual Lean check time.
+
 ## 2.9.2 - 2026-08-16
 
 - Keep one fail-closed publication authentication session from push preflight through
