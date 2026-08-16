@@ -13,6 +13,7 @@ from lean_runtime.profiling import ProfileReport
 from lean_runtime.wire import (
     envelope,
     error,
+    serialize_check_batch_v1,
     serialize_execution_v1,
     serialize_matrix_v1,
     serialize_profile_v1,
@@ -36,6 +37,7 @@ def _validator(name: str) -> Draft202012Validator:
 def test_every_v1_schema_compiles_eagerly() -> None:
     paths = sorted(SCHEMAS.glob("*-v1.schema.json"))
     assert {path.stem for path in paths} == {
+        "check-batch-v1.schema",
         "comparison-v1.schema",
         "execution-v1.schema",
         "cleanup-v1.schema",
@@ -69,10 +71,14 @@ def test_execution_success_fixture_matches_v1_schema() -> None:
     _validator("matrix-v1.schema.json").validate(
         serialize_matrix_v1(MatrixResult((MatrixEntry("core", result),), 0.01))
     )
+    _validator("check-batch-v1.schema.json").validate(
+        serialize_check_batch_v1([("Main.lean", result)], 0.01)
+    )
 
 
 def test_every_v1_schema_accepts_its_closed_error_envelope() -> None:
     schemas = {
+        "check-batch": "lean-runtime.check-batch/v1",
         "comparison": "lean-runtime.comparison/v1",
         "execution": "lean-runtime.execution/v1",
         "cleanup": "lean-runtime.cleanup/v1",

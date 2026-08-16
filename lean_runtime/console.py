@@ -227,6 +227,10 @@ class ConsoleRenderer:
     def _render_check_completed(self, _event: RuntimeEvent) -> None:
         self._end_progress_line()
 
+    def _render_check_header_wait(self, event: RuntimeEvent) -> None:
+        module = str(event.data.get("module") or "Lean input")
+        self._print(f"Waiting for header snapshot initialization: {module}")
+
     # -- low-level output -----------------------------------------------
 
     def _verbose_line(self, event: RuntimeEvent) -> None:

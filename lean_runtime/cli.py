@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime
 from importlib.metadata import version as distribution_version
@@ -24,6 +25,7 @@ from .errors import (
     ResolutionError,
 )
 from .events import RuntimeEvent
+from .header_cache import ENABLE_VARIABLE as _HEADER_SNAPSHOTS_VARIABLE
 from .health import DoctorReport
 from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock
@@ -40,6 +42,7 @@ from .timings import render_timings
 from .wire import (
     envelope,
     error,
+    serialize_check_batch_v1,
     serialize_comparison_v1,
     serialize_execution_v1,
     serialize_matrix_v1,
@@ -341,6 +344,82 @@ def _cli_source_name(path: Path) -> str:
     if path.is_absolute():
         return path.name
     return path.as_posix()
+
+
+def _expand_check_inputs(inputs: list[str]) -> list[Path]:
+    """Expand FILE and DIRECTORY inputs into an ordered, deduplicated file list."""
+    files: list[Path] = []
+    for raw in inputs:
+        path = Path(raw)
+        if path.is_dir():
+            found: list[Path] = []
+            for current, directories, filenames in os.walk(path):
+                directories[:] = sorted(name for name in directories if not name.startswith("."))
+                found.extend(
+                    Path(current) / name for name in sorted(filenames) if name.endswith(".lean")
+                )
+            if not found:
+                raise ValueError(f"no Lean files found under directory: {path}")
+            files.extend(found)
+        elif path.is_file():
+            files.append(path)
+        else:
+            raise ValueError(f"check input does not exist: {path}")
+    return list(dict.fromkeys(files))
+
+
+def _run_check_batch(runtime: Runtime, files: list[Path], args: argparse.Namespace) -> int:
+    """Check each file independently, optionally in parallel, and report per file."""
+    if args.concurrency < 1 or args.concurrency > 32:
+        raise ValueError("check concurrency must be between 1 and 32")
+    environment = runtime.environment(args.environment) if args.environment else None
+
+    def execute(path: Path) -> ExecutionResult:
+        if environment is not None:
+            name = _cli_source_name(path)
+            return environment.check_files(
+                {name: path.read_text(encoding="utf-8")}, entrypoint=name, policy=_policy(args)
+            )
+        return runtime.check_file(
+            path, toolchain=args.toolchain, project=args.project, policy=_policy(args)
+        )
+
+    started = time.monotonic()
+    results: dict[Path, ExecutionResult] = {}
+    if args.concurrency == 1:
+        for path in files:
+            results[path] = execute(path)
+    else:
+        with ThreadPoolExecutor(
+            max_workers=args.concurrency, thread_name_prefix="lean-check"
+        ) as pool:
+            futures = {pool.submit(execute, path): path for path in files}
+            try:
+                for future in as_completed(futures):
+                    results[futures[future]] = future.result()
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
+    entries = [(str(path), results[path]) for path in files]
+    runtime.events.emit(
+        "check.completed",
+        "Lean check completed",
+        ok=all(result.ok for _, result in entries),
+    )
+    if args.json:
+        _json(serialize_check_batch_v1(entries, time.monotonic() - started))
+    else:
+        for display, result in entries:
+            status = "accepted" if result.ok else "rejected"
+            print(f"{display}\t{status}\t{result.elapsed_seconds:.2f}s")
+            if not result.ok:
+                output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+                if output:
+                    print(output, file=sys.stderr)
+        accepted = sum(1 for _, result in entries if result.ok)
+        print(f"{accepted}/{len(entries)} accepted")
+    return 0 if all(result.ok for _, result in entries) else 1
 
 
 def _display_result_text(text: str, result: ExecutionResult, display_path: str | None) -> str:
@@ -657,11 +736,16 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     program_index.add_argument("--tag", action="append", default=[])
     program_index.add_argument("--sign", action="store_true")
 
-    check = commands.add_parser("check", help="check one Lean file or all local libraries")
+    check = commands.add_parser("check", help="check Lean files or all local libraries")
     check.add_argument(
         "inputs",
         nargs="*",
-        help="FILE, legacy ENVIRONMENT FILE, or omit inside a Lake project; FILE may be -",
+        help="FILE..., DIRECTORY..., legacy ENVIRONMENT FILE, or omit inside a Lake "
+        "project; FILE may be -",
+    )
+    check.add_argument(
+        "--environment",
+        help="check the given FILEs inside this published environment",
     )
     check.add_argument(
         "--with",
@@ -686,7 +770,9 @@ Run `lean-runtime COMMAND --help` for examples and options.""",
     check.add_argument("--repeat", type=int, help="measure N repeated checks of one project file")
     check.add_argument("--warmup", type=int, default=1, help="warmups before --repeat samples")
     check.add_argument("--across", type=Path, help="check FILE across contexts in CONFIGURATION")
-    check.add_argument("--concurrency", type=int, default=1, help="workers for --across")
+    check.add_argument(
+        "--concurrency", type=int, default=1, help="workers for --across and multi-file checks"
+    )
     _add_policy(check)
 
     inspect = commands.add_parser("inspect", help="inspect a published environment")
@@ -1554,7 +1640,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "check":
             if args.across is not None:
-                if len(args.inputs) != 1 or args.package_refs or args.include or args.project:
+                if (
+                    len(args.inputs) != 1
+                    or args.package_refs
+                    or args.include
+                    or args.project
+                    or args.environment
+                ):
                     raise ValueError("check --across requires exactly one FILE")
                 across_file = Path(args.inputs[0])
                 contexts = load_matrix(args.across)
@@ -1589,6 +1681,8 @@ def main(argv: list[str] | None = None) -> int:
                         "check --repeat requires positive samples and nonnegative warmups"
                     )
                 repeated_file = Path(args.inputs[0])
+                if os.environ.get(_HEADER_SNAPSHOTS_VARIABLE) is None:
+                    runtime.header_cache.enabled = True
                 for _ in range(args.warmup):
                     warm = runtime.check_file(
                         repeated_file, project=args.project, policy=_policy(args)
@@ -1626,6 +1720,8 @@ def main(argv: list[str] | None = None) -> int:
                 if not watched.is_file():
                     raise ValueError(f"watched Lean file does not exist: {watched}")
                 print(f"Watching {watched} · Ctrl-C to stop")
+                if os.environ.get(_HEADER_SNAPSHOTS_VARIABLE) is None:
+                    runtime.header_cache.enabled = True
                 previous: tuple[int, int] | None = None
                 while True:
                     stat = watched.stat()
@@ -1650,9 +1746,24 @@ def main(argv: list[str] | None = None) -> int:
             runtime.events.emit("check.started", "Checking Lean input", subject=check_subject)
             if args.project is not None and args.package_refs:
                 raise ValueError("check cannot combine --project with --with")
+            if args.environment is not None and (
+                args.package_refs or args.project or args.toolchain
+            ):
+                raise ValueError(
+                    "check --environment cannot be combined with --with, --project, or --toolchain"
+                )
+            legacy_environment = (
+                args.environment is None
+                and not args.package_refs
+                and len(args.inputs) == 2
+                and args.inputs[0] != "-"
+                and not Path(args.inputs[0]).exists()
+            )
             if not args.inputs:
                 if args.package_refs or args.include:
                     raise ValueError("project-wide check does not accept --with or --include")
+                if args.environment is not None:
+                    raise ValueError("check --environment requires at least one FILE")
                 result = runtime.check_project(
                     args.project or Path("."), toolchain=args.toolchain, policy=_policy(args)
                 )
@@ -1662,11 +1773,22 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError("check with --with expects exactly one FILE")
                 environment = runtime.open_references(args.package_refs, toolchain=args.toolchain)
                 source_file = Path(args.inputs[0])
-            elif len(args.inputs) == 1:
-                if args.include:
-                    raise ValueError("local project checks do not accept --include")
-                source_file = Path(args.inputs[0])
-                if str(source_file) == "-":
+            elif legacy_environment:
+                if args.toolchain:
+                    raise ValueError("check --toolchain is only valid with --with")
+                if args.project:
+                    raise ValueError("check --project is only valid with a single FILE")
+                environment = runtime.environment(args.inputs[0])
+                source_file = Path(args.inputs[1])
+            elif "-" in args.inputs:
+                if len(args.inputs) != 1:
+                    raise ValueError("stdin (-) must be the only check input")
+                if args.environment is not None:
+                    environment = runtime.environment(args.environment)
+                    source_file = Path("-")
+                else:
+                    if args.include:
+                        raise ValueError("local project checks do not accept --include")
                     display_path = "<stdin>"
                     result = runtime.check(
                         sys.stdin.read(),
@@ -1674,23 +1796,26 @@ def main(argv: list[str] | None = None) -> int:
                         project=args.project,
                         policy=_policy(args),
                     )
+                    source_file = None
+            else:
+                selected_files = _expand_check_inputs(args.inputs)
+                if len(selected_files) > 1:
+                    if args.include:
+                        raise ValueError("multi-file checks do not accept --include")
+                    return _run_check_batch(runtime, selected_files, args)
+                if args.environment is not None:
+                    environment = runtime.environment(args.environment)
+                    source_file = selected_files[0]
                 else:
+                    if args.include:
+                        raise ValueError("local project checks do not accept --include")
                     result = runtime.check_file(
-                        source_file,
+                        selected_files[0],
                         toolchain=args.toolchain,
                         project=args.project,
                         policy=_policy(args),
                     )
-                source_file = None
-            else:
-                if len(args.inputs) != 2:
-                    raise ValueError("check expects FILE, ENVIRONMENT FILE, or FILE with --with")
-                if args.toolchain:
-                    raise ValueError("check --toolchain is only valid with --with")
-                if args.project:
-                    raise ValueError("check --project is only valid with a single FILE")
-                environment = runtime.environment(args.inputs[0])
-                source_file = Path(args.inputs[1])
+                    source_file = None
             if source_file is None:
                 pass
             elif str(source_file) == "-":

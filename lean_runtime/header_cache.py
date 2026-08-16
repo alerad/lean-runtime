@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -10,14 +11,25 @@ import tempfile
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
+from .errors import EnvironmentError
 from .locking import FileLock
 from .serialization import sha256_id
 from .store import platform_compatibility
 
 if TYPE_CHECKING:
+    import threading
+
+    from .events import EventEmitter
     from .toolchains import ToolchainManager
+
+ENABLE_VARIABLE = "LEAN_RUNTIME_HEADER_SNAPSHOTS"
+_TRUTHY = {"1", "true", "on", "yes"}
+
+
+def _configured_enabled() -> bool:
+    return os.environ.get(ENABLE_VARIABLE, "").strip().lower() in _TRUTHY
 
 
 def _header_identity(source: str) -> str:
@@ -43,12 +55,34 @@ def _header_identity(source: str) -> str:
     return "".join(lines)
 
 
-class LeanHeaderCache:
-    """Reuse Lean's native experimental import snapshots when the binary supports them."""
+class _SnapshotPaths(NamedTuple):
+    snapshot: Path
+    deps: Path
+    lock: Path
 
-    def __init__(self, home: Path, toolchains: ToolchainManager) -> None:
+    def valid(self) -> bool:
+        return self.snapshot.is_file() and self.deps.is_file()
+
+
+class LeanHeaderCache:
+    """Reuse Lean's native experimental import snapshots when the binary supports them.
+
+    Snapshots are keyed by exact toolchain, workspace identity, logical module
+    name, and import-block content, so distinct modules never share a snapshot.
+    Existing snapshots are loaded without holding any lock; only first-time
+    snapshot creation serializes behind a per-key file lock.
+    """
+
+    def __init__(
+        self,
+        home: Path,
+        toolchains: ToolchainManager,
+        events: EventEmitter | None = None,
+    ) -> None:
         self.home = home / "header-snapshots"
         self.toolchains = toolchains
+        self.events = events
+        self.enabled = _configured_enabled()
         self._support: dict[str, bool] = {}
         self._toolchain_keys: dict[str, str] = {}
 
@@ -95,37 +129,86 @@ class LeanHeaderCache:
         self._support[key] = supported
         return supported
 
-    @contextmanager
-    def command(
-        self,
-        toolchain: str,
-        workspace_identity: str,
-        source: str,
-        command: Sequence[str],
-    ) -> Iterator[list[str]]:
-        if not self.supported(toolchain):
-            yield list(command)
-            return
+    def _paths(
+        self, toolchain: str, workspace_identity: str, module: str, source: str
+    ) -> _SnapshotPaths:
         key = sha256_id(
             "header",
             {
                 "toolchain": self._toolchain_key(toolchain),
                 "workspace": workspace_identity,
+                "module": module,
                 "header": hashlib.sha256(_header_identity(source).encode()).hexdigest(),
             },
         ).removeprefix("header-")
         root = self.home / self._toolchain_key(toolchain)
         snapshot = root / f"{key}.snap"
-        deps = Path(str(snapshot) + ".deps")
-        root.mkdir(parents=True, exist_ok=True)
-        with FileLock(root / f"{key}.lock"):
-            if snapshot.is_file() and deps.is_file():
-                yield [*command[:-1], f"--incr-load={snapshot}", command[-1]]
+        return _SnapshotPaths(snapshot, Path(str(snapshot) + ".deps"), root / f"{key}.lock")
+
+    def discard(self, toolchain: str, workspace_identity: str, module: str, source: str) -> None:
+        """Quarantine a snapshot that produced timeout or staleness symptoms."""
+        paths = self._paths(toolchain, workspace_identity, module, source)
+        for path in (paths.snapshot, paths.deps):
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
+
+    @contextmanager
+    def _creation_lock(
+        self, paths: _SnapshotPaths, module: str, cancel: threading.Event | None
+    ) -> Iterator[None]:
+        """Acquire the per-key creation lock, announcing contention once."""
+        lock = FileLock(paths.lock, timeout=0)
+        try:
+            lock.__enter__()
+        except EnvironmentError:
+            if self.events is not None:
+                self.events.emit(
+                    "check.header_wait",
+                    f"Waiting for header snapshot initialization: {module}",
+                    phase="check",
+                    module=module,
+                )
+            lock = FileLock(paths.lock, cancel=cancel)
+            lock.__enter__()
+        try:
+            yield
+        finally:
+            lock.__exit__(None, None, None)
+
+    @contextmanager
+    def command(
+        self,
+        toolchain: str,
+        workspace_identity: str,
+        module: str,
+        source: str,
+        command: Sequence[str],
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[list[str]]:
+        if not self.enabled or not self.supported(toolchain):
+            yield list(command)
+            return
+        paths = self._paths(toolchain, workspace_identity, module, source)
+        if paths.valid():
+            yield [*command[:-1], f"--incr-load={paths.snapshot}", command[-1]]
+            return
+        paths.snapshot.parent.mkdir(parents=True, exist_ok=True)
+        hit_after_wait = False
+        with self._creation_lock(paths, module, cancel):
+            if paths.valid():
+                hit_after_wait = True
+            else:
+                root = str(paths.snapshot.parent)
+                with tempfile.TemporaryDirectory(
+                    prefix=f".{paths.snapshot.stem}.", dir=root
+                ) as temporary_root:
+                    temporary = Path(temporary_root) / "header.snap"
+                    temporary_deps = Path(str(temporary) + ".deps")
+                    yield [*command[:-1], f"--incr-header-save={temporary}", command[-1]]
+                    if temporary.is_file() and temporary_deps.is_file():
+                        os.replace(temporary, paths.snapshot)
+                        os.replace(temporary_deps, paths.deps)
                 return
-            with tempfile.TemporaryDirectory(prefix=f".{key}.", dir=root) as temporary_root:
-                temporary = Path(temporary_root) / "header.snap"
-                temporary_deps = Path(str(temporary) + ".deps")
-                yield [*command[:-1], f"--incr-header-save={temporary}", command[-1]]
-                if temporary.is_file() and temporary_deps.is_file():
-                    os.replace(temporary, snapshot)
-                    os.replace(temporary_deps, deps)
+        if hit_after_wait:
+            yield [*command[:-1], f"--incr-load={paths.snapshot}", command[-1]]

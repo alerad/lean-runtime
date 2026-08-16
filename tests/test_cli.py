@@ -699,3 +699,176 @@ def test_clean_previews_then_reclaims_with_human_output(tmp_path: Path, capsys) 
     document = json.loads(capsys.readouterr().out)
     assert document["schema"] == "lean-runtime.cleanup/v1"
     assert document["data"]["environments"]["candidates"] == []
+
+
+def _check_result(ok: bool, cwd: str, name: str, stderr: str = "") -> ExecutionResult:
+    return ExecutionResult(
+        ok=ok,
+        exit_code=0 if ok else 1,
+        toolchain="leanprover/lean4:v4.33.0",
+        command=("lake", "env", "lean", name),
+        cwd=cwd,
+        stdout="",
+        stderr=stderr,
+        elapsed_seconds=0.01,
+    )
+
+
+def test_multi_file_check_reports_each_file_and_fails_on_any_rejection(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    first = tmp_path / "A.lean"
+    second = tmp_path / "B.lean"
+    first.write_text("example : True := by trivial\n")
+    second.write_text("example : False := by trivial\n")
+    checked: list[Path] = []
+
+    def check_file(_runtime, path, **_kwargs):
+        checked.append(Path(path))
+        ok = Path(path).name != "B.lean"
+        return _check_result(ok, str(tmp_path), Path(path).name, "" if ok else "error: oops")
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.check_file", check_file)
+
+    assert main(["--home", str(tmp_path / "runtime"), "check", str(first), str(second)]) == 1
+    assert checked == [first, second]
+    output = capsys.readouterr()
+    assert "accepted" in output.out and "rejected" in output.out
+    assert "1/2 accepted" in output.out
+    assert "error: oops" in output.err
+
+
+def test_directory_checks_expand_lean_files_and_skip_hidden_directories(
+    monkeypatch, tmp_path: Path
+) -> None:
+    project = tmp_path / "proj"
+    (project / "Sub").mkdir(parents=True)
+    (project / "A.lean").write_text("-- a\n")
+    (project / "Sub" / "B.lean").write_text("-- b\n")
+    (project / "notes.md").write_text("not lean\n")
+    (project / ".lake" / "build").mkdir(parents=True)
+    (project / ".lake" / "build" / "Staged.lean").write_text("-- staged\n")
+    (project / ".git").mkdir()
+    (project / ".git" / "Ignored.lean").write_text("-- ignored\n")
+    checked: list[Path] = []
+
+    def check_file(_runtime, path, **_kwargs):
+        checked.append(Path(path))
+        return _check_result(True, str(project), Path(path).name)
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.check_file", check_file)
+
+    assert main(["--home", str(tmp_path / "runtime"), "check", str(project)]) == 0
+    assert checked == [project / "A.lean", project / "Sub" / "B.lean"]
+
+
+def test_two_existing_files_are_never_treated_as_a_legacy_environment(
+    monkeypatch, tmp_path: Path
+) -> None:
+    first = tmp_path / "First.lean"
+    second = tmp_path / "Second.lean"
+    first.write_text("-- 1\n")
+    second.write_text("-- 2\n")
+
+    def environment(_runtime, _name):
+        raise AssertionError("existing files must not resolve as an environment")
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.environment", environment)
+    monkeypatch.setattr(
+        "lean_runtime.cli.Runtime.check_file",
+        lambda _runtime, path, **_kwargs: _check_result(True, str(tmp_path), Path(path).name),
+    )
+
+    assert main(["--home", str(tmp_path / "runtime"), "check", str(first), str(second)]) == 0
+
+
+def test_legacy_environment_file_pair_still_works_for_missing_first_argument(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := by trivial\n")
+    opened: list[str] = []
+
+    class FakeEnvironment:
+        def check_files(self, files, *, entrypoint, policy):
+            assert entrypoint in files
+            return _check_result(True, str(tmp_path), entrypoint)
+
+    def environment(_runtime, name):
+        opened.append(name)
+        return FakeEnvironment()
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.environment", environment)
+
+    assert main(["--home", str(tmp_path / "runtime"), "check", "myenv", str(source)]) == 0
+    assert opened == ["myenv"]
+    assert "accepted:" in capsys.readouterr().out
+
+
+def test_environment_flag_checks_every_file_in_the_environment(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    first = tmp_path / "A.lean"
+    second = tmp_path / "B.lean"
+    first.write_text("-- 1\n")
+    second.write_text("-- 2\n")
+    entrypoints: list[str] = []
+
+    class FakeEnvironment:
+        def check_files(self, files, *, entrypoint, policy):
+            entrypoints.append(entrypoint)
+            return _check_result(True, str(tmp_path), entrypoint)
+
+    monkeypatch.setattr(
+        "lean_runtime.cli.Runtime.environment", lambda _runtime, _name: FakeEnvironment()
+    )
+
+    assert (
+        main(
+            [
+                "--home",
+                str(tmp_path / "runtime"),
+                "check",
+                "--environment",
+                "myenv",
+                str(first),
+                str(second),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert len(entrypoints) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == "lean-runtime.check-batch/v1"
+    assert payload["ok"] is True
+    assert payload["data"]["total"] == 2 and payload["data"]["accepted"] == 2
+
+
+def test_missing_check_input_is_a_clear_invocation_error(tmp_path: Path, capsys) -> None:
+    present = tmp_path / "Present.lean"
+    present.write_text("-- here\n")
+    missing = tmp_path / "Missing.lean"
+    assert main(["--home", str(tmp_path / "runtime"), "check", str(present), str(missing)]) == 2
+    assert "check input does not exist" in capsys.readouterr().err
+
+
+def test_environment_flag_rejects_conflicting_selectors(tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("-- x\n")
+    assert (
+        main(
+            [
+                "--home",
+                str(tmp_path / "runtime"),
+                "check",
+                "--environment",
+                "myenv",
+                "--toolchain",
+                "v4.33.0",
+                str(source),
+            ]
+        )
+        == 2
+    )
+    assert "--environment cannot be combined" in capsys.readouterr().err

@@ -235,7 +235,7 @@ class Runtime:
         self.store = EnvironmentStore(self.home)
         self.shared_projects = SharedProjectManager(self.home, self.events)
         self.lake_cache = LakeArtifactCache(self.home, self.toolchains, self.events)
-        self.header_cache = LeanHeaderCache(self.home, self.toolchains)
+        self.header_cache = LeanHeaderCache(self.home, self.toolchains, self.events)
         self.identifier_resolver = IdentifierResolver(self.home)
         self.project_adopter = ProjectAdopter(self.shared_projects)
         self.project_executor = ProjectExecutor(self)

@@ -67,11 +67,56 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 
+def _snapshot_suspect(selected: Sequence[str], result: ExecutionResult) -> bool:
+    """Decide whether a failed check plausibly failed because of a header snapshot."""
+    snapshot_paths = [
+        argument.split("=", 1)[1]
+        for argument in selected
+        if argument.startswith(("--incr-load=", "--incr-header-save="))
+    ]
+    if not snapshot_paths or result.ok or result.cancelled:
+        return False
+    if result.timed_out:
+        return True
+    output = "\n".join(
+        (result.stdout, result.stderr, *(item.message for item in result.diagnostics))
+    )
+    return any(path in output for path in snapshot_paths)
+
+
 class ProjectExecutor:
     """Check and build local projects through one compatibility-preserving seam."""
 
     def __init__(self, runtime: Runtime) -> None:
         self.runtime = runtime
+
+    def _checked_with_header_snapshots(
+        self,
+        context: ProjectContext,
+        workspace_digest: str,
+        module: str,
+        source: str,
+        command: Sequence[str],
+        execute: Callable[[list[str]], ExecutionResult],
+        cancel: threading.Event | None,
+    ) -> ExecutionResult:
+        """Run one check through the header cache, falling back to a plain check once."""
+        cache = self.runtime.header_cache
+        with cache.command(
+            context.toolchain, workspace_digest, module, source, command, cancel=cancel
+        ) as selected:
+            result = execute(selected)
+        if not _snapshot_suspect(selected, result):
+            return result
+        cache.discard(context.toolchain, workspace_digest, module, source)
+        self.runtime.events.emit(
+            "project.header_snapshot_discarded",
+            f"Retrying without header snapshot: {module}",
+            phase="check",
+            module=module,
+        )
+        retried = execute(list(command))
+        return replace(retried, elapsed_seconds=result.elapsed_seconds + retried.elapsed_seconds)
 
     def check_file(
         self,
@@ -88,21 +133,23 @@ class ProjectExecutor:
         text = source.read_text(encoding="utf-8")
         provenance = context.provenance()
 
+        def execute(selected_command: list[str]) -> ExecutionResult:
+            return self.runtime._raw_result(
+                selected_command,
+                cwd=context.root,
+                toolchain=context.toolchain,
+                source_digest=sha256_text(text),
+                policy=policy,
+                project=provenance,
+                packages=context.package_provenance(),
+                logical_command=("lake", "env", "lean", relative),
+                cancel=cancel,
+            )
+
         def run() -> ExecutionResult:
-            with self.runtime.header_cache.command(
-                context.toolchain, provenance.workspace_digest, text, command
-            ) as selected_command:
-                return self.runtime._raw_result(
-                    selected_command,
-                    cwd=context.root,
-                    toolchain=context.toolchain,
-                    source_digest=sha256_text(text),
-                    policy=policy,
-                    project=provenance,
-                    packages=context.package_provenance(),
-                    logical_command=("lake", "env", "lean", relative),
-                    cancel=cancel,
-                )
+            return self._checked_with_header_snapshots(
+                context, provenance.workspace_digest, relative, text, command, execute, cancel
+            )
 
         result = self._build_missing_local_import(context, text, run(), run, policy, cancel)
         return self._with_identifier_hints(context, result)
@@ -130,22 +177,30 @@ class ProjectExecutor:
             )
             provenance = context.provenance()
 
+            def execute(selected_command: list[str]) -> ExecutionResult:
+                return self.runtime._raw_result(
+                    selected_command,
+                    cwd=context.root,
+                    toolchain=context.toolchain,
+                    source_digest=sha256_text(source),
+                    policy=policy,
+                    project=provenance,
+                    packages=context.package_provenance(),
+                    logical_command=("lake", "env", "lean", safe_filename),
+                    path_map={relative: safe_filename, str(source_path): safe_filename},
+                    cancel=cancel,
+                )
+
             def run() -> ExecutionResult:
-                with self.runtime.header_cache.command(
-                    context.toolchain, provenance.workspace_digest, source, command
-                ) as selected_command:
-                    return self.runtime._raw_result(
-                        selected_command,
-                        cwd=context.root,
-                        toolchain=context.toolchain,
-                        source_digest=sha256_text(source),
-                        policy=policy,
-                        project=provenance,
-                        packages=context.package_provenance(),
-                        logical_command=("lake", "env", "lean", safe_filename),
-                        path_map={relative: safe_filename, str(source_path): safe_filename},
-                        cancel=cancel,
-                    )
+                return self._checked_with_header_snapshots(
+                    context,
+                    provenance.workspace_digest,
+                    safe_filename,
+                    source,
+                    command,
+                    execute,
+                    cancel,
+                )
 
             result = self._build_missing_local_import(context, source, run(), run, policy, cancel)
             return self._with_identifier_hints(context, result)
