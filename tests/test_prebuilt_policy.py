@@ -102,6 +102,29 @@ def test_require_rejects_missing_cache_configuration(tmp_path: Path) -> None:
         runtime.open_exact(_lock())
 
 
+def test_retained_only_open_rejects_before_materialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = Runtime(
+        home=tmp_path,
+        availability="local",
+        libraries=[],
+        allow_source_build=False,
+    )
+    called = False
+
+    def materialize(*_args: object, **_kwargs: object) -> object:
+        nonlocal called
+        called = True
+        return object()
+
+    monkeypatch.setattr(runtime.environments, "ensure", materialize)
+    with pytest.raises(EnvironmentError, match="not retained locally"):
+        runtime.open_exact(_lock())
+    assert not called
+    assert not runtime.toolchains.elan_home.exists()
+
+
 def test_registry_redirect_does_not_forward_authorization_cross_host() -> None:
     request = urllib.request.Request("https://registry.example/v2/owner/cache/blobs/sha256:x")
     request.add_header("Authorization", "Bearer secret")

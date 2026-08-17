@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lean-runtime"
-version = "3.0.0"
+version = "3.0.1"
 description = "Run Lean 4 proofs from Python or standalone files"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -81,7 +81,7 @@ class ToolchainManager:
         self.home = Path(home).expanduser().resolve() if home else default_runtime_home()
         self.elan_home = self.home / "elan"
         self.events = events or EventEmitter()
-        self.remote_ensure: Callable[[str], bool] | None = None
+        self.remote_ensure: Callable[[str, threading.Event | None], bool] | None = None
         self._executable_digests: dict[str, tuple[int, int, str]] = {}
 
     @property
@@ -264,7 +264,7 @@ class ToolchainManager:
         name = normalize_toolchain(toolchain)
         if self.has_slim(name) or (self._elan_toolchain_dir(name) / "bin" / "lean").is_file():
             return name
-        if self.remote_ensure is not None and self.remote_ensure(name):
+        if self.remote_ensure is not None and self.remote_ensure(name, cancel):
             if not self.has_slim(name):
                 raise ToolchainError("remote toolchain acquisition returned without a slim copy")
             return name

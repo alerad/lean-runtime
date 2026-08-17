@@ -222,6 +222,8 @@ def test_per_candidate_timeout_is_enforced(sample_catalog) -> None:  # type: ign
     ).discover_and_check("import Mathlib\n")
     assert result.status == "not_found"
     assert result.attempts[0].status == "timeout"
+    assert result.diagnostics[0].code == "CANDIDATE_TIMEOUT"
+    assert "time budget" in result.diagnostics[0].detail
     assert result.duration_seconds < 0.5
 
 
@@ -305,6 +307,17 @@ def test_lean_runtime_probe_passes_the_acquisition_budget_to_builds(sample_catal
 
     captured: dict[str, float] = {}
 
+    class Toolchains:
+        def ensure(
+            self,
+            toolchain: str,
+            *,
+            cancel: threading.Event | None = None,
+        ) -> str:
+            assert cancel is not None
+            captured["toolchain_ready"] = 1
+            return toolchain
+
     def open_exact(  # type: ignore[no-untyped-def]
         lock, *, build_timeout, import_roots=(), cancel=None
     ):
@@ -312,11 +325,16 @@ def test_lean_runtime_probe_passes_the_acquisition_budget_to_builds(sample_catal
         captured["build_timeout"] = build_timeout
         return SimpleNamespace(id="env_fake")
 
-    runtime = SimpleNamespace(open_exact=open_exact, availability="auto")
+    runtime = SimpleNamespace(
+        open_exact=open_exact,
+        availability="auto",
+        toolchains=Toolchains(),
+    )
     probe = LeanRuntimeProbe(runtime=runtime)  # type: ignore[arg-type]
     candidate = Discovery(catalog=sample_catalog).plan("import Mathlib\n").candidates[0]
     acquired = probe.acquire(candidate, timeout_seconds=123.0, cancel=threading.Event())
     assert captured["build_timeout"] == 123.0
+    assert captured["toolchain_ready"] == 1
     assert acquired.environment_id == "env_fake"
 
 

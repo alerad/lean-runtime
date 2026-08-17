@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -415,6 +416,8 @@ class OCIRegistryClient:
         descriptor: dict[str, Any],
         store: EnvironmentStore,
         events: EventEmitter,
+        *,
+        cancel: threading.Event | None = None,
     ) -> Path:
         digest = descriptor.get("digest")
         size = descriptor.get("size")
@@ -422,7 +425,13 @@ class OCIRegistryClient:
         if match is None or not isinstance(size, int) or size < 0:
             raise EnvironmentError("OCI manifest contains an invalid blob descriptor")
         destination = store.oci_blobs / match.group(1)
-        with FileLock(store.lock_dir / f"oci-{match.group(1)}.lock", timeout=1800):
+        with FileLock(
+            store.lock_dir / f"oci-{match.group(1)}.lock",
+            timeout=1800,
+            cancel=cancel,
+        ):
+            if cancel is not None and cancel.is_set():
+                raise EnvironmentError("OCI blob download was cancelled")
             if destination.is_file() and destination.stat().st_size == size:
                 if _digest_path(destination) == digest:
                     events.emit(
@@ -432,6 +441,8 @@ class OCIRegistryClient:
                 destination.unlink()
             temporary = destination.with_name(f".{destination.name}.partial")
             for attempt in range(1, _BLOB_INTEGRITY_ATTEMPTS + 1):
+                if cancel is not None and cancel.is_set():
+                    raise EnvironmentError("OCI blob download was cancelled")
                 if temporary.exists() and temporary.stat().st_size > size:
                     temporary.unlink()
                 offset = temporary.stat().st_size if temporary.exists() else 0
@@ -470,6 +481,8 @@ class OCIRegistryClient:
                     last_progress = 0.0
                     with response, temporary.open(mode) as output:
                         while chunk := response.read(1024 * 1024):
+                            if cancel is not None and cancel.is_set():
+                                raise EnvironmentError("OCI blob download was cancelled")
                             written += len(chunk)
                             if written > size:
                                 raise EnvironmentError("OCI blob exceeds its declared size")

@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -314,16 +315,35 @@ class OCIToolchainLibrary:
             dict(config["slim_manifest"]),
         )
 
-    def pull(self, toolchain: str) -> bool:
+    def pull(
+        self,
+        toolchain: str,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> bool:
         local_check = getattr(self.toolchains, "is_available_locally", None)
         if callable(local_check) and local_check(toolchain):
             return True
         plan = self.plan(toolchain)
         self.client.cache_verified_blob(plan.config_data, plan.config_descriptor, self.store)
-        layer = self.client.download_blob(plan.descriptor, self.store, self.events)
+        try:
+            layer = self.client.download_blob(
+                plan.descriptor,
+                self.store,
+                self.events,
+                cancel=cancel,
+            )
+        except EnvironmentError as exc:
+            if cancel is not None and cancel.is_set():
+                raise ToolchainError(
+                    f"Lean toolchain download was cancelled: {normalize_toolchain(toolchain)!r}"
+                ) from exc
+            raise
         destination = self.toolchains.slim_path(toolchain)
         with FileLock(
-            self.store.lock_dir / f"toolchain-{toolchain_reference(toolchain)}.lock", timeout=1800
+            self.store.lock_dir / f"toolchain-{toolchain_reference(toolchain)}.lock",
+            timeout=1800,
+            cancel=cancel,
         ):
             if self.toolchains.is_available_locally(toolchain):
                 return True

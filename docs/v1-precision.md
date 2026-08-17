@@ -103,6 +103,31 @@ improve without a schema change. Other `--json` commands (for example `storage`,
 contracts. Exit code 0 means success, 1 is a completed negative
 result, and 2 is invalid invocation or an exceptional runtime failure.
 
+Schemas reference shared definitions by their canonical absolute IDs. To validate entirely
+from the installed wheel, register all packaged schemas instead of allowing a validator to
+retrieve those IDs over the network:
+
+```python
+import json
+from pathlib import Path
+
+import lean_runtime
+from jsonschema import Draft202012Validator
+from referencing import Registry, Resource
+
+documents = [
+    json.loads(lean_runtime.schema_path(name).read_text()) for name in lean_runtime.SCHEMA_NAMES
+]
+registry = Registry().with_resources(
+    (document["$id"], Resource.from_contents(document)) for document in documents
+)
+schema = next(
+    document for document in documents if document["$id"].endswith("/execution-v1.schema.json")
+)
+value = json.loads(Path("result.execution.json").read_text())
+Draft202012Validator(schema, registry=registry).validate(value)
+```
+
 ## Reproducible case study
 
 After preparing an exact environment, run:

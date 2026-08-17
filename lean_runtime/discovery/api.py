@@ -58,8 +58,9 @@ class Discovery:
                 availability=availability,
                 libraries=libraries,
                 on_event=events.append,
+                allow_source_build=self.policy.allow_source_build,
             )
-        if not self.policy.allow_source_build and runtime.availability == "auto":
+        if not self.policy.allow_source_build and runtime.allow_source_build:
             raise PolicyError(
                 "the injected Runtime permits source fallback but allow_source_build is false"
             )

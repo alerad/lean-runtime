@@ -8,8 +8,19 @@
     "schema": {"const": "lean-runtime.inspect/v1"},
     "ok": {"type": "boolean"},
     "data": {
+      "oneOf": [
+        {"$ref": "#/$defs/inspectionData"},
+        {"$ref": "#/$defs/routingData"},
+        {"type": "object", "maxProperties": 0}
+      ]
+    },
+    "warnings": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"},
+    "errors": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"}
+  },
+  "$defs": {
+    "inspectionData": {
       "type": "object",
-      "anyOf": [{"required": ["subject", "subject_kind", "lock_id", "environment", "package_locks", "decisions"]}, {"maxProperties": 0}],
+      "required": ["subject", "subject_kind", "lock_id", "environment", "package_locks", "decisions"],
       "additionalProperties": false,
       "properties": {
         "subject": {"type": "string"},
@@ -20,10 +31,22 @@
         "decisions": {"type": "array", "items": {"$ref": "#/$defs/decision"}}
       }
     },
-    "warnings": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"},
-    "errors": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"}
-  },
-  "$defs": {
+    "routingData": {
+      "type": "object",
+      "required": ["decision", "context", "subject"],
+      "additionalProperties": false,
+      "properties": {
+        "decision": {"enum": ["context_selected", "automatic_discovery"]},
+        "context": {"type": "string"},
+        "subject": {
+          "oneOf": [
+            {"type": "string"},
+            {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+          ]
+        },
+        "plan": {"type": "object"}
+      }
+    },
     "environment": {
       "type": "object",
       "required": ["environment_id", "lock_id", "toolchain", "packages", "platform", "build_profile", "status", "created_at", "names"],

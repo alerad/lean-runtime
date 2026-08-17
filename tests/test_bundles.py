@@ -657,6 +657,21 @@ def test_oci_blob_integrity_failure_retries_once_from_scratch(tmp_path: Path) ->
         thread.join(timeout=5)
 
 
+def test_oci_blob_download_honors_preexisting_cancellation(tmp_path: Path) -> None:
+    cancel = threading.Event()
+    cancel.set()
+    store = EnvironmentStore(tmp_path / "consumer")
+    repository = OCIRepository.parse("oci+http://127.0.0.1:1/owner/cache")
+    with pytest.raises(EnvironmentError, match="cancelled"):
+        OCIRegistryClient(repository).download_blob(
+            {"digest": "sha256:" + "a" * 64, "size": 1},
+            store,
+            EventEmitter(),
+            cancel=cancel,
+        )
+    assert not list(store.oci_blobs.iterdir())
+
+
 def _publish_full_layout(monkeypatch: pytest.MonkeyPatch) -> None:
     """Let publisher transport tests skip capsule construction.
 

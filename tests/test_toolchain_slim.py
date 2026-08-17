@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -129,7 +130,10 @@ def test_ensure_uses_remote_slim_acquisition_before_elan(tmp_path: Path) -> None
     manager = ToolchainManager(tmp_path / "runtime")
     source = _fake_toolchain(tmp_path)
 
-    def acquire(toolchain: str) -> bool:
+    observed_cancel: list[threading.Event | None] = []
+
+    def acquire(toolchain: str, cancel: threading.Event | None) -> bool:
+        observed_cancel.append(cancel)
         materialize(
             source,
             manager.slim_path(toolchain),
@@ -141,6 +145,23 @@ def test_ensure_uses_remote_slim_acquisition_before_elan(tmp_path: Path) -> None
     manager.remote_ensure = acquire
     assert manager.ensure(TOOLCHAIN) == TOOLCHAIN
     assert manager.has_slim(TOOLCHAIN)
+    assert not manager.elan_home.exists()
+    assert observed_cancel == [None]
+
+
+def test_ensure_forwards_cancellation_to_remote_acquisition(tmp_path: Path) -> None:
+    manager = ToolchainManager(tmp_path / "runtime")
+    cancel = threading.Event()
+    observed: list[threading.Event | None] = []
+
+    def acquire(_toolchain: str, received: threading.Event | None) -> bool:
+        observed.append(received)
+        raise ToolchainError("cancelled")
+
+    manager.remote_ensure = acquire
+    with pytest.raises(ToolchainError, match="cancelled"):
+        manager.ensure(TOOLCHAIN, cancel=cancel)
+    assert observed == [cancel]
     assert not manager.elan_home.exists()
 
 

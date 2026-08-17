@@ -10,6 +10,7 @@ from referencing import Registry, Resource
 from lean_runtime.matrix import MatrixEntry, MatrixResult
 from lean_runtime.models import ExecutionResult, PhaseTiming
 from lean_runtime.profiling import ProfileReport
+from lean_runtime.run_cli import main as lean_run_main
 from lean_runtime.wire import (
     envelope,
     error,
@@ -147,6 +148,17 @@ def test_inspect_and_gc_success_fixtures_are_closed() -> None:
         },
     )
     _validator("inspect-v1.schema.json").validate(inspect)
+    routing = envelope(
+        "lean-runtime.inspect/v1",
+        ok=True,
+        data={
+            "decision": "automatic_discovery",
+            "context": "catalog candidates",
+            "subject": ["mathlib-v4.33.0", "mathlib-v4.32.2"],
+            "plan": {"schema": "lean-runtime.discovery.plan/v1"},
+        },
+    )
+    _validator("inspect-v1.schema.json").validate(routing)
     gc = envelope(
         "lean-runtime.cleanup/v1",
         ok=True,
@@ -161,6 +173,20 @@ def test_inspect_and_gc_success_fixtures_are_closed() -> None:
         },
     )
     _validator("cleanup-v1.schema.json").validate(gc)
+
+
+def test_run_explain_json_matches_inspect_schema(tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("import Mathlib\n", encoding="utf-8")
+    assert lean_run_main([str(source), "--explain", "--json"]) == 0
+    _validator("inspect-v1.schema.json").validate(json.loads(capsys.readouterr().out))
+
+
+def test_explicit_run_explain_json_matches_inspect_schema(tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := trivial\n", encoding="utf-8")
+    assert lean_run_main([str(source), "--toolchain", "v4.32.2", "--explain", "--json"]) == 0
+    _validator("inspect-v1.schema.json").validate(json.loads(capsys.readouterr().out))
 
 
 def test_publication_access_and_failure_fixtures_match_v1_schema() -> None:
