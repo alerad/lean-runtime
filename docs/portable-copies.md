@@ -101,8 +101,7 @@ runtime = Runtime(
     libraries=["ghcr.io/alerad/lean-runtime-cache"],
     publisher_verification="required",
     trusted_publisher=(
-        "https://github.com/alerad/lean-runtime"
-        "/.github/workflows/public-cache.yml@refs/heads/main"
+        "https://github.com/alerad/lean-runtime/.github/workflows/public-cache.yml@refs/heads/main"
     ),
     trusted_issuer="https://token.actions.githubusercontent.com",
 )
