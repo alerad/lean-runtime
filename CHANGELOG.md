@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Fixed (guarantees)
+
+- `availability="local"` now forbids extending a sparse projection. Missing
+  import closures fail with an actionable error naming the roots instead of
+  silently contacting a configured library.
+- Every path that shells out to Lake installs the full toolchain first
+  (package-graph resolution and materialization, local project probing, and
+  managed build/lake execution), so the documented source fallback no longer
+  breaks after a slim check toolchain has been acquired. Package-free core
+  environments keep their check-only fast path.
+- Capability handling is representation-aware: `native`/`development`
+  requests are a no-op on a full environment and rejected only on a check
+  capsule, and `build()`/`execute()` fail fast on a capsule instead of failing
+  mid-run against incomplete inputs. `Environment.sparse` exposes the
+  representation.
+- Sparse acquisition holds a CAS collection lease across unpacking and
+  projection, so a concurrent `clean --include-downloads` cannot reclaim an
+  artifact that is being projected.
+- `--attest` publishes a versioned `lean-runtime.attestation/v1` predicate
+  carrying the verification report plus a stable `build_inventory` of the Lake
+  build outputs, described by `schemas/attestation-v1.schema.json`.
+- Sparse downloads record the informational platform record in
+  `metadata["platform"]` like every other representation.
+
+### Changed (breaking)
+
+- Program provenance renames `exact_environment_id` to `source_lock_id`
+  (`ProgramDescription`, `Runtime.create_program`, and
+  `program create --source-lock-id`), because the field always held a lock
+  identity. Program copies written with the old key still load.
+
+
 ### Removed (breaking)
 
 - Environment libraries are capsule-only. Removed the legacy full-bundle
