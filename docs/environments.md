@@ -115,9 +115,8 @@ CAS and hardlinked into environment projections when the filesystem permits.
 its logical byte count can overlap environment projections and should not be
 added to their logical sizes as an estimate of physical disk use.
 `clean --include-downloads` reclaims old OCI blobs and unleased CAS artifacts;
-per-artifact locks and recency updates make collection during an active
-projection unlikely, though projection does not yet hold a strict lease
-across unpack-and-project.
+sparse acquisition holds a collection lease across unpacking and projection,
+so an artifact being projected is never reclaimed.
 
 ```python
 report = runtime.clean(dry_run=True)

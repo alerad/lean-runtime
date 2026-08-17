@@ -86,10 +86,10 @@ lean-runtime clean --include-downloads --execute
 
 OCI blobs referenced by ready environments are retained. Sparse CAS
 artifacts may be reclaimed because ready projections hold their own hardlink or
-copy; per-artifact locks and recency updates make collection during an
-active projection unlikely, but they are not a strict lease, so avoid
-running `clean --include-downloads` concurrently with a first sparse
-acquisition.
+copy; sparse acquisition holds a collection lease across unpacking and
+projection, and per-artifact locks and recency updates cover publication and
+reuse, so a concurrent `clean --include-downloads` cannot reclaim an artifact
+that is being projected.
 
 ### Required publisher verification
 

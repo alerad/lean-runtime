@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -358,3 +359,25 @@ def test_clean_reports_candidate_and_reclaimed_bytes(tmp_path: Path) -> None:
     applied = store.clean(dry_run=False, minimum_age_seconds=0)
     assert applied.removed == (candidate.name,)
     assert applied.reclaimed_bytes >= 4096
+
+
+def test_cas_artifact_lease_protects_a_freshly_unpacked_artifact(tmp_path: Path) -> None:
+    """A concurrent download cleanup must not reclaim an artifact mid-projection."""
+    store = EnvironmentStore(tmp_path)
+    digest = "sha256:" + "d" * 64
+    artifact = store.cas_artifacts / digest.removeprefix("sha256:")
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"olean")
+    ancient = time.time() - 90 * 24 * 3600
+    os.utime(artifact, (ancient, ancient))
+
+    # Without a lease the aged artifact is collectable.
+    assert store.clean_downloads(dry_run=True).candidates
+
+    with store.cas_artifact_lease([digest]):
+        assert store.has_cas_artifact_leases(artifact.name)
+        report = store.clean_downloads(dry_run=False)
+        assert artifact.name not in "".join(report.removed)
+        assert artifact.is_file()
+
+    assert not store.has_cas_artifact_leases(artifact.name)

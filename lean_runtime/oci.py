@@ -964,6 +964,14 @@ class OCIEnvironmentCache:
             for module in plan.capsule.modules
             for artifact in module.artifacts
         }
+        selected_digests = [
+            artifacts[path].digest
+            for module in plan.capsule.closure(plan.roots)
+            for artifact in module.artifacts
+            if artifact.capability in plan.capabilities
+            for path in (artifact.path,)
+            if path in artifacts
+        ]
         missing_frames = [
             (descriptor, frame)
             for _pack, descriptor, frame in plan.frames
@@ -985,114 +993,124 @@ class OCIEnvironmentCache:
         # Bound both concurrency and buffered compressed data. Eight parallel
         # range reads hide registry round-trip latency without turning a full
         # Mathlib closure into thousands of serial HTTP requests.
-        downloaded_frame_bytes = 0
-        total_frame_bytes = sum(frame.size for _descriptor, frame in missing_frames)
-        completed_frames = 0
-        for offset in range(0, len(missing_frames), 8):
-            batch = missing_frames[offset : offset + 8]
-            with ThreadPoolExecutor(max_workers=len(batch)) as executor:
-                compressed_frames = tuple(
-                    executor.map(
-                        lambda item: self.client.download_blob_range(
-                            item[0],
-                            offset=item[1].offset,
-                            size=item[1].size,
-                            expected_digest=item[1].digest,
-                        ),
-                        batch,
+        # Hold a collection lease across unpacking and projection so a
+        # concurrent clean cannot reclaim a freshly unpacked artifact.
+        with self.store.cas_artifact_lease(selected_digests):
+            downloaded_frame_bytes = 0
+            total_frame_bytes = sum(frame.size for _descriptor, frame in missing_frames)
+            completed_frames = 0
+            for offset in range(0, len(missing_frames), 8):
+                batch = missing_frames[offset : offset + 8]
+                with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+                    compressed_frames = tuple(
+                        executor.map(
+                            lambda item: self.client.download_blob_range(
+                                item[0],
+                                offset=item[1].offset,
+                                size=item[1].size,
+                                expected_digest=item[1].digest,
+                            ),
+                            batch,
+                        )
                     )
-                )
-            for (_descriptor, frame), compressed in zip(batch, compressed_frames, strict=True):
-                unpack_frame(
-                    compressed,
-                    frame,
-                    artifacts,
-                    self.store.cas_artifacts,
-                    lock_root=self.store.lock_dir,
-                )
-                downloaded_frame_bytes += frame.size
-                completed_frames += 1
-                self.events.emit(
-                    "library.layer_progress",
-                    "Downloading sparse capsule frames",
-                    phase="download",
-                    current_bytes=downloaded_frame_bytes,
-                    total_bytes=total_frame_bytes,
-                    digest=frame.digest,
-                    frame_current=completed_frames,
-                    frame_total=len(missing_frames),
-                )
+                for (_descriptor, frame), compressed in zip(batch, compressed_frames, strict=True):
+                    unpack_frame(
+                        compressed,
+                        frame,
+                        artifacts,
+                        self.store.cas_artifacts,
+                        lock_root=self.store.lock_dir,
+                    )
+                    downloaded_frame_bytes += frame.size
+                    completed_frames += 1
+                    self.events.emit(
+                        "library.layer_progress",
+                        "Downloading sparse capsule frames",
+                        phase="download",
+                        current_bytes=downloaded_frame_bytes,
+                        total_bytes=total_frame_bytes,
+                        digest=frame.digest,
+                        frame_current=completed_frames,
+                        frame_total=len(missing_frames),
+                    )
 
-        environment_id = environment_identity(lock)
-        destination = self.store.environment_path(environment_id)
-        with FileLock(self.store.lock_dir / f"{environment_id}.lock", timeout=1800):
-            fresh = not destination.is_dir()
-            stage = (
-                self.store.environments / f".staging-{os.getpid()}-{time.time_ns()}"
-                if fresh
-                else destination
-            )
-            workspace = stage / "workspace"
-            try:
-                paths = {
-                    artifact.path
-                    for module in plan.capsule.closure(plan.roots)
-                    for artifact in module.artifacts
-                    if artifact.capability in plan.capabilities
-                }
-                project_artifacts(
-                    paths,
-                    artifacts,
-                    self.store.cas_artifacts,
-                    workspace,
-                    lock_root=self.store.lock_dir,
+            environment_id = environment_identity(lock)
+            destination = self.store.environment_path(environment_id)
+            with FileLock(self.store.lock_dir / f"{environment_id}.lock", timeout=1800):
+                fresh = not destination.is_dir()
+                stage = (
+                    self.store.environments / f".staging-{os.getpid()}-{time.time_ns()}"
+                    if fresh
+                    else destination
                 )
-                capsule_path = workspace / ".lean-runtime" / "capsule.json"
-                capsule_path.parent.mkdir(parents=True, exist_ok=True)
-                capsule_path.write_bytes(canonical_json_bytes(plan.capsule.to_dict()))
-                if fresh:
-                    (workspace / ".lake" / "build").mkdir(parents=True, exist_ok=True)
-                    (workspace / "lean-toolchain").write_text(lock.toolchain + "\n")
-                    (workspace / "lakefile.toml").write_text(lock.root_lakefile)
-                    (workspace / "LeanRuntimeEnvironment.lean").write_text(lock.root_module)
-                    (workspace / "lake-manifest.json").write_bytes(
-                        canonical_json_bytes(lock.manifest)
-                    )
-                    self.store.publish_lock(lock)
-                    metadata = {
-                        "schema": "lean-runtime-published-environment/1",
-                        "environment_id": environment_id,
-                        "lock_id": lock.lock_id,
-                        "toolchain": lock.toolchain,
-                        "platform": platform_compatibility(),
-                        "platform_compatibility": platform_compatibility(),
-                        "build_profile": "release",
-                        "status": "ready",
-                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                        "origin": {
-                            "kind": "sparse_downloadable",
-                            "library": self.repository.display,
-                            "modules": list(plan.modules),
-                            "capabilities": sorted(plan.capabilities),
-                        },
+                workspace = stage / "workspace"
+                try:
+                    paths = {
+                        artifact.path
+                        for module in plan.capsule.closure(plan.roots)
+                        for artifact in module.artifacts
+                        if artifact.capability in plan.capabilities
                     }
-                    (stage / "metadata.json").write_bytes(canonical_json_bytes(metadata))
-                    stage.replace(destination)
-                else:
-                    metadata_path = destination / "metadata.json"
-                    metadata = _json_object(metadata_path.read_bytes(), "environment metadata")
-                    origin = metadata.get("origin")
-                    if not isinstance(origin, dict) or origin.get("kind") != "sparse_downloadable":
-                        raise EnvironmentError("cannot extend a non-sparse environment projection")
-                    origin["modules"] = sorted(set(origin.get("modules", ())).union(plan.modules))
-                    origin["capabilities"] = sorted(
-                        set(origin.get("capabilities", ())).union(plan.capabilities)
+                    project_artifacts(
+                        paths,
+                        artifacts,
+                        self.store.cas_artifacts,
+                        workspace,
+                        lock_root=self.store.lock_dir,
                     )
-                    metadata_path.write_bytes(canonical_json_bytes(metadata))
-            except BaseException:
-                if fresh and stage.exists():
-                    shutil.rmtree(stage)
-                raise
+                    capsule_path = workspace / ".lean-runtime" / "capsule.json"
+                    capsule_path.parent.mkdir(parents=True, exist_ok=True)
+                    capsule_path.write_bytes(canonical_json_bytes(plan.capsule.to_dict()))
+                    if fresh:
+                        (workspace / ".lake" / "build").mkdir(parents=True, exist_ok=True)
+                        (workspace / "lean-toolchain").write_text(lock.toolchain + "\n")
+                        (workspace / "lakefile.toml").write_text(lock.root_lakefile)
+                        (workspace / "LeanRuntimeEnvironment.lean").write_text(lock.root_module)
+                        (workspace / "lake-manifest.json").write_bytes(
+                            canonical_json_bytes(lock.manifest)
+                        )
+                        self.store.publish_lock(lock)
+                        metadata = {
+                            "schema": "lean-runtime-published-environment/1",
+                            "environment_id": environment_id,
+                            "lock_id": lock.lock_id,
+                            "toolchain": lock.toolchain,
+                            "platform": platform_compatibility(),
+                            "platform_compatibility": platform_compatibility(),
+                            "build_profile": "release",
+                            "status": "ready",
+                            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "origin": {
+                                "kind": "sparse_downloadable",
+                                "library": self.repository.display,
+                                "modules": list(plan.modules),
+                                "capabilities": sorted(plan.capabilities),
+                            },
+                        }
+                        (stage / "metadata.json").write_bytes(canonical_json_bytes(metadata))
+                        stage.replace(destination)
+                    else:
+                        metadata_path = destination / "metadata.json"
+                        metadata = _json_object(metadata_path.read_bytes(), "environment metadata")
+                        origin = metadata.get("origin")
+                        if (
+                            not isinstance(origin, dict)
+                            or origin.get("kind") != "sparse_downloadable"
+                        ):
+                            raise EnvironmentError(
+                                "cannot extend a non-sparse environment projection"
+                            )
+                        origin["modules"] = sorted(
+                            set(origin.get("modules", ())).union(plan.modules)
+                        )
+                        origin["capabilities"] = sorted(
+                            set(origin.get("capabilities", ())).union(plan.capabilities)
+                        )
+                        metadata_path.write_bytes(canonical_json_bytes(metadata))
+                except BaseException:
+                    if fresh and stage.exists():
+                        shutil.rmtree(stage)
+                    raise
         if name:
             self.store.set_alias(name, environment_id)
         self.events.emit(
