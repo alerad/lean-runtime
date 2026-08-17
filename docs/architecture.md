@@ -51,9 +51,9 @@ artifact cache; `Runtime` should not grow a second project build planner.
 Environment capsules, slim toolchains, and ready-to-run programs have distinct
 payload schemas. Their common OCI descriptor, digest, JSON, and platform
 selection contract lives in `oci_protocol`. Payload implementations must not
-import another payload implementation's private protocol helpers. Existing
-legacy bundle readers remain supported, but new transport behavior belongs to
-the shared protocol or the current sparse capsule path.
+import another payload implementation's private protocol helpers. The complete
+portable-copy reader remains supported, but registry transport is capsule-only
+and new behavior belongs to the shared protocol or the sparse capsule path.
 
 ## Public identities
 

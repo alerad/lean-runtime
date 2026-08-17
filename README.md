@@ -72,9 +72,10 @@ New-format libraries publish two independently verified pieces: a slim Lean
 check runtime and seekable module packs. Lean Runtime computes the source's
 transitive import closure, downloads only the corresponding compressed frames,
 and shares verified module artifacts across Mathlib, LeanCert, and future
-environments. A warm check is silent apart from its result. Older published
-environments remain readable and automatically use the legacy full-bundle
-path, so this optimization does not invalidate existing locks.
+environments. A warm check is silent apart from its result. Environment
+libraries publish and serve capsules only; a complete source-bearing
+environment is still available locally through a source build or a portable
+copy.
 
 Explicit frontmatter remains available when the desired context is already known:
 

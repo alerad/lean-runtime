@@ -25,12 +25,13 @@ and testing; normal use should keep the probe enabled.
 Saving, opening, and downloading are disk-backed and streamed. Peak memory does
 not scale with the size of the environment.
 
-`copy save` deliberately preserves the legacy full environment, including
-sources, for users who need a self-contained development handoff. `project
-export` instead writes a source-free sparse check capsule containing only the
-selected public module's transitive closure. `copy open` detects and verifies
-both formats. Native compilation and project development require the full
-format; proof checking should prefer the capsule.
+`copy save` deliberately writes the complete environment, including sources,
+for a self-contained development handoff that `verify` can check against the
+locked Git trees. `project export` instead writes a source-free sparse check
+capsule containing only the selected public module's transitive closure.
+`copy open` detects and verifies both formats. Native compilation and project
+development require the complete format; proof checking should prefer the
+capsule.
 
 ## Environment libraries
 
@@ -83,7 +84,7 @@ lean-runtime clean --include-downloads
 lean-runtime clean --include-downloads --execute
 ```
 
-Full OCI blobs referenced by ready legacy environments are retained. Sparse CAS
+OCI blobs referenced by ready environments are retained. Sparse CAS
 artifacts may be reclaimed because ready projections hold their own hardlink or
 copy; per-artifact locks and recency updates make collection during an
 active projection unlikely, but they are not a strict lease, so avoid
@@ -165,11 +166,10 @@ so a missing scope fails in seconds instead of after export. The probe starts
 and immediately cancels an empty OCI upload session; it publishes no manifest or
 index. The publisher then checks for existing blobs, uploads only missing
 content, publishes the platform manifest by digest, and updates the canonical
-index tag last. Check capsules use `capsule-lock_<sha>` as that canonical
-reference; the legacy full representation uses `lock_<sha>`, and consumers
-try the capsule reference first. Every manifest is fetched back and its
-digest is verified before success is reported. Human tags are aliases to the
-same index.
+index tag last, always as `capsule-lock_<sha>`. Environment libraries publish
+and serve check capsules only. Every manifest is fetched back and its digest
+is verified before success is reported. Human tags are aliases to the same
+index.
 This follows the
 [OCI Distribution Specification](https://github.com/opencontainers/distribution-spec/blob/main/spec.md)
 and uses an [OCI image index](https://github.com/opencontainers/image-spec/blob/main/image-index.md)
@@ -272,7 +272,7 @@ byte-identical artifacts.
 
 ## Advanced storage details
 
-The legacy gzip file is a deterministic OCI image-layout archive. It contains a
+A complete portable copy is a deterministic OCI image-layout archive. It contains a
 standard `oci-layout`, `index.json`, one image manifest, a Lean Runtime config
 blob, and content-addressed layer blobs. The config contains the complete
 `EnvironmentLock`, build profile, environment identity, and platform

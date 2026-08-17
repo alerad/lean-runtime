@@ -4,6 +4,15 @@
 
 ### Removed (breaking)
 
+- Environment libraries are capsule-only. Removed the legacy full-bundle
+  registry paths: `OCIEnvironmentCache.pull`, `OCIEnvironmentCache.plan`, the
+  full publication profile, and the `DownloadUnavailable` fallbacks in
+  `Runtime.open_exact` and `Runtime.plan_exact`. Publication always writes the
+  `capsule-lock_<sha>` canonical reference, and an environment library object
+  must implement `pull_capsule`/`plan_capsule`.
+- Complete source-bearing environments are unaffected: source builds, `copy
+  save`, and `copy open` all keep working, and `copy open` still reads both
+  archive formats. Only registry transport changed.
 - Removed the hidden hyphenated compatibility spellings. Every accepted command
   is now public and appears in help and shell completion:
 

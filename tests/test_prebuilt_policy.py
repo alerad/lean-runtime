@@ -36,7 +36,7 @@ class _Cache:
     def __init__(self, failure: Exception) -> None:
         self.failure = failure
 
-    def pull(self, *_args: object, **_kwargs: object) -> str:
+    def pull_capsule(self, *_args: object, **_kwargs: object) -> str:
         raise self.failure
 
 

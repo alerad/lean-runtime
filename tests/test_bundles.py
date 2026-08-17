@@ -25,6 +25,7 @@ from lean_runtime import (
 )
 from lean_runtime.bundles import (
     SOURCE_TREE_INVENTORY,
+    EnvironmentBundles,
     _capsule_config_object,
     _extract_layer,
     _oci_archive,
@@ -409,9 +410,28 @@ def test_sparse_oci_pull_downloads_only_the_import_closure(tmp_path: Path) -> No
 
     class Handler(http.server.BaseHTTPRequestHandler):
         transferred_ranges: list[tuple[int, int]] = []
+        token_requests: int = 0
 
         def do_GET(self) -> None:  # noqa: N802
             reference = urllib.parse.unquote(self.path.rsplit("/", 1)[-1])
+            if self.path.startswith("/token"):
+                type(self).token_requests += 1
+                body = json.dumps({"token": "test-token"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.headers.get("Authorization") != "Bearer test-token":
+                realm = f"http://127.0.0.1:{server.server_port}/token"
+                self.send_response(401)
+                self.send_header(
+                    "WWW-Authenticate",
+                    f'Bearer realm="{realm}",service="fixture",scope="repository:owner/cache:pull"',
+                )
+                self.end_headers()
+                return
             if "/manifests/" in self.path:
                 data = index if reference == f"capsule-{lock.lock_id}" else blobs.get(reference)
                 if data is None:
@@ -485,6 +505,14 @@ def test_sparse_oci_pull_downloads_only_the_import_closure(tmp_path: Path) -> No
         assert list(environment.workspace.rglob("B.ilean"))
         assert not list(environment.workspace.rglob("C.ilean"))
         assert len(Handler.transferred_ranges) == 3
+        assert Handler.token_requests >= 1
+        bounded = Runtime(
+            home=tmp_path / "bounded",
+            libraries=(library,),
+            max_download_bytes=1,
+        )
+        with pytest.raises(DownloadLimitExceeded):
+            bounded.libraries[0].pull_capsule(lock, ("B",))
     finally:
         server.shutdown()
         server.server_close()
@@ -585,123 +613,6 @@ class _FakeToolchains:
         return True
 
 
-def test_transparent_authenticated_oci_pull_and_blob_reuse(tmp_path: Path) -> None:
-    producer, environment_id, lock = _published_runtime(tmp_path / "producer")
-    bundle = tmp_path / "environment.oci.tar.gz"
-    producer.save_portable_copy(environment_id, bundle)
-    entries = _archive_entries(bundle)
-    index = json.loads(entries["index.json"])
-    manifest_descriptor = index["manifests"][0]
-    manifest_digest = manifest_descriptor["digest"]
-    manifest = entries["blobs/sha256/" + manifest_digest.removeprefix("sha256:")]
-    requests: list[str] = []
-    ranges: list[str] = []
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            requests.append(self.path)
-            if self.path.startswith("/token"):
-                self._send(json.dumps({"token": "test-token"}).encode(), "application/json")
-                return
-            if self.headers.get("Authorization") != "Bearer test-token":
-                realm = f"http://127.0.0.1:{server.server_port}/token"
-                self.send_response(401)
-                self.send_header(
-                    "WWW-Authenticate",
-                    f'Bearer realm="{realm}",service="fixture",scope="repository:owner/cache:pull"',
-                )
-                self.end_headers()
-                return
-            prefix = "/v2/owner/cache/manifests/"
-            if self.path == prefix + lock.lock_id:
-                data = entries["index.json"]
-                self._send(data, "application/vnd.oci.image.index.v1+json")
-                return
-            if self.path == prefix + urllib.parse.quote(manifest_digest, safe=":"):
-                self._send(manifest, "application/vnd.oci.image.manifest.v1+json")
-                return
-            blob_prefix = "/v2/owner/cache/blobs/"
-            if self.path.startswith(blob_prefix):
-                digest = self.path.removeprefix(blob_prefix)
-                blob_data = entries.get("blobs/sha256/" + digest.removeprefix("sha256:"))
-                if blob_data is not None:
-                    range_header = self.headers.get("Range")
-                    if range_header:
-                        ranges.append(range_header)
-                        offset = int(range_header.removeprefix("bytes=").removesuffix("-"))
-                        self._send(
-                            blob_data[offset:],
-                            "application/octet-stream",
-                            status=206,
-                            content_range=f"bytes {offset}-{len(blob_data) - 1}/{len(blob_data)}",
-                            digest_source=blob_data,
-                        )
-                    else:
-                        self._send(blob_data, "application/octet-stream")
-                    return
-            self.send_response(404)
-            self.end_headers()
-
-        def _send(
-            self,
-            data: bytes,
-            content_type: str,
-            *,
-            status: int = 200,
-            content_range: str | None = None,
-            digest_source: bytes | None = None,
-        ) -> None:
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(data)))
-            if content_range:
-                self.send_header("Content-Range", content_range)
-            digest_data = digest_source if digest_source is not None else data
-            self.send_header(
-                "Docker-Content-Digest", "sha256:" + hashlib.sha256(digest_data).hexdigest()
-            )
-            self.end_headers()
-            self.wfile.write(data)
-
-        def log_message(self, _format: str, *_args: object) -> None:
-            pass
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    cache = f"oci+http://127.0.0.1:{server.server_port}/owner/cache"
-    try:
-        consumer_home = tmp_path / "consumer"
-        runtime = Runtime(
-            toolchains=_FakeToolchains(consumer_home),  # type: ignore[arg-type]
-            availability="required",
-            libraries=[cache],
-        )
-        manifest_value = json.loads(manifest)
-        resumed_descriptor = manifest_value["layers"][0]
-        resumed_data = entries[
-            "blobs/sha256/" + resumed_descriptor["digest"].removeprefix("sha256:")
-        ]
-        partial = runtime.store.oci_blobs / (
-            "." + resumed_descriptor["digest"].removeprefix("sha256:") + ".partial"
-        )
-        partial.write_bytes(resumed_data[: len(resumed_data) // 2])
-        imported = runtime.open_exact(lock)
-        assert imported.id == environment_id
-        imported_metadata = json.loads((imported.root / "metadata.json").read_text())
-        assert imported_metadata["origin"]["library"] == cache
-        first_blob_requests = len([path for path in requests if "/blobs/" in path])
-        assert ranges
-
-        shutil.rmtree(runtime.store.environment_path(environment_id))
-        runtime.open_exact(lock)
-        assert len([path for path in requests if "/blobs/" in path]) == first_blob_requests
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-
-
 def test_oci_blob_integrity_failure_retries_once_from_scratch(tmp_path: Path) -> None:
     data = b"verified layer contents"
     digest = "sha256:" + hashlib.sha256(data).hexdigest()
@@ -746,7 +657,27 @@ def test_oci_blob_integrity_failure_retries_once_from_scratch(tmp_path: Path) ->
         thread.join(timeout=5)
 
 
-def test_oci_publisher_uploads_blobs_before_manifests(tmp_path: Path) -> None:
+def _publish_full_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let publisher transport tests skip capsule construction.
+
+    Building a real capsule layout resolves the locked toolchain so it can index
+    Lean artifacts, which would install Elan inside a unit test. These tests
+    assert upload ordering and failure classification, not layout content, so a
+    deterministic full layout is a faithful stand-in.
+    """
+    monkeypatch.setattr(
+        EnvironmentBundles,
+        "export_capsule_layout",
+        lambda self, environment_id, output, **_kwargs: EnvironmentBundles.export_layout(
+            self, environment_id, output
+        ),
+    )
+
+
+def test_oci_publisher_uploads_blobs_before_manifests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_full_layout(monkeypatch)
     producer, environment_id, lock = _published_runtime(tmp_path / "producer")
     publisher = OCIEnvironmentPublisher(
         OCIRepository.parse("oci://registry.example/owner/cache"),
@@ -786,10 +717,16 @@ def test_oci_publisher_uploads_blobs_before_manifests(tmp_path: Path) -> None:
     assert result.uploaded_bytes == result.total_blob_bytes
     assert result.reused_bytes == 0
     assert result.reuse_percent == 0
-    assert operations[-2:] == [("manifest", lock.lock_id), ("manifest", "v1")]
+    assert operations[-2:] == [
+        ("manifest", f"capsule-{lock.lock_id}"),
+        ("manifest", "v1"),
+    ]
 
 
-def test_oci_publisher_reports_remote_blob_reuse(tmp_path: Path) -> None:
+def test_oci_publisher_reports_remote_blob_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_full_layout(monkeypatch)
     producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
     publisher = OCIEnvironmentPublisher(
         OCIRepository.parse("oci://registry.example/owner/cache"),
@@ -894,6 +831,7 @@ def test_oci_manifest_publication_requires_remote_digest_verification() -> None:
 
 
 def test_oci_publisher_denies_access_before_exporting(tmp_path: Path, monkeypatch) -> None:
+    _publish_full_layout(monkeypatch)
     producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
     events: list[RuntimeEvent] = []
     publisher = OCIEnvironmentPublisher(
@@ -1056,8 +994,9 @@ def test_oci_publisher_classifies_retryable_preflight_failure(tmp_path: Path) ->
 
 
 def test_oci_publisher_treats_unverified_manifest_write_as_indeterminate(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _publish_full_layout(monkeypatch)
     producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
     events: list[RuntimeEvent] = []
     publisher = OCIEnvironmentPublisher(
@@ -1094,8 +1033,9 @@ def test_oci_publisher_treats_unverified_manifest_write_as_indeterminate(
 
 
 def test_oci_publisher_reports_partial_state_when_tag_finalization_fails(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _publish_full_layout(monkeypatch)
     producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
     events: list[RuntimeEvent] = []
     publisher = OCIEnvironmentPublisher(
@@ -1188,91 +1128,6 @@ def test_oci_truncated_blob_download_resumes_with_range(tmp_path: Path) -> None:
         assert retries[0].data["truncated"] is True
         starts = [event for event in events if event.kind == "library.layer_download_started"]
         assert starts[1].data["resumed_bytes"] == cut
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-
-
-def test_acquisition_plan_and_download_limit(tmp_path: Path) -> None:
-    producer, environment_id, lock = _published_runtime(tmp_path / "producer")
-    bundle = tmp_path / "environment.oci.tar.gz"
-    producer.save_portable_copy(environment_id, bundle)
-    entries = _archive_entries(bundle)
-    index = json.loads(entries["index.json"])
-    manifest_digest = index["manifests"][0]["digest"]
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            prefix = "/v2/owner/cache/manifests/"
-            blob_prefix = "/v2/owner/cache/blobs/"
-            if self.path == prefix + lock.lock_id:
-                self._send(entries["index.json"], "application/vnd.oci.image.index.v1+json")
-                return
-            if self.path == prefix + urllib.parse.quote(manifest_digest, safe=":"):
-                self._send(
-                    entries["blobs/sha256/" + manifest_digest.removeprefix("sha256:")],
-                    "application/vnd.oci.image.manifest.v1+json",
-                )
-                return
-            if self.path.startswith(blob_prefix):
-                digest = self.path.removeprefix(blob_prefix)
-                data = entries.get("blobs/sha256/" + digest.removeprefix("sha256:"))
-                if data is not None:
-                    self._send(data, "application/octet-stream")
-                    return
-            self.send_response(404)
-            self.end_headers()
-
-        def _send(self, data: bytes, content_type: str) -> None:
-            self.send_response(200)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Docker-Content-Digest", "sha256:" + hashlib.sha256(data).hexdigest())
-            self.end_headers()
-            self.wfile.write(data)
-
-        def log_message(self, _format: str, *_args: object) -> None:
-            pass
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    cache = f"oci+http://127.0.0.1:{server.server_port}/owner/cache"
-    try:
-        consumer_home = tmp_path / "consumer"
-        events = []
-        limited = Runtime(
-            toolchains=_FakeToolchains(consumer_home),  # type: ignore[arg-type]
-            availability="auto",
-            libraries=[cache],
-            max_download_bytes=1,
-            on_event=events.append,
-        )
-        report = limited.plan_exact(lock)
-        assert report["environment_ready"] is False
-        assert isinstance(report["download_bytes"], int) and report["download_bytes"] > 1
-        assert report["libraries"][0]["available"] is True
-        assert report["libraries"][0]["cached_bytes"] == 0
-        assert report["max_download_bytes"] == 1
-
-        with pytest.raises(DownloadLimitExceeded, match="above the configured limit"):
-            limited.open_exact(lock)
-        # a policy failure must not silently fall back to a source build
-        kinds = {event.kind for event in events}
-        assert "acquisition.planned" in kinds
-        assert "environment.build_started" not in kinds
-
-        consumer = Runtime(
-            toolchains=_FakeToolchains(consumer_home),  # type: ignore[arg-type]
-            availability="required",
-            libraries=[cache],
-            max_download_bytes=10**12,
-        )
-        assert consumer.open_exact(lock).id == environment_id
-        after = consumer.plan_exact(lock)
-        assert after["environment_ready"] is True
-        assert after["download_bytes"] == 0
     finally:
         server.shutdown()
         server.server_close()

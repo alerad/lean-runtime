@@ -13,11 +13,12 @@ completed environment can subsequently be opened offline; for a sparse
 capsule, checking is offline for already projected import closures, while a
 new import may extend the projection from configured libraries.
 
-Downloadable environments may use the legacy full-workspace representation or
-the current sparse check-capsule representation. Both resolve to the same exact
-lock and platform environment identity. A capsule stores a normalized module
-graph and content digest for each Lean artifact; its local projection grows as
-new imports are checked without changing that identity.
+Downloadable environments are sparse check capsules. A capsule stores a
+normalized module graph and content digest for each Lean artifact, resolves to
+the same exact lock and platform environment identity as a locally built
+environment, and its local projection grows as new imports are checked without
+changing that identity. Complete source-bearing environments are still
+produced locally by source builds and exchanged as portable copies.
 
 Package references are an input compiler for `EnvironmentSpec`, not another
 environment type:
