@@ -237,13 +237,15 @@ index only after every required platform succeeds prevents partial build
 matrices from replacing a complete cache release.
 
 `--attest` runs the ordinary environment verification (package-source or
-capsule-artifact checks plus the Lean import probe) and publishes that
-verification report as a keyless Cosign attestation of type
-`https://lean-runtime.dev/attestation/environment/v1`, bound to the platform
-manifest (or finalized index). The predicate does not include a normalized
-build-output inventory; artifact inventory digests are compared only by
-`verify --rebuild`. Attestation requires Cosign and an OIDC-capable
-publishing environment.
+capsule-artifact checks plus the Lean import probe), records a stable
+inventory of the Lake build outputs, and publishes both as a keyless Cosign
+attestation of type `https://lean-runtime.dev/attestation/environment/v1`,
+bound to the platform manifest (or finalized index). The predicate is the
+versioned `lean-runtime.attestation/v1` document described by
+`schemas/attestation-v1.schema.json`: it carries the verification report plus
+a `build_inventory` of digest, entry count, and byte count, computed without
+the independent rebuild that `verify --rebuild` performs. Attestation
+requires Cosign and an OIDC-capable publishing environment.
 
 ## Auditing
 

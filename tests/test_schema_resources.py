@@ -9,6 +9,7 @@ import lean_runtime as lean
 
 def test_schema_resource_names_are_closed() -> None:
     assert {
+        "attestation-v1.schema.json",
         "check-batch-v1.schema.json",
         "comparison-v1.schema.json",
         "execution-v1.schema.json",

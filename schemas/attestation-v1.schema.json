@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lean-runtime.dev/schemas/attestation-v1.schema.json",
+  "title": "Lean Runtime signed environment attestation predicate",
+  "type": "object",
+  "required": ["schema", "lock_id", "environment_id", "verification", "build_inventory"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "lean-runtime.attestation/v1"},
+    "lock_id": {"type": "string", "pattern": "^lock_[0-9a-f]{64}$"},
+    "environment_id": {"type": ["string", "null"]},
+    "verification": {
+      "type": "object",
+      "required": ["subject", "subject_kind", "ok", "checks", "failures", "warnings", "lock_id", "environment_id"],
+      "properties": {
+        "subject": {"type": "string"},
+        "subject_kind": {"type": "string"},
+        "ok": {"type": "boolean"},
+        "checks": {"type": "array"},
+        "failures": {"type": "array"},
+        "warnings": {"type": "array"},
+        "lock_id": {"type": "string"},
+        "environment_id": {"type": ["string", "null"]},
+        "artifact_match": {"type": ["boolean", "null"]}
+      }
+    },
+    "build_inventory": {
+      "type": "object",
+      "required": ["digest", "entries", "bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "entries": {"type": "integer", "minimum": 0},
+        "bytes": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

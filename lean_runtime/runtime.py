@@ -106,6 +106,7 @@ from .toolchains import ToolchainManager, normalize_toolchain
 from .verification import (
     VerificationCheck,
     VerificationReport,
+    attestation_predicate,
     load_lock_subject,
     verify_environment,
 )
@@ -679,7 +680,7 @@ class Runtime:
                 CosignVerifier(executable=self.verification_executable).attest(
                     selected_publisher.repository,
                     result.publication_id or result.computer_copy_id,
-                    report.to_dict(),
+                    attestation_predicate(report, environment.workspace),
                 )
                 self.events.emit(
                     "library.attestation_published",
