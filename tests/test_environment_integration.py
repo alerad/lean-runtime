@@ -34,7 +34,7 @@ def _bundle_registry(bundle: Path, lock_id: str) -> Iterator[str]:
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             manifest_prefix = "/v2/owner/cache/manifests/"
-            if self.path == manifest_prefix + lock_id:
+            if self.path == manifest_prefix + f"capsule-{lock_id}":
                 self._send(entries["index.json"], "application/vnd.oci.image.index.v1+json")
                 return
             if self.path == manifest_prefix + urllib.parse.quote(manifest_digest, safe=":"):
@@ -48,10 +48,25 @@ def _bundle_registry(bundle: Path, lock_id: str) -> Iterator[str]:
                 digest = self.path.removeprefix(blob_prefix)
                 data = entries.get("blobs/sha256/" + digest.removeprefix("sha256:"))
                 if data is not None:
-                    self._send(data, "application/octet-stream")
+                    self._send_blob(data)
                     return
             self.send_response(404)
             self.end_headers()
+
+        def _send_blob(self, data: bytes) -> None:
+            requested = self.headers.get("Range")
+            if requested:
+                start, end = (int(item) for item in requested.removeprefix("bytes=").split("-"))
+                body = data[start : end + 1]
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+            else:
+                body = data
+                self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def _send(self, data: bytes, media_type: str) -> None:
             self.send_response(200)
@@ -280,7 +295,9 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
     assert [item.context for item in matrix.entries] == ["first", "second"]
     bundle_path = tmp_path / "environment.oci.tar.gz"
     exported = runtime.save_portable_copy(environment.id, bundle_path)
-    with _bundle_registry(bundle_path, lock.lock_id) as cache:
+    capsule_path = tmp_path / "environment.capsule.tar.gz"
+    runtime.bundles.export_capsule(environment.id, capsule_path, roots=("Sample",))
+    with _bundle_registry(capsule_path, lock.lock_id) as cache:
         imported_runtime = Runtime(
             home=tmp_path / "imported-runtime", libraries=[cache], availability="required"
         )

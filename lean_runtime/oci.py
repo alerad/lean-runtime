@@ -823,18 +823,6 @@ class OCIEnvironmentCache:
             raise EnvironmentError("OCI registry returned an unsupported manifest media type")
         return manifest_descriptor, manifest, manifest_data
 
-    def plan(self, lock: EnvironmentLock) -> dict[str, Any]:
-        """Report the acquisition cost of a lock without downloading blobs."""
-        _descriptor, manifest, _data = self._platform_manifest(lock)
-        descriptors = _manifest_descriptors(manifest)
-        total_bytes, cached_bytes = self._acquisition_sizes(descriptors)
-        return {
-            "library": self.repository.display,
-            "total_bytes": total_bytes,
-            "cached_bytes": cached_bytes,
-            "download_bytes": total_bytes - cached_bytes,
-        }
-
     def plan_capsule(
         self,
         lock: EnvironmentLock,
@@ -1114,62 +1102,6 @@ class OCIEnvironmentCache:
             modules=len(plan.modules),
         )
         return environment_id
-
-    def pull(self, lock: EnvironmentLock, *, name: str | None = None) -> str:
-        manifest_descriptor, manifest, manifest_data = self._platform_manifest(lock)
-        descriptors = _manifest_descriptors(manifest)
-        total_bytes, cached_bytes = self._acquisition_sizes(descriptors)
-        download_bytes = total_bytes - cached_bytes
-        self.events.emit(
-            "acquisition.planned",
-            f"Environment download planned: {format_byte_size(download_bytes)}",
-            phase="plan",
-            current_bytes=cached_bytes,
-            total_bytes=total_bytes,
-            registry=self.repository.display,
-            lock_id=lock.lock_id,
-            download_bytes=download_bytes,
-            cached_bytes=cached_bytes,
-        )
-        if self.max_download_bytes is not None and download_bytes > self.max_download_bytes:
-            raise DownloadLimitExceeded(
-                f"acquiring this environment downloads {format_byte_size(download_bytes)}, "
-                f"above the configured limit of {format_byte_size(self.max_download_bytes)}; "
-                "raise --max-download (or LEAN_RUNTIME_MAX_DOWNLOAD), or inspect the cost "
-                "with lean-run --plan"
-            )
-        lease_digests = [
-            str(manifest_descriptor["digest"]),
-            *(str(descriptor["digest"]) for descriptor in descriptors),
-        ]
-        with self.store.oci_blob_lease(lease_digests):
-            entries: dict[str, Path] = {}
-            manifest_path = self._cache_manifest(manifest_descriptor, manifest_data)
-            entries[
-                "blobs/sha256/" + str(manifest_descriptor["digest"]).removeprefix("sha256:")
-            ] = manifest_path
-            for descriptor in descriptors:
-                assert isinstance(descriptor, dict)
-                path = self.client.download_blob(descriptor, self.store, self.events)
-                entries["blobs/sha256/" + str(descriptor["digest"]).removeprefix("sha256:")] = path
-            index = {
-                "schemaVersion": 2,
-                "mediaType": INDEX_MEDIA_TYPE,
-                "manifests": [manifest_descriptor],
-            }
-            info = self.bundles.import_layout(
-                index,
-                entries,
-                origin={"kind": "downloadable", "library": self.repository.display},
-                name=name,
-            )
-        self.events.emit(
-            "library.verified",
-            "Imported a verified downloadable environment",
-            environment_id=info.environment_id,
-            registry=self.repository.display,
-        )
-        return info.environment_id
 
     def _acquisition_sizes(self, descriptors: list[Any]) -> tuple[int, int]:
         """Return (total, locally cached) bytes for a manifest's blobs."""
@@ -1455,7 +1387,7 @@ class OCIEnvironmentPublisher:
         *,
         tags: tuple[str, ...] = (),
         finalize: bool = True,
-        profile: str = "full",
+        profile: str = "check-capsule",
     ) -> PublicationInfo:
         try:
             return self._publish(
@@ -1475,10 +1407,10 @@ class OCIEnvironmentPublisher:
         *,
         tags: tuple[str, ...] = (),
         finalize: bool = True,
-        profile: str = "full",
+        profile: str = "check-capsule",
     ) -> PublicationInfo:
-        if profile not in {"full", "check-capsule"}:
-            raise ValueError("publication profile must be 'full' or 'check-capsule'")
+        if profile != "check-capsule":
+            raise ValueError("publication profile must be 'check-capsule'")
         self.check_access()
         with tempfile.TemporaryDirectory(prefix="lean-runtime-publish-") as temporary:
             temporary_root = Path(temporary)
@@ -1489,11 +1421,7 @@ class OCIEnvironmentPublisher:
                 environment_id=environment_id,
                 registry=self.repository.display,
             )
-            bundle_info = (
-                self.bundles.export_capsule_layout(environment_id, layout_root)
-                if profile == "check-capsule"
-                else self.bundles.export_layout(environment_id, layout_root)
-            )
+            bundle_info = self.bundles.export_capsule_layout(environment_id, layout_root)
             self.events.emit(
                 "library.bundle_ready",
                 "Environment OCI layout is ready for publication",
@@ -1605,7 +1533,6 @@ class OCIEnvironmentPublisher:
         platform_descriptors: list[dict[str, Any]],
         *,
         tags: tuple[str, ...] = (),
-        profile: str | None = None,
     ) -> str:
         if not re.fullmatch(r"lock_[0-9a-f]{64}", lock_id):
             raise ValueError(f"invalid lock identity: {lock_id!r}")
@@ -1634,15 +1561,6 @@ class OCIEnvironmentPublisher:
                 partial(self.client.manifest_exists, digest),
             ):
                 raise EnvironmentError(f"platform manifest is not published: {digest!r}")
-        selected_profile = profile or (
-            "check-capsule"
-            if all(
-                isinstance(item.get("annotations"), dict)
-                and item["annotations"].get("org.lean-runtime.profile") == "check-capsule"
-                for item in platform_descriptors
-            )
-            else "full"
-        )
         ordered = sorted(
             platform_descriptors,
             key=lambda item: (
@@ -1660,7 +1578,7 @@ class OCIEnvironmentPublisher:
                 "annotations": {"org.lean-runtime.lock-id": lock_id},
             }
         )
-        reference = capsule_reference(lock_id) if selected_profile == "check-capsule" else lock_id
+        reference = capsule_reference(lock_id)
         for tag in tags:
             if not tag or len(tag) > 128 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", tag):
                 raise ValueError(f"invalid OCI tag: {tag!r}")

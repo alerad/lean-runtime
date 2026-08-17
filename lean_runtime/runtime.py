@@ -372,14 +372,7 @@ class Runtime:
             rejections: list[str] = []
             for library in self.libraries:
                 try:
-                    sparse_pull = getattr(library, "pull_capsule", None)
-                    if sparse_pull is None:
-                        library.pull(lock, name=name)
-                    else:
-                        try:
-                            sparse_pull(lock, tuple(import_roots), name=name)
-                        except DownloadUnavailable:
-                            library.pull(lock, name=name)
+                    library.pull_capsule(lock, tuple(import_roots), name=name)
                     imported = True
                     break
                 except DownloadUnavailable as exc:
@@ -436,19 +429,15 @@ class Runtime:
         if not ready or sparse:
             for environment_library in self.libraries:
                 try:
-                    try:
-                        capsule = environment_library.plan_capsule(lock, tuple(import_roots))
-                        environment_plan: dict[str, Any] = {
-                            "library": environment_library.repository.display,
-                            "profile": "check-capsule",
-                            "modules": len(capsule.modules),
-                            "total_bytes": capsule.total_bytes,
-                            "cached_bytes": capsule.cached_bytes,
-                            "download_bytes": capsule.download_bytes,
-                        }
-                    except DownloadUnavailable:
-                        environment_plan = dict(environment_library.plan(lock))
-                        environment_plan["profile"] = "legacy-full"
+                    capsule = environment_library.plan_capsule(lock, tuple(import_roots))
+                    environment_plan: dict[str, Any] = {
+                        "library": environment_library.repository.display,
+                        "profile": "check-capsule",
+                        "modules": len(capsule.modules),
+                        "total_bytes": capsule.total_bytes,
+                        "cached_bytes": capsule.cached_bytes,
+                        "download_bytes": capsule.download_bytes,
+                    }
                 except EnvironmentError as exc:
                     libraries.append(
                         {
