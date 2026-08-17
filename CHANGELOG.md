@@ -2,17 +2,14 @@
 
 ## Unreleased
 
+## 3.0.0 - 2026-08-16
+
+The first release with one canonical command vocabulary, capsule-only
+environment libraries, and documentation that states guarantees the
+implementation actually keeps.
+
 ### Removed (breaking)
 
-- Environment libraries are capsule-only. Removed the legacy full-bundle
-  registry paths: `OCIEnvironmentCache.pull`, `OCIEnvironmentCache.plan`, the
-  full publication profile, and the `DownloadUnavailable` fallbacks in
-  `Runtime.open_exact` and `Runtime.plan_exact`. Publication always writes the
-  `capsule-lock_<sha>` canonical reference, and an environment library object
-  must implement `pull_capsule`/`plan_capsule`.
-- Complete source-bearing environments are unaffected: source builds, `copy
-  save`, and `copy open` all keep working, and `copy open` still reads both
-  archive formats. Only registry transport changed.
 - Removed the hidden hyphenated compatibility spellings. Every accepted command
   is now public and appears in help and shell completion:
 
@@ -34,39 +31,75 @@
 - Removed the deprecated `run` aliases `--discovery-timeout` and `--timeout`;
   use `--search-timeout` and `--check-timeout`. Removed the undeclared
   `init --mathlib` alias in favor of `--mathlib-version`.
+- Environment libraries are capsule-only. Removed the legacy full-bundle
+  registry paths: `OCIEnvironmentCache.pull`, `OCIEnvironmentCache.plan`, the
+  full publication profile, and the `DownloadUnavailable` fallbacks in
+  `Runtime.open_exact` and `Runtime.plan_exact`. Publication always writes the
+  `capsule-lock_<sha>` canonical reference, and an environment library object
+  must implement `pull_capsule`/`plan_capsule`. Complete source-bearing
+  environments are unaffected: source builds, `copy save`, and `copy open` all
+  keep working, and `copy open` still reads both archive formats.
+
+### Changed (breaking)
+
+- Program provenance renames `exact_environment_id` to `source_lock_id`
+  (`ProgramDescription`, `Runtime.create_program`, and
+  `program create --source-lock-id`), because the field always held a lock
+  identity. Program copies written with the old key still load.
+
+### Added
+
+- `lean-runtime run FILE` is the canonical front-door spelling. `lean-run`
+  remains a permanently supported alias sharing one parser and implementation,
+  with identical results, envelopes, and exit codes. Global `--home`,
+  `--quiet`, `--verbose`, and `--timings` are accepted both before and after
+  `run`, and global `--library`/`--availability` reach the front door with
+  explicit conflict errors against `--offline` and `--no-source-build`.
+- A misplaced `lean-runtime FILE.lean` invocation suggests `lean-runtime run`.
+- `lean-runtime.plan/v1` ships as an installed schema, and the `check-batch`
+  and `attestation` schemas are registered with the schema resources API.
+
+### Fixed (guarantees)
+
+- `availability="local"` now forbids extending a sparse projection. Missing
+  import closures fail with an actionable error naming the roots instead of
+  silently contacting a configured library.
+- Every path that shells out to Lake installs the full toolchain first
+  (package-graph resolution and materialization, local project probing, and
+  managed build/lake execution), so the documented source fallback no longer
+  breaks after a slim check toolchain has been acquired. Package-free core
+  environments keep their check-only fast path.
+- Capability handling is representation-aware: `native`/`development` requests
+  are a no-op on a full environment and rejected only on a check capsule, and
+  `build()`/`execute()` fail fast on a capsule instead of failing mid-run
+  against incomplete inputs. `Environment.sparse` exposes the representation.
+- Sparse acquisition holds a CAS collection lease across unpacking and
+  projection, so a concurrent `clean --include-downloads` cannot reclaim an
+  artifact that is being projected.
+- `--attest` publishes a versioned `lean-runtime.attestation/v1` predicate
+  carrying the verification report plus a stable `build_inventory` of the Lake
+  build outputs, described by `schemas/attestation-v1.schema.json`.
+- Sparse downloads record the informational platform record in
+  `metadata["platform"]` like every other representation.
 
 ### Changed
 
-- `check --repeat` now accepts `--environment NAME`, covering everything the
+- `check --repeat` accepts `--environment NAME`, covering everything the
   removed `profile` command did.
 - Internal dispatch uses canonical command identities (`publish-environment`,
   `copy-save`, `program-create`, `toolchain-slim`, …) instead of rewriting
   canonical invocations back onto legacy spellings.
-- Shell completion and top-level help are both derived from one public command
-  list; the private argparse help-hiding hack is gone.
+- Shell completion and top-level help derive from one public command list; the
+  private argparse help-hiding hack is gone. Command help disambiguates the
+  vocabulary across `run`, `check`, `open`, `prepare`, `download`, and `build`.
 - Bundled GitHub workflows and the `publish-environment` composite action use
   the canonical publication commands.
-
-- Make `lean-runtime run FILE` the canonical front-door spelling; `lean-run`
-  remains a permanently supported alias sharing one parser and implementation,
-  with identical results, envelopes, and exit codes. Global `--home`,
-  `--quiet`, `--verbose`, and `--timings` are accepted both before and after
-  `run`, and global `--library`/`--availability` now reach the front door with
-  explicit conflict errors against `--offline` and `--no-source-build`.
-- Derive shell completion from an explicit public-command list so hidden
-  compatibility commands no longer leak; compatibility command help now names
-  the preferred replacement, `check`/`open`/`prepare`/`download`/`build` help
-  disambiguates the vocabulary, and a misplaced `lean-runtime FILE.lean`
-  invocation suggests `lean-runtime run`.
-- Publish `lean-runtime.plan/v1` as an installed schema and register the
-  `check-batch` schema with the schema resources API.
-- Align documentation with the implementation: correct `--publisher-verification`
-  spelling, document `capsule-lock_<sha>` canonical publication references, name
-  the actual verification check codes, scope the attestation predicate and
-  credential-retention claims, note `lakefile.lean` package-reference support,
-  qualify offline behavior for sparse projections and capture replay, scope the
-  closed JSON-envelope claim to the versioned precision surfaces, and replace
-  "side-effect-free" planning claims with the precise guarantee.
+- Documentation matches the implementation: corrected
+  `--publisher-verification` spelling, documented `capsule-lock_<sha>`
+  publication references, named the actual verification check codes, scoped the
+  credential-retention claim, noted `lakefile.lean` package-reference support,
+  scoped the closed JSON-envelope claim to the versioned precision surfaces, and
+  replaced "side-effect-free" planning claims with the precise guarantee.
 
 ## 2.10.0 - 2026-08-16
 

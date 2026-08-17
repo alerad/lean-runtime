@@ -478,6 +478,11 @@ class Environment:
         self.workspace = root / "workspace"
         self._record = record
 
+    @property
+    def sparse(self) -> bool:
+        """Report whether this environment is a source-free check capsule."""
+        return (self.workspace / CAPSULE_MANIFEST).is_file()
+
     def inspect(self) -> EnvironmentInfo:
         names = tuple(
             sorted(name for name, value in self.manager.store.aliases().items() if value == self.id)
@@ -508,11 +513,14 @@ class Environment:
                 f"unknown environment capabilities: {', '.join(sorted(unknown))}"
             )
         unavailable = selected.intersection({"native", "development"})
-        if unavailable:
+        if unavailable and self.sparse:
             raise EnvironmentError(
                 "check capsules do not contain native/development build inputs; "
                 "open or build the exact full environment for " + ", ".join(sorted(unavailable))
             )
+        if not self.sparse:
+            # A full environment already contains every capability's inputs.
+            return
         self.manager.ensure_sparse_modules(self.lock, tuple(imports), selected)
 
     def check(
@@ -816,6 +824,18 @@ class Environment:
         policy: ExecutionPolicy,
         cancel: threading.Event | None,
     ) -> ExecutionResult:
+        if operation in {"build", "execute"} and self.sparse:
+            requested = (
+                "lake build" if operation == "build" else " ".join(requested_command) or "a command"
+            )
+            raise EnvironmentError(
+                f"a check capsule cannot run {requested}: it contains checked Lean "
+                "artifacts, not package sources or build inputs. Open or build the "
+                "exact full environment for building and running tools."
+            )
+        if operation == "build" or (requested_command and requested_command[0] == "lake"):
+            # Lake is absent from a slim check-only toolchain.
+            self.manager.toolchains.ensure_full(self.lock.toolchain, cancel=cancel)
         source_digest = sha256_id("files", dict(sorted(files.items())))
         request_digest = sha256_id(
             "request",
@@ -1134,6 +1154,10 @@ class EnvironmentManager:
         )
         with FileLock(self.store.lock_dir / f"{environment_id}.lock", timeout=1800, cancel=cancel):
             if not destination.is_dir():
+                if lock.packages:
+                    # Building a package graph shells out to Lake, which a slim
+                    # check-only toolchain does not contain.
+                    self.toolchains.ensure_full(lock.toolchain, cancel=cancel)
                 self._ensure_sources(lock)
                 self._materialize(
                     lock,

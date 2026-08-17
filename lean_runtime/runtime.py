@@ -106,6 +106,7 @@ from .toolchains import ToolchainManager, normalize_toolchain
 from .verification import (
     VerificationCheck,
     VerificationReport,
+    attestation_predicate,
     load_lock_subject,
     verify_environment,
 )
@@ -304,6 +305,14 @@ class Runtime:
         roots: tuple[str, ...],
         capabilities: frozenset[str],
     ) -> None:
+        if self.availability == "local":
+            raise EnvironmentError(
+                "this environment is missing the artifacts for "
+                + (", ".join(roots) if roots else "the requested import closure")
+                + "; offline mode does not permit extending a sparse projection. "
+                "Acquire the closure once while online, or open the exact full "
+                "environment."
+            )
         rejections: list[str] = []
         for library in self.libraries:
             try:
@@ -522,7 +531,7 @@ class Runtime:
         command: Sequence[str],
         source_revision: str,
         source_environment_id: str | None = None,
-        exact_environment_id: str | None = None,
+        source_lock_id: str | None = None,
         toolchain: str = "unknown",
         capability_id: str | None = None,
         provenance: Mapping[str, str] | None = None,
@@ -533,7 +542,7 @@ class Runtime:
             command=command,
             source_revision=source_revision,
             source_environment_id=source_environment_id,
-            exact_environment_id=exact_environment_id,
+            source_lock_id=source_lock_id,
             toolchain=toolchain,
             capability_id=capability_id,
             provenance=provenance,
@@ -671,7 +680,7 @@ class Runtime:
                 CosignVerifier(executable=self.verification_executable).attest(
                     selected_publisher.repository,
                     result.publication_id or result.computer_copy_id,
-                    report.to_dict(),
+                    attestation_predicate(report, environment.workspace),
                 )
                 self.events.emit(
                     "library.attestation_published",
@@ -1243,7 +1252,7 @@ class Runtime:
         *,
         timeout: float = 120,
     ) -> None:
-        self.toolchains.ensure(context.toolchain)
+        self.toolchains.ensure_full(context.toolchain)
         lake_args = (
             *((f"--packages={overrides}",) if overrides else ()),
             "env",

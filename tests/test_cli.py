@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -188,7 +189,10 @@ def test_version_does_not_require_a_command(capsys) -> None:
     with pytest.raises(SystemExit) as stopped:
         parser().parse_args(["--version"])
     assert stopped.value.code == 0
-    assert capsys.readouterr().out.startswith("lean-runtime 2.")
+    # Assert against the installed distribution rather than a hardcoded major,
+    # so a version bump cannot break this test.
+    expected = f"lean-runtime {distribution_version('lean-runtime')}"
+    assert capsys.readouterr().out.strip() == expected
 
 
 def test_standalone_check_error_suggests_an_exact_toolchain(tmp_path: Path, capsys) -> None:

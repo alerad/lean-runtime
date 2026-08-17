@@ -19,6 +19,8 @@ from .policies import ExecutionPolicy
 from .store import EnvironmentStore, environment_identity, platform_compatibility
 
 VERIFY_SCHEMA = "lean-runtime.verify/v1"
+ATTESTATION_SCHEMA = "lean-runtime.attestation/v1"
+ATTESTATION_PREDICATE_TYPE = "https://lean-runtime.dev/attestation/environment/v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +193,27 @@ class VerificationReport:
             "environment_id": self.environment_id,
             "artifact_match": self.artifact_match,
         }
+
+
+def attestation_predicate(report: VerificationReport, workspace: Path) -> dict[str, Any]:
+    """Bind a verification result to a stable inventory of the built outputs.
+
+    The inventory is computed directly from the environment's Lake build
+    outputs, so an ordinary ``--attest`` records it without the independent
+    rebuild that ``verify --rebuild`` performs.
+    """
+    inventory = _artifact_inventory(workspace)
+    return {
+        "schema": ATTESTATION_SCHEMA,
+        "lock_id": report.lock_id,
+        "environment_id": report.environment_id,
+        "verification": report.to_dict(),
+        "build_inventory": {
+            "digest": inventory.digest,
+            "entries": inventory.entries,
+            "bytes": inventory.bytes,
+        },
+    }
 
 
 def verify_lock(lock: EnvironmentLock, *, subject: str) -> VerificationReport:

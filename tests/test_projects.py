@@ -36,6 +36,9 @@ class ProjectToolchains:
     def ensure(self, toolchain: str) -> Path:
         return Path(toolchain)
 
+    def ensure_full(self, toolchain: str, **_kwargs: object) -> Path:
+        return Path(toolchain)
+
     def is_available_locally(self, _toolchain: str) -> bool:
         return True
 

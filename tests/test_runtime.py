@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from lean_runtime import (
+    EnvironmentError,
     EnvironmentLock,
     EnvironmentSpec,
     ExecutionJob,
@@ -25,12 +26,17 @@ from lean_runtime.store import EnvironmentStore
 class FakeToolchains:
     def __init__(self, home: Path) -> None:
         self.home = home
+        self.full_installs: list[str] = []
 
     @property
     def environment(self) -> dict[str, str]:
         return os.environ.copy()
 
     def ensure(self, toolchain: str, **_kwargs: object) -> str:
+        return toolchain
+
+    def ensure_full(self, toolchain: str, **_kwargs: object) -> str:
+        self.full_installs.append(toolchain)
         return toolchain
 
     def command(self, toolchain: str, executable: str, *args: str) -> list[str]:
@@ -196,3 +202,72 @@ def test_local_runtime_never_falls_through_to_elan_install(tmp_path: Path) -> No
 
     with pytest.raises(ToolchainError, match="offline mode does not permit"):
         runtime.toolchains.ensure("v4.32.2")
+
+
+def test_core_environment_never_installs_the_full_toolchain(tmp_path: Path) -> None:
+    toolchains = FakeToolchains(tmp_path)
+    runtime = Runtime(
+        toolchains=toolchains,  # type: ignore[arg-type]
+        libraries=[],
+        availability="local",
+    )
+    environment = runtime.open_toolchain("v4.32.2")
+    assert environment.check("example : True := by trivial").ok
+    assert toolchains.full_installs == []
+
+
+def test_capsule_rejects_build_and_execute_before_running_lean(tmp_path: Path) -> None:
+    toolchains = FakeToolchains(tmp_path)
+    runtime = Runtime(
+        toolchains=toolchains,  # type: ignore[arg-type]
+        libraries=[],
+        availability="local",
+    )
+    environment = runtime.open_toolchain("v4.32.2")
+    marker = environment.workspace / ".lean-runtime" / "capsule.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("{}", encoding="utf-8")
+
+    assert environment.sparse
+    with pytest.raises(EnvironmentError, match="cannot run lake build"):
+        environment.build(("Demo",))
+    with pytest.raises(EnvironmentError, match="cannot run lake exe demo"):
+        environment.execute(["lake", "exe", "demo"])
+    assert toolchains.full_installs == []
+
+
+def test_full_environment_accepts_native_capability_requests(tmp_path: Path) -> None:
+    runtime = Runtime(
+        toolchains=FakeToolchains(tmp_path),  # type: ignore[arg-type]
+        libraries=[],
+        availability="local",
+    )
+    environment = runtime.open_toolchain("v4.32.2")
+    assert not environment.sparse
+    environment.require_capabilities(["native", "development"], imports=["Init"])
+
+
+def test_capsule_still_rejects_native_capability_requests(tmp_path: Path) -> None:
+    runtime = Runtime(
+        toolchains=FakeToolchains(tmp_path),  # type: ignore[arg-type]
+        libraries=[],
+        availability="local",
+    )
+    environment = runtime.open_toolchain("v4.32.2")
+    marker = environment.workspace / ".lean-runtime" / "capsule.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("{}", encoding="utf-8")
+    with pytest.raises(EnvironmentError, match="native/development build inputs"):
+        environment.require_capabilities(["native"], imports=["Init"])
+
+
+def test_full_environment_build_installs_a_lake_capable_toolchain(tmp_path: Path) -> None:
+    toolchains = FakeToolchains(tmp_path)
+    runtime = Runtime(
+        toolchains=toolchains,  # type: ignore[arg-type]
+        libraries=[],
+        availability="local",
+    )
+    environment = runtime.open_toolchain("v4.32.2")
+    environment.build(("Demo",))
+    assert toolchains.full_installs == ["leanprover/lean4:v4.32.2"]

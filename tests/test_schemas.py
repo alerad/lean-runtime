@@ -37,6 +37,7 @@ def _validator(name: str) -> Draft202012Validator:
 def test_every_v1_schema_compiles_eagerly() -> None:
     paths = sorted(SCHEMAS.glob("*-v1.schema.json"))
     assert {path.stem for path in paths} == {
+        "attestation-v1.schema",
         "check-batch-v1.schema",
         "comparison-v1.schema",
         "execution-v1.schema",
@@ -223,3 +224,37 @@ def test_timing_phase_vocabulary_and_duration_are_bounded() -> None:
         PhaseTiming("other", 1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="nonnegative"):
         PhaseTiming("execution", -1)
+
+
+def test_attestation_predicate_binds_a_build_inventory(tmp_path: Path) -> None:
+    from lean_runtime.verification import (
+        VerificationCheck,
+        VerificationReport,
+        attestation_predicate,
+    )
+
+    workspace = tmp_path / "workspace"
+    build = workspace / "packages" / "sample" / ".lake" / "build"
+    build.mkdir(parents=True)
+    (build / "Sample.olean").write_bytes(b"olean")
+
+    report = VerificationReport(
+        subject="research-stack",
+        subject_kind="environment",
+        checks=(VerificationCheck("lean_probe_passed", True),),
+        failures=(),
+        warnings=(),
+        lock_id="lock_" + "a" * 64,
+        environment_id="env_" + "b" * 64,
+    )
+    predicate = attestation_predicate(report, workspace)
+
+    assert predicate["schema"] == "lean-runtime.attestation/v1"
+    assert predicate["build_inventory"]["entries"] > 0
+    assert predicate["build_inventory"]["bytes"] == len(b"olean")
+    _validator("attestation-v1.schema.json").validate(predicate)
+
+    # The inventory tracks the built outputs rather than a fixed constant.
+    (build / "Extra.olean").write_bytes(b"more")
+    changed = attestation_predicate(report, workspace)
+    assert changed["build_inventory"]["digest"] != predicate["build_inventory"]["digest"]

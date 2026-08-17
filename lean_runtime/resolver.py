@@ -117,6 +117,9 @@ class EnvironmentResolver:
         workspace_lease = self.store.lease_workspace(workspace, "resolution")
         try:
             (workspace / "lean-toolchain").write_text(toolchain + "\n", encoding="utf-8")
+            # Only a package graph needs Lake, which a slim check-only
+            # toolchain does not contain.
+            self.toolchains.ensure_full(toolchain, cancel=cancel)
             (workspace / "lakefile.toml").write_text(root_lakefile, encoding="utf-8")
             (workspace / f"{ROOT_MODULE}.lean").write_text(root_module, encoding="utf-8")
             command = self.toolchains.command(toolchain, "lake", "update")

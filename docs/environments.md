@@ -11,7 +11,8 @@ Lean Runtime separates three states:
 The separation lets one process resolve a lock and another materialize it. A
 completed environment can subsequently be opened offline; for a sparse
 capsule, checking is offline for already projected import closures, while a
-new import may extend the projection from configured libraries.
+new import extends the projection from a configured library unless
+`availability="local"` refuses it.
 
 Downloadable environments are sparse check capsules. A capsule stores a
 normalized module graph and content digest for each Lean artifact, resolves to
@@ -114,9 +115,8 @@ CAS and hardlinked into environment projections when the filesystem permits.
 its logical byte count can overlap environment projections and should not be
 added to their logical sizes as an estimate of physical disk use.
 `clean --include-downloads` reclaims old OCI blobs and unleased CAS artifacts;
-per-artifact locks and recency updates make collection during an active
-projection unlikely, though projection does not yet hold a strict lease
-across unpack-and-project.
+sparse acquisition holds a collection lease across unpacking and projection,
+so an artifact being projected is never reclaimed.
 
 ```python
 report = runtime.clean(dry_run=True)
