@@ -8,8 +8,8 @@ authors:
     orcid: "https://orcid.org/0009-0001-7612-1082"
 repository-code: "https://github.com/alerad/lean-runtime"
 license: Apache-2.0
-version: "2.9.1"
-date-released: "2026-08-15"
+version: "3.0.0"
+date-released: "2026-08-16"
 abstract: >-
   lean-runtime executes Lean 4 code from Python or single .lean files
   without per-machine Lake projects or Mathlib source builds. It resolves
