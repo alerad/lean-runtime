@@ -94,6 +94,10 @@ class LeanRuntimeProbe:
                 import_roots=self.import_roots,
                 cancel=cancel,
             )
+            # Acquisition is complete only when the exact candidate can invoke
+            # Lean without downloading or installing anything during the
+            # compiler probe.
+            self.runtime.toolchains.ensure(candidate.entry.toolchain, cancel=cancel)
         except MaterializationError as exc:
             if exc.phase in {"lock-validation", "source-validation", "bundle-validation"}:
                 raise ProbeIntegrityFailure(str(exc)) from exc

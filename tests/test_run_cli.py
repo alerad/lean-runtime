@@ -483,6 +483,31 @@ def test_run_subcommand_rejects_contradictory_availability(
     assert "--offline cannot be combined" in capsys.readouterr().err
 
 
+def test_offline_run_disables_source_materialization(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := by trivial\n")
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
+    assert main([str(source), "--toolchain", "v4.32.2", "--offline", "--quiet"]) == 0
+    assert FakeRuntime.instance.kwargs["availability"] == "local"
+    assert FakeRuntime.instance.kwargs["libraries"] == ()
+    assert FakeRuntime.instance.kwargs["allow_source_build"] is False
+
+
+def test_lean_run_interrupt_has_no_traceback(monkeypatch, tmp_path: Path, capsys) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := by trivial\n")
+
+    class InterruptedRuntime:
+        def __init__(self, **_kwargs) -> None:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", InterruptedRuntime)
+    assert main([str(source), "--toolchain", "v4.32.2"]) == 130
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "lean-run: interrupted\n"
+
+
 def test_run_subcommand_forwards_global_libraries(monkeypatch, tmp_path: Path) -> None:
     from lean_runtime.cli import main as lean_runtime_main
 

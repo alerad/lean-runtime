@@ -397,13 +397,7 @@ def run(arguments: argparse.Namespace, *, command_name: str = "lean-run") -> int
             if arguments.json:
                 print(
                     json.dumps(
-                        {
-                            "schema": "lean-runtime.inspect/v1",
-                            "ok": True,
-                            "data": explanation,
-                            "warnings": [],
-                            "errors": [],
-                        },
+                        envelope("lean-runtime.inspect/v1", ok=True, data=explanation),
                         ensure_ascii=False,
                         indent=2,
                         sort_keys=True,
@@ -443,6 +437,7 @@ def run(arguments: argparse.Namespace, *, command_name: str = "lean-run") -> int
             availability=availability,
             libraries=libraries,
             max_download_bytes=arguments.max_download,
+            allow_source_build=not arguments.offline and not arguments.no_source_build,
         )
         policy = ExecutionPolicy(timeout_seconds=arguments.check_timeout)
         if context.lock is not None:
@@ -528,6 +523,10 @@ def run(arguments: argparse.Namespace, *, command_name: str = "lean-run") -> int
             show_timings=arguments.timings,
         )
         return 0 if result.ok else 1
+    except KeyboardInterrupt:
+        renderer.close()
+        print(f"{command_name}: interrupted", file=sys.stderr)
+        return 130
     except (DiscoveryError, LeanRuntimeError, OSError, UnicodeError, ValueError) as exc:
         renderer.close()
         if arguments.json:

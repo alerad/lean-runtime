@@ -2,12 +2,24 @@
 
 ## Unreleased
 
+## 3.0.1 - 2026-08-17
+
 - Point the portable-copy consuming examples at
   `ghcr.io/alerad/lean-runtime-cache`, which serves check capsules a 3.0 client
   can read, and make the publishing examples use the `ghcr.io/OWNER/...`
   placeholder style the other pages use. The previous
   `ghcr.io/alerad/leancert-runtime` examples named a library that now holds only
   pre-capsule content.
+- Make standalone discovery acquire the verified slim Lean runtime inside the
+  acquisition budget, leaving the candidate timeout exclusively for the Lean
+  compiler probe and preserving the specific timeout diagnostic.
+- Make `run --offline` genuinely retained-only: a missing exact environment
+  now fails before source materialization, Elan installation, or network
+  access.
+- Make every `run --explain --json` routing shape validate against the closed
+  `lean-runtime.inspect/v1` schema.
+- Return exit 130 with a concise message when either `lean-run` or
+  `lean-runtime run` is interrupted during preparation.
 
 
 ## 3.0.0 - 2026-08-16

@@ -209,6 +209,7 @@ class Runtime:
         availability: str | None = None,
         libraries: Sequence[str] | None = None,
         max_download_bytes: int | None = None,
+        allow_source_build: bool = True,
         publisher_verification: str = "ignore",
         trusted_publisher: str | None = None,
         trusted_issuer: str | None = None,
@@ -255,6 +256,7 @@ class Runtime:
                 else DEFAULT_ENVIRONMENT_LIBRARIES
             )
         self.availability = availability
+        self.allow_source_build = allow_source_build
         self.max_download_bytes = max_download_bytes
         self.verification_executable = verification_tool
         self.signature_verifier = (
@@ -286,7 +288,11 @@ class Runtime:
         self.toolchains.remote_ensure = self._acquire_check_toolchain
         self.environments.sparse_acquirer = self._acquire_sparse_modules
 
-    def _acquire_check_toolchain(self, toolchain: str) -> bool:
+    def _acquire_check_toolchain(
+        self,
+        toolchain: str,
+        cancel: threading.Event | None = None,
+    ) -> bool:
         if self.availability == "local":
             raise ToolchainError(
                 f"toolchain {normalize_toolchain(toolchain)!r} is not available locally; "
@@ -294,7 +300,7 @@ class Runtime:
             )
         for library in self.toolchain_libraries:
             try:
-                return library.pull(toolchain)
+                return library.pull(toolchain, cancel=cancel)
             except DownloadUnavailable:
                 continue
         return False
@@ -347,6 +353,7 @@ class Runtime:
     ) -> Environment:
         environment_id = environment_identity(lock, build_profile)
         destination = self.store.environment_path(environment_id)
+        imported = False
         if self.max_download_bytes is not None and self.availability != "local":
             preflight = self.plan_exact(
                 lock,
@@ -377,7 +384,6 @@ class Runtime:
                     "lean-run --plan"
                 )
         if not destination.is_dir() and self.availability != "local":
-            imported = False
             rejections: list[str] = []
             for library in self.libraries:
                 try:
@@ -412,6 +418,12 @@ class Runtime:
                     capability="source_build",
                     environment_id=environment_id,
                 )
+        if not destination.is_dir() and not imported and not self.allow_source_build:
+            raise EnvironmentError(
+                f"environment {environment_id} is not retained locally; offline mode "
+                "does not permit downloading, toolchain installation, or source "
+                "materialization"
+            )
         return self.environments.ensure(
             lock,
             name=name,

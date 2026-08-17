@@ -361,11 +361,17 @@ def discover(
         if attempt.status == "lean_rejected"
         for diagnostic in attempt.diagnostics
     )
+    timeout_diagnostics = tuple(
+        diagnostic
+        for attempt in attempts
+        if attempt.status == "timeout"
+        for diagnostic in attempt.diagnostics
+    )
     return DiscoveryResult(
         status="not_found",
         confidence="exhausted",
         plan=plan,
         attempts=tuple(attempts),
         duration_seconds=time.monotonic() - started,
-        diagnostics=(reason, *rejection_diagnostics),
+        diagnostics=(*timeout_diagnostics, reason, *rejection_diagnostics),
     )
