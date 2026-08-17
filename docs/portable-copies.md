@@ -46,7 +46,7 @@ specification or lock:
 
 ```python
 runtime = Runtime(
-    libraries=["ghcr.io/alerad/leancert-runtime"],
+    libraries=["ghcr.io/alerad/lean-runtime-cache"],
     availability="auto",
 )
 environment = runtime.open_exact(lock)
@@ -55,7 +55,7 @@ environment = runtime.open_exact(lock)
 The equivalent environment variables are:
 
 ```bash
-export LEAN_RUNTIME_LIBRARIES=ghcr.io/alerad/leancert-runtime
+export LEAN_RUNTIME_LIBRARIES=ghcr.io/alerad/lean-runtime-cache
 export LEAN_RUNTIME_AVAILABILITY=auto
 ```
 
@@ -68,7 +68,7 @@ Explicit prefetch uses the same verified path:
 
 ```bash
 lean-runtime \
-  --library ghcr.io/alerad/leancert-runtime \
+  --library ghcr.io/alerad/lean-runtime-cache \
   download environment.lock.json
 ```
 
@@ -98,10 +98,10 @@ Actions identity:
 
 ```python
 runtime = Runtime(
-    libraries=["ghcr.io/alerad/leancert-runtime"],
+    libraries=["ghcr.io/alerad/lean-runtime-cache"],
     publisher_verification="required",
     trusted_publisher=(
-        "https://github.com/alerad/leancert/.github/workflows/cache.yml@refs/heads/main"
+        "https://github.com/alerad/lean-runtime/.github/workflows/public-cache.yml@refs/heads/main"
     ),
     trusted_issuer="https://token.actions.githubusercontent.com",
 )
@@ -121,7 +121,7 @@ Check push access without building or uploading an environment:
 
 ```bash
 lean-runtime publish environment \
-  --publish-to ghcr.io/alerad/leancert-runtime \
+  --publish-to ghcr.io/OWNER/lean-environments \
   --check-access
 ```
 
@@ -156,7 +156,7 @@ export LEAN_RUNTIME_REGISTRY_USERNAME=alerad
 export LEAN_RUNTIME_REGISTRY_PASSWORD="$GHCR_TOKEN"
 
 lean-runtime publish environment environment.lock.json \
-  --publish-to ghcr.io/alerad/leancert-runtime \
+  --publish-to ghcr.io/OWNER/lean-environments \
   --tag v4.32.2.4 \
   --sign --attest
 ```
@@ -208,7 +208,7 @@ steps:
   - uses: ./.github/actions/publish-environment
     with:
       lock: environment.lock.json
-      library: ghcr.io/${{ github.repository_owner }}/leancert-runtime
+      library: ghcr.io/${{ github.repository_owner }}/lean-environments
       tag: ${{ github.ref_name }}
       username: ${{ github.actor }}
       password: ${{ secrets.GITHUB_TOKEN }}
@@ -219,7 +219,7 @@ index and retain its JSON result:
 
 ```bash
 lean-runtime publish environment environment.lock.json \
-  --publish-to ghcr.io/alerad/leancert-runtime \
+  --publish-to ghcr.io/OWNER/lean-environments \
   --platform-only > platform-result.json
 ```
 
@@ -228,7 +228,7 @@ multi-platform index and human aliases:
 
 ```bash
 lean-runtime finalize environment "$LOCK_ID" results/*.json \
-  --library ghcr.io/alerad/leancert-runtime \
+  --library ghcr.io/OWNER/lean-environments \
   --tag "$GITHUB_REF_NAME"
 ```
 

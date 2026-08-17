@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Point the portable-copy consuming examples at
+  `ghcr.io/alerad/lean-runtime-cache`, which serves check capsules a 3.0 client
+  can read, and make the publishing examples use the `ghcr.io/OWNER/...`
+  placeholder style the other pages use. The previous
+  `ghcr.io/alerad/leancert-runtime` examples named a library that now holds only
+  pre-capsule content.
+
+
 ## 3.0.0 - 2026-08-16
 
 The first release with one canonical command vocabulary, capsule-only
