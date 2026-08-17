@@ -158,13 +158,9 @@ guesswork: Lean 4.32 and 4.33 reject ordinary imports when the corresponding
 server/private or IR facets are omitted. `.ilean` editor indexes are a separate
 on-demand capability through `Environment.require_capabilities(["editor"],
 imports=[...])`. Native compilation and development builds require a full
-environment and full toolchain. Requesting them through
-`require_capabilities(["native"])` or `["development"]` is currently
-rejected for every managed environment; a full environment provides those
-capabilities through its ordinary built workspace instead. Sparse handles do
-not yet reject `build()` or arbitrary `execute()` early: against an
-incomplete capsule workspace such operations typically fail mid-run, so open
-or build the full environment for them.
+environment and full toolchain; a check capsule rejects those capability
+requests, and also rejects `build()` and arbitrary `execute()` before any
+Lean process starts. Open or build the full environment for them.
 
 ## Replay
 

@@ -1251,7 +1251,7 @@ class Runtime:
         *,
         timeout: float = 120,
     ) -> None:
-        self.toolchains.ensure(context.toolchain)
+        self.toolchains.ensure_full(context.toolchain)
         lake_args = (
             *((f"--packages={overrides}",) if overrides else ()),
             "env",

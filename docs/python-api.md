@@ -37,11 +37,9 @@ environment.require_capabilities(
 )
 ```
 
-Native and development capabilities require a full built environment.
-`require_capabilities(["native"])` and `["development"]` are currently
-rejected for every managed environment with an actionable error; a full
-environment provides those capabilities through its ordinary built workspace
-without a capability request.
+Native and development capabilities require a full built environment. On a
+full environment the request is a no-op, because its built workspace already
+contains those inputs; a check capsule rejects it with an actionable error.
 
 One-shot helpers use the same routing:
 
@@ -186,10 +184,9 @@ capture = environment.capture(source, expected_ok=True)
 ```
 
 On a sparse check-capsule handle, the `check*` and `capture` methods are
-fully supported. `build()` and arbitrary `execute()` are not
-representation-guarded yet: they run against the projected sparse workspace
-and typically fail against its incomplete inputs, so use a full environment
-for building and running tools.
+fully supported. `build()` and arbitrary `execute()` are rejected before any
+Lean process starts, because a capsule holds checked artifacts rather than
+build inputs; use a full environment for building and running tools.
 
 Asynchronous cancellation uses a background job:
 
