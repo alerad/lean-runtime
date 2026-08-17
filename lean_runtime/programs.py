@@ -116,7 +116,7 @@ class ProgramDescription:
     computer_compatibility: dict[str, str]
     source_revision: str
     source_environment_id: str | None = None
-    exact_environment_id: str | None = None
+    source_lock_id: str | None = None
     toolchain: str = "unknown"
     capability_id: str | None = None
     provenance: Mapping[str, str] = field(default_factory=dict)
@@ -160,7 +160,7 @@ class ProgramDescription:
             "computer_compatibility": self.computer_compatibility,
             "source_revision": self.source_revision,
             "source_environment_id": self.source_environment_id,
-            "exact_environment_id": self.exact_environment_id,
+            "source_lock_id": self.source_lock_id,
             "toolchain": self.toolchain,
             "capability_id": self.capability_id,
         }
@@ -195,8 +195,11 @@ class ProgramDescription:
                 if value.get("source_environment_id") is not None
                 else None
             ),
-            exact_environment_id=(
-                str(value["exact_environment_id"])
+            source_lock_id=(
+                str(value["source_lock_id"])
+                if value.get("source_lock_id") is not None
+                # Programs written before the field was renamed.
+                else str(value["exact_environment_id"])
                 if value.get("exact_environment_id") is not None
                 else None
             ),
@@ -301,7 +304,7 @@ class ReadyProgram:
                 environment_id=self.description.source_environment_id,
                 execution_id=execution_id,
                 request_digest=request_digest,
-                lock_id=self.description.exact_environment_id,
+                lock_id=self.description.source_lock_id,
                 toolchain=self.description.toolchain,
                 packages=(),
                 platform=platform_record(),
@@ -353,7 +356,7 @@ class ProgramManager:
         command: Sequence[str],
         source_revision: str,
         source_environment_id: str | None = None,
-        exact_environment_id: str | None = None,
+        source_lock_id: str | None = None,
         toolchain: str = "unknown",
         capability_id: str | None = None,
         provenance: Mapping[str, str] | None = None,
@@ -367,7 +370,7 @@ class ProgramManager:
             computer_compatibility=platform_compatibility(),
             source_revision=source_revision,
             source_environment_id=source_environment_id,
-            exact_environment_id=exact_environment_id,
+            source_lock_id=source_lock_id,
             toolchain=toolchain,
             capability_id=capability_id,
             provenance=dict(provenance or {}),

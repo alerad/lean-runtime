@@ -720,7 +720,7 @@ Environment-library options are global and precede `run`:
     program_create.add_argument("--command", dest="program_command", nargs="+", required=True)
     program_create.add_argument("--source-revision", required=True)
     program_create.add_argument("--source-environment-id")
-    program_create.add_argument("--exact-environment-id")
+    program_create.add_argument("--source-lock-id")
     program_create.add_argument("--toolchain", default="unknown")
     program_create.add_argument("--capability-id")
     program_create.add_argument(
@@ -1395,7 +1395,7 @@ def main(argv: list[str] | None = None) -> int:
                 command=args.program_command,
                 source_revision=args.source_revision,
                 source_environment_id=args.source_environment_id,
-                exact_environment_id=args.exact_environment_id,
+                source_lock_id=args.source_lock_id,
                 toolchain=args.toolchain,
                 capability_id=args.capability_id,
                 provenance=provenance,

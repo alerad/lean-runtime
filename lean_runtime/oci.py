@@ -55,7 +55,12 @@ from .oci_protocol import (
 from .packs import PACK_MEDIA_TYPE, PackFrame, SparsePack, project_artifacts, unpack_frame
 from .policies import format_byte_size
 from .serialization import canonical_json_bytes
-from .store import EnvironmentStore, environment_identity, platform_compatibility
+from .store import (
+    EnvironmentStore,
+    environment_identity,
+    platform_compatibility,
+    platform_record,
+)
 
 _REPOSITORY = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+")
 _BEARER_PARAMETER = re.compile(r'([a-zA-Z]+)="([^"]*)"')
@@ -1075,7 +1080,7 @@ class OCIEnvironmentCache:
                             "environment_id": environment_id,
                             "lock_id": lock.lock_id,
                             "toolchain": lock.toolchain,
-                            "platform": platform_compatibility(),
+                            "platform": platform_record(),
                             "platform_compatibility": platform_compatibility(),
                             "build_profile": "release",
                             "status": "ready",
