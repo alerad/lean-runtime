@@ -304,6 +304,14 @@ class Runtime:
         roots: tuple[str, ...],
         capabilities: frozenset[str],
     ) -> None:
+        if self.availability == "local":
+            raise EnvironmentError(
+                "this environment is missing the artifacts for "
+                + (", ".join(roots) if roots else "the requested import closure")
+                + "; offline mode does not permit extending a sparse projection. "
+                "Acquire the closure once while online, or open the exact full "
+                "environment."
+            )
         rejections: list[str] = []
         for library in self.libraries:
             try:

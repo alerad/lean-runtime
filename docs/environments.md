@@ -11,7 +11,8 @@ Lean Runtime separates three states:
 The separation lets one process resolve a lock and another materialize it. A
 completed environment can subsequently be opened offline; for a sparse
 capsule, checking is offline for already projected import closures, while a
-new import may extend the projection from configured libraries.
+new import extends the projection from a configured library unless
+`availability="local"` refuses it.
 
 Downloadable environments are sparse check capsules. A capsule stores a
 normalized module graph and content digest for each Lean artifact, resolves to

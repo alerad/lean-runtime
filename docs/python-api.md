@@ -134,10 +134,10 @@ published = runtime.publish_environment(
 )
 ```
 
-`availability="local"` is intended to forbid every registry download. One
-current caveat: extending a sparse environment's import closure still
-consults configured libraries, so a strictly offline runtime should also
-pass `libraries=()` — the `lean-run --offline` CLI does exactly that.
+`availability="local"` forbids every registry download, including extending a
+sparse environment's import closure: checking an import whose artifacts are not
+projected locally fails with an actionable error instead of contacting a
+configured library.
 
 Package-reference discovery is also exposed in separable stages:
 

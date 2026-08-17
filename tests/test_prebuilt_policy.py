@@ -115,3 +115,41 @@ def test_registry_redirect_does_not_forward_authorization_cross_host() -> None:
     )
     assert redirected is not None
     assert redirected.get_header("Authorization") is None
+
+
+class _ContactedCache:
+    repository = _Repository()
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def pull_capsule(self, *_args: object, **_kwargs: object) -> str:
+        self.calls += 1
+        return "env_" + "c" * 64
+
+
+def test_offline_availability_never_extends_a_sparse_projection(tmp_path: Path) -> None:
+    cache = _ContactedCache()
+    runtime = Runtime(home=tmp_path, libraries=[], availability="local")
+    runtime.libraries = (cache,)  # type: ignore[assignment]
+    with pytest.raises(EnvironmentError, match="offline mode does not permit"):
+        runtime._acquire_sparse_modules(_lock(), ("Mathlib.Data.Nat.Basic",), frozenset({"check"}))
+    assert cache.calls == 0
+
+
+def test_offline_sparse_failure_names_the_missing_closure(tmp_path: Path) -> None:
+    runtime = Runtime(home=tmp_path, libraries=[], availability="local")
+    runtime.libraries = (_ContactedCache(),)  # type: ignore[assignment]
+    with pytest.raises(EnvironmentError) as failure:
+        runtime._acquire_sparse_modules(_lock(), ("Mathlib.Order.Basic",), frozenset({"check"}))
+    message = str(failure.value)
+    assert "Mathlib.Order.Basic" in message
+    assert "open the exact full environment" in message
+
+
+def test_online_availability_still_acquires_sparse_modules(tmp_path: Path) -> None:
+    cache = _ContactedCache()
+    runtime = Runtime(home=tmp_path / "auto", libraries=[], availability="auto")
+    runtime.libraries = (cache,)  # type: ignore[assignment]
+    runtime._acquire_sparse_modules(_lock(), ("Sample",), frozenset({"check"}))
+    assert cache.calls == 1

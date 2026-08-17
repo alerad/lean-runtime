@@ -180,10 +180,10 @@ No resolver or network operation runs. This is tested by deleting the original
 Git repository and reopening/checking the environment from a second process.
 
 For a sparse check capsule, this invariant covers metadata and every already
-projected import closure. Checking a new import may extend the projection
-from configured libraries; strictly offline use should pre-acquire the needed
-closure or configure no libraries (`lean-run --offline` passes an empty
-library list for this reason).
+projected import closure. Checking a new import extends the projection from a
+configured library, so strictly offline use should pre-acquire the needed
+closure; under `availability="local"` that extension is refused rather than
+downloaded.
 
 ## Aliases and garbage collection
 
