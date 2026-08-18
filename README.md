@@ -1,13 +1,35 @@
 # Lean Runtime
 
-Lean Runtime makes Lean projects and standalone proofs work without asking you
-to manage toolchains, dependency checkouts, exact environments, or caches.
+**Check the proof. Reuse everything else.**
 
 ```bash
 python -m pip install lean-runtime
 ```
 
-## The daily workflow
+Give Lean Runtime an ordinary file:
+
+```lean
+-- Main.lean
+import Mathlib
+
+example : 2 + 2 = 4 := by norm_num
+```
+
+```console
+$ lean-runtime check Main.lean
+Discovering an exact environment
+✓ Main.lean accepted in 1.60s
+```
+
+No Lake project, dependency checkout, or toolchain setup required. Lean Runtime
+discovers and verifies the exact environment, then keeps it ready for offline
+reuse.
+
+[Get started](https://alerad.github.io/lean-runtime/getting-started/) ·
+[Read the documentation](https://alerad.github.io/lean-runtime/) ·
+[Explore the CLI](https://alerad.github.io/lean-runtime/cli/)
+
+## Start where you are
 
 Create a project:
 

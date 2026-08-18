@@ -41,6 +41,8 @@ jobs:
               raise SystemExit("landing-page Markdown was emitted as raw text")
           if 'class="grid cards" markdown' in html:
               raise SystemExit("landing-page cards were emitted as raw text")
+          if "Discovering an exact environment" not in html:
+              raise SystemExit("landing-page proof demo was not rendered")
           PY
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4

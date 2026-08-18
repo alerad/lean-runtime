@@ -8,7 +8,7 @@
 
 .lr-intro {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(18rem, 0.65fr);
+  grid-template-columns: minmax(0, 1.15fr) minmax(24rem, 0.85fr);
   gap: clamp(1.5rem, 4vw, 3.5rem);
   align-items: end;
   margin: 1.2rem 0 2rem;
@@ -40,7 +40,7 @@
   font-weight: 700;
 }
 
-.lr-quickstart > p {
+.lr-demo > p:first-child {
   margin: 0 0 0.35rem;
   color: var(--md-default-fg-color--light);
   font-size: 0.72rem;
@@ -48,12 +48,22 @@
   text-transform: uppercase;
 }
 
-.lr-quickstart .highlight {
+.lr-demo .highlight {
   margin: 0;
 }
 
-.lr-quickstart pre {
+.lr-demo .highlight + .highlight {
+  margin-top: 0.55rem;
+}
+
+.lr-demo pre {
   margin: 0;
+}
+
+.lr-demo .lr-demo-note {
+  margin: 0.55rem 0 0;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.75rem;
 }
 
 .lr-pipeline {

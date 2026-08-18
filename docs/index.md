@@ -18,14 +18,22 @@ Python—without managing toolchains, dependency checkouts, or caches.
 
 </div>
 
-<div class="lr-quickstart" markdown>
+<div class="lr-demo" markdown>
 
-**Quick start**
+**`Main.lean`**
 
-```bash
-python -m pip install lean-runtime
-lean-runtime check Main.lean
+```lean
+import Mathlib
+example : 2 + 2 = 4 := by norm_num
 ```
+
+```console
+$ lean-runtime check Main.lean
+Discovering an exact environment
+✓ Main.lean accepted in 1.60s
+```
+
+<p class="lr-demo-note">No Lake project. No toolchain setup. Ready for offline reuse.</p>
 
 </div>
 
