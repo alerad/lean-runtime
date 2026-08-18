@@ -1,6 +1,7 @@
 # Command line
 
-Lean Runtime 4 exposes intentions, not its storage implementation.
+Seven commands cover daily use. Everything else — storage, publishing,
+exports — lives under namespaces you can ignore until you need them.
 
 ## Daily commands
 

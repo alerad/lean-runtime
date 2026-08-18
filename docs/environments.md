@@ -1,6 +1,9 @@
-# Exact environments
+# Environment commands
 
-Normal users let `check` infer environments. Infrastructure authors use `env`:
+You usually don't need this page — `check` picks and manages environments
+for you. The `env` namespace is for infrastructure work: pinning an
+environment as a file, naming it, comparing two, or shipping one to other
+machines. The core commands:
 
 ```bash
 lean-runtime env lock environment.toml --output environment.lock.json

@@ -1,6 +1,9 @@
-# Publishing a Lean project
+# Publish a project
 
-From a clean, pushed, GitHub-backed project:
+Publishing lets other people (and your CI) check against your project
+without building it — they download a verified, prebuilt copy instead.
+
+From a clean, pushed, GitHub-backed project, it's one command:
 
 ```bash
 lean-runtime publish

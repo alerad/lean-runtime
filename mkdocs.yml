@@ -1,5 +1,5 @@
 site_name: Lean Runtime
-site_description: Exact, reusable environments for Lean projects
+site_description: Check Lean proofs with one command — exact, reusable environments included
 site_url: https://alerad.github.io/lean-runtime/
 repo_url: https://github.com/alerad/lean-runtime
 repo_name: alerad/lean-runtime
@@ -40,23 +40,22 @@ theme:
 
 nav:
   - Home: index.md
-  - Start here:
-      - Installation and first check: getting-started.md
-      - Standalone Lean files: standalone-files.md
-      - New and existing Lake projects: local-projects.md
-  - Workflows:
-      - Exact environments: environments.md
-      - Portable copies and libraries: portable-copies.md
-      - Publishing a Lean project: project-publishing.md
+  - Get started: getting-started.md
+  - Guides:
+      - Check a single file: standalone-files.md
+      - Work in a Lake project: local-projects.md
+      - Use Lean from Python: python-api.md
+  - Sharing:
+      - Publish a project: project-publishing.md
+      - Portable environments: portable-copies.md
       - Ready-to-run programs: ready-programs.md
-  - Reference:
-      - Command line: cli.md
-      - Python API: python-api.md
+  - CLI reference: cli.md
+  - Advanced:
+      - Verify, compare, and measure: v1-precision.md
+      - Environment commands: environments.md
       - Execution captures: captures.md
-      - Verify, compare, profile, and matrix: v1-precision.md
-  - Concepts:
-      - Architecture: architecture.md
       - Trust and limitations: trust-and-limitations.md
+      - Architecture: architecture.md
       - Lake artifact-cache design: lake-artifact-cache-design.md
   - Project:
       - Release case study: case-study-v1.md

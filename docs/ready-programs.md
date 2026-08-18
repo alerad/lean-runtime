@@ -1,7 +1,8 @@
 # Ready-to-run programs
 
-A **ready-to-run program** is a verified executable result from a Lean project.
-It opens quickly because it does not rebuild the project or download Mathlib.
+A **ready-to-run program** is a compiled result from a Lean project that
+opens in moments — no project rebuild, no Mathlib download — and is
+verified against tampering every time you open it.
 
 Use a full **environment** when you need the sources, compiler state, kernel
 replay, or a new build. Use a ready-to-run **program** when you only need to run

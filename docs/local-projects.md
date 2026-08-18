@@ -1,70 +1,69 @@
-# Local Lake projects
+# Work in a Lake project
 
-Lean Runtime discovers the nearest pinned Lake project from the current
-directory or source path.
+Lean Runtime works with your project as-is. It finds the nearest pinned
+Lake project from wherever you run it:
 
 ```bash
-lean-runtime check
-lean-runtime check MyProject/Basic.lean
-lean-runtime build
-lean-runtime watch MyProject/Basic.lean
+lean-runtime check                        # whole project
+lean-runtime check MyProject/Basic.lean   # one file, fast
+lean-runtime build                        # ordinary Lake build
+lean-runtime watch MyProject/Basic.lean   # re-check on save
 ```
 
-Focused checking passes the real project-relative path to Lake. Project-wide
-checking builds local libraries' Lean artifacts; `build` retains ordinary Lake
-build semantics and root outputs.
+Checking a single file passes the real project-relative path to Lake, so
+diagnostics look exactly like they would from a local build. Project-wide
+`check` builds your libraries' Lean artifacts; `build` keeps ordinary
+Lake semantics and outputs.
 
-## Create
+## Create a project
 
 ```bash
 lean-runtime new MyProof
 ```
 
-`new` only creates projects. It chooses the stable cataloged Mathlib/toolchain,
-creates exact Lake metadata, shares exact dependency storage, and optionally
-generates CI. It refuses an existing Lake project; use `adopt` there.
+`new` picks the stable cataloged Mathlib/toolchain pair, writes exact
+Lake metadata, shares dependency storage, and can generate CI. It only
+creates — for an existing project, use `adopt`.
 
-## Adopt an existing project
+## Share storage across projects
+
+If you have several projects pinned to the same dependencies, each one
+keeps its own multi-gigabyte copy. `adopt` deduplicates them:
 
 ```bash
 cd ExistingProject
 lean-runtime adopt
 ```
 
-Adoption does not update the toolchain or manifest. It validates pinned Git
-dependencies, checks dirty/mismatched checkouts, uses the existing
-`.lake/packages` as an exact byte donor, prepares the shared graph, probes it,
-then atomically replaces package directories with links. The old graph is
-restored if any post-swap probe fails.
+Adoption never changes your `lean-toolchain` or `lake-manifest.json`. It
+verifies your pinned dependencies and current checkouts, shows a preview,
+tests the shared copy, and only then swaps package directories for links —
+atomically, with automatic rollback if any post-swap test fails.
 
-For many repositories:
+Have a whole folder of projects?
 
 ```bash
 lean-runtime adopt ~/research
 ```
 
-A directory that is itself a Lake project is adopted as one project; otherwise
-Lean Runtime discovers pinned projects below it. Independent failures do not
-prevent safe projects from being processed.
+Each project is handled independently — one problematic project doesn't
+block the rest.
 
-Advanced equivalents are `project scan`, `project share`, and `project
-unshare`. They also default to the current directory.
+## Your Elan install is safe
 
-## Existing Elan
+If the exact pinned toolchain already exists in your Elan home, Lean
+Runtime uses those binaries read-only. It never changes your default,
+installs into your Elan home, or removes anything from it. Toolchains you
+don't have go into Lean Runtime's private store instead.
 
-If the exact pinned toolchain already exists in the user's Elan home, Lean
-Runtime invokes its `lean`/`lake` binaries read-only. It never changes the user
-default, installs there, or prunes it. Missing toolchains go to the private
-runtime store. `toolchain optimize` can create a verified slim checking copy;
-pruning is allowed only for a private original.
-
-## Update
+## Update dependencies safely
 
 ```bash
 lean-runtime update
 ```
 
-The command shows the exact old/new Mathlib commit and toolchain, local reuse,
-and download requirements before confirmation. Application is transactional;
-project metadata is restored if the new graph or project-wide check fails.
-Use `--dry-run`, `--offline`, or `--yes` when scripting.
+Before touching anything, `update` shows the exact old and new Mathlib
+commit and toolchain, what can be reused, and what needs downloading. The
+change is transactional: if the new dependency graph or a project-wide
+check fails, your project metadata is restored. Use `--dry-run` to just
+look, `--yes` for scripts.

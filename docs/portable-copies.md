@@ -1,7 +1,8 @@
-# Portable copies and environment libraries
+# Portable environments
 
-Lean Runtime can move an already built environment between compatible machines
-without rebuilding its Lake packages:
+Built an environment once? You can move it to another compatible machine
+as a single file and open it there — no rebuild, no re-download of Lake
+packages:
 
 ```bash
 lean-runtime env export research-stack --output research-stack.lean-environment

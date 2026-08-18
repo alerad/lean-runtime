@@ -1,15 +1,22 @@
-# Standalone Lean files
+# Check a single file
+
+The zero-setup path: no project, no configuration — the file's imports
+are enough.
 
 ```bash
 lean-runtime check Main.lean
 ```
 
-Outside a pinned Lake project, `check` analyzes imports and syntax, ranks a
-bounded catalog of exact environments, acquires a verified capsule or builds
-from exact source according to policy, and runs Lean with logical paths in its
-diagnostics. Inside a project, the same command uses Lake project semantics.
+Outside a Lake project, `check` reads the imports, picks the best exact
+environment from a curated catalog, fetches only what the file uses, and
+runs Lean. Errors and warnings point at your filename and line numbers,
+just like a local build. (Inside a Lake project, the same command uses
+your project instead — see [Lake projects](local-projects.md).)
 
-Put durable context in the file:
+## Pin the version in the file
+
+If the file should always check against one Mathlib release, say so in a
+frontmatter block:
 
 ```lean
 -- /// lean-runtime
@@ -17,7 +24,10 @@ Put durable context in the file:
 -- ///
 ```
 
-or override once:
+Malformed or conflicting frontmatter is rejected up front with a clear
+error, before anything is downloaded.
+
+## Or pin it for one run
 
 ```bash
 lean-runtime check Main.lean --using mathlib@v4.33.0
@@ -25,9 +35,17 @@ lean-runtime check Main.lean --using lock:environment.lock.json
 lean-runtime check Main.lean --using toolchain:v4.33.0
 ```
 
-`--offline` is fail-closed. `--using env:NAME` selects an already-opened named
-environment. Frontmatter rejects malformed TOML, unknown fields, late blocks,
-and conflicting selectors before acquisition.
+`--using env:NAME` selects an environment you've already set up by name,
+and `--offline` guarantees no network access — missing pieces become
+errors, never silent downloads.
 
-Use `watch FILE` for edit/check loops, `--repeat N` for repeated measurement,
-and `--matrix [FILE]` for compatibility checks.
+## Keep the loop going
+
+```bash
+lean-runtime watch Main.lean                      # re-check on save
+lean-runtime check Main.lean --repeat 5           # repeated timing samples
+lean-runtime check Main.lean --matrix matrix.toml # several Mathlib versions at once
+```
+
+See [Verify, compare, and measure](v1-precision.md) for matrix files and
+timing details.

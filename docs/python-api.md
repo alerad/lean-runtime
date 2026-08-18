@@ -1,5 +1,9 @@
 # Python API
 
+The pattern is always the same: set up once, then check as many times as
+you like — the expensive work happens on the first call and everything
+after reuses it.
+
 ## Prepared environments
 
 The usual entry point prepares one context and returns either an immutable

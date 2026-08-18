@@ -1,13 +1,10 @@
-# Verify, understand, compare, and measure
+# Verify, compare, and measure
 
-Ordinary checks stay deliberately small:
-
-```bash
-lean-runtime check Main.lean
-```
-
-The v1 precision tools are opt-in and reuse the same locks, environments, and execution
-records as ordinary checks.
+Everyday checking never needs these tools. They exist for the moments you
+have to *show your work*: prove an environment is intact, explain why a
+context was chosen, diff two environments, or measure timings properly.
+All of them reuse the same locks, environments, and execution records as
+ordinary checks — nothing here is a separate mode.
 
 ## Verify
 
