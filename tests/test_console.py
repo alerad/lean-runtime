@@ -112,6 +112,42 @@ def test_plan_with_nothing_to_download_is_silent() -> None:
     assert stream.getvalue() == ""
 
 
+def test_toolchain_download_starts_a_new_progress_lifecycle() -> None:
+    renderer, stream = _renderer("plain")
+    renderer(_event("acquisition.planned", download_bytes=100, cached_bytes=0))
+    renderer(_event("library.layer_progress", digest="sha256:environment", current_bytes=100))
+    renderer(_event("library.verified", "done"))
+
+    # Progress emitted between completed acquisitions must not be folded into
+    # the environment total. The toolchain plan establishes its own aggregate.
+    renderer(_event("library.layer_progress", digest="sha256:late", current_bytes=10_000))
+    renderer(
+        _event(
+            "toolchain.download_planned",
+            download_bytes=1000,
+            cached_bytes=25,
+        )
+    )
+    renderer(_event("library.layer_progress", digest="sha256:toolchain", current_bytes=500))
+    renderer(_event("library.layer_progress", digest="sha256:toolchain", current_bytes=1000))
+    renderer(_event("toolchain.ready", "done"))
+
+    assert stream.getvalue().splitlines() == [
+        "Downloading environment: 100 B",
+        "Downloaded 25%",
+        "Downloaded 50%",
+        "Downloaded 75%",
+        "Downloaded 100%",
+        "Downloaded and verified environment",
+        "Downloading Lean toolchain: 1000 B (25 B already cached)",
+        "Downloaded 25%",
+        "Downloaded 50%",
+        "Downloaded 75%",
+        "Downloaded 100%",
+        "Downloaded and verified Lean toolchain",
+    ]
+
+
 def test_tty_mode_redraws_one_line_and_finishes_it() -> None:
     time = [0.0]
     renderer, stream = _renderer("tty", clock=lambda: time[0])

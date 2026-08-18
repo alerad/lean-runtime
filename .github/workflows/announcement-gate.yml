@@ -51,6 +51,8 @@ jobs:
             python: "3.12"
           - os: macos-15
             python: "3.12"
+          - os: macos-15-intel
+            python: "3.12"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

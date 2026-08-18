@@ -157,10 +157,14 @@ def _layer(*members: tuple[str, str, bytes | str]) -> bytes:
                 assert isinstance(value, bytes)
                 info.size = len(value)
                 archive.addfile(info, io.BytesIO(value))
-            else:
-                assert kind == "symlink" and isinstance(value, str)
+            elif kind == "symlink":
+                assert isinstance(value, str)
                 info.type = tarfile.SYMTYPE
                 info.linkname = value
+                archive.addfile(info)
+            else:
+                assert kind == "fifo"
+                info.type = tarfile.FIFOTYPE
                 archive.addfile(info)
     return output.getvalue()
 
@@ -196,6 +200,42 @@ def test_layer_extract_rejects_later_write_through_symlink(tmp_path: Path) -> No
 
     with pytest.raises(EnvironmentError, match="traverses an extracted symlink"):
         _extract_layer(layer, tmp_path / "output")
+
+
+@pytest.mark.parametrize("name", ["/absolute", "../escape", "dir/../../escape", "dir\\escape"])
+def test_layer_extract_rejects_unsafe_paths(tmp_path: Path, name: str) -> None:
+    with pytest.raises(EnvironmentError, match="unsafe bundle member path"):
+        _extract_layer(_layer(("file", name, b"payload")), tmp_path / "output")
+
+
+def test_layer_extract_rejects_duplicate_member(tmp_path: Path) -> None:
+    layer = _layer(
+        ("file", "payload", b"first"),
+        ("file", "payload", b"replacement"),
+    )
+    with pytest.raises(EnvironmentError, match="duplicate bundle member"):
+        _extract_layer(layer, tmp_path / "output")
+
+
+def test_layer_extract_rejects_special_member(tmp_path: Path) -> None:
+    with pytest.raises(EnvironmentError, match="unsupported bundle member"):
+        _extract_layer(_layer(("fifo", "pipe", b"")), tmp_path / "output")
+
+
+def test_layer_extract_rejects_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("lean_runtime.bundles.MAX_BUNDLE_BYTES", 1)
+    with pytest.raises(EnvironmentError, match="exceeds extraction limits"):
+        _extract_layer(_layer(("file", "large", b"ab")), tmp_path / "output")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows runners may not permit symlink creation")
+def test_layer_extract_rejects_symlink_destination(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    destination = tmp_path / "destination"
+    destination.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(EnvironmentError, match="destination must not be a symlink"):
+        _extract_layer(_layer(("file", "payload", b"payload")), destination)
 
 
 def test_bundle_export_is_deterministic_and_imports_into_fresh_store(tmp_path: Path) -> None:
@@ -1096,6 +1136,58 @@ def test_oci_publisher_reports_partial_state_when_tag_finalization_fails(
     assert len(terminal) == 1
     assert terminal[0].data["partial"] is True
     assert not any(event.kind == "library.published" for event in events)
+
+
+def test_environment_index_finalization_is_ordered_and_rejects_duplicate_platforms(
+    tmp_path: Path,
+) -> None:
+    producer, _environment_id, lock = _published_runtime(tmp_path / "producer")
+    publisher = OCIEnvironmentPublisher(
+        OCIRepository.parse("oci://registry.example/owner/cache"),
+        producer.store,
+        producer.bundles,
+        EventEmitter(),
+    )
+    published: list[tuple[str, bytes]] = []
+
+    class IndexClient:
+        def check_push_access(self) -> None:
+            pass
+
+        def manifest_exists(self, _digest: str) -> bool:
+            return True
+
+        def publish_manifest(self, reference: str, data: bytes, _media_type: str) -> str:
+            published.append((reference, data))
+            return "sha256:" + hashlib.sha256(data).hexdigest()
+
+    publisher.client = IndexClient()  # type: ignore[assignment]
+
+    def descriptor(system: str, architecture: str, abi: str, digest: str) -> dict[str, object]:
+        return {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:" + digest * 64,
+            "size": 42,
+            "platform": {"os": system, "architecture": architecture},
+            "annotations": {"org.lean-runtime.platform.abi": abi},
+        }
+
+    linux = descriptor("linux", "amd64", "glibc-2.35", "a")
+    macos = descriptor("darwin", "arm64", "darwin-arm64", "b")
+    publication_id = publisher.publish_index(lock.lock_id, [linux, macos], tags=("dogfood",))
+
+    assert publication_id.startswith("sha256:")
+    assert [reference for reference, _data in published] == [
+        "capsule-" + lock.lock_id,
+        "dogfood",
+    ]
+    assert published[0][1] == published[1][1]
+    index = json.loads(published[0][1])
+    assert [item["platform"]["os"] for item in index["manifests"]] == ["darwin", "linux"]
+
+    duplicate = descriptor("linux", "amd64", "glibc-2.35", "c")
+    with pytest.raises(ValueError, match="duplicate OCI platform result"):
+        publisher.publish_index(lock.lock_id, [linux, duplicate])
 
 
 def test_oci_truncated_blob_download_resumes_with_range(tmp_path: Path) -> None:

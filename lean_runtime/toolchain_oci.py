@@ -44,6 +44,7 @@ from .oci_protocol import (
 from .oci_protocol import (
     platform_matches as _platform_matches,
 )
+from .policies import format_byte_size
 from .serialization import canonical_json_bytes
 from .store import EnvironmentStore, platform_compatibility
 from .toolchain_slim import SlimManifest, materialize, verify_capabilities
@@ -120,6 +121,9 @@ def _safe_member(name: str) -> PurePosixPath:
 
 def _extract_layer(layer: Path, destination: Path) -> None:
     total = count = 0
+    seen: set[PurePosixPath] = set()
+    if destination.is_symlink():
+        raise ToolchainError("check toolchain extraction destination must not be a symlink")
     try:
         with (
             layer.open("rb") as raw,
@@ -132,6 +136,9 @@ def _extract_layer(layer: Path, destination: Path) -> None:
                 if count > MAX_TOOLCHAIN_FILES or total > MAX_TOOLCHAIN_BYTES:
                     raise ToolchainError("check toolchain exceeds extraction limits")
                 relative = _safe_member(member.name)
+                if relative in seen:
+                    raise ToolchainError(f"duplicate check toolchain member: {member.name!r}")
+                seen.add(relative)
                 target = destination.joinpath(*relative.parts)
                 for parent in target.parents:
                     if parent == destination:
@@ -147,6 +154,8 @@ def _extract_layer(layer: Path, destination: Path) -> None:
                     target.chmod(member.mode & 0o777)
                 elif member.isfile():
                     target.parent.mkdir(parents=True, exist_ok=True)
+                    if target.exists() or target.is_symlink():
+                        raise ToolchainError(f"duplicate check toolchain member: {member.name!r}")
                     source = archive.extractfile(member)
                     if source is None:
                         raise ToolchainError("check toolchain file has no payload")
@@ -166,6 +175,8 @@ def _extract_layer(layer: Path, destination: Path) -> None:
                     ):
                         raise ToolchainError("check toolchain contains an unsafe symlink")
                     target.parent.mkdir(parents=True, exist_ok=True)
+                    if target.exists() or target.is_symlink():
+                        raise ToolchainError(f"duplicate check toolchain member: {member.name!r}")
                     target.symlink_to(linkname)
                 else:
                     raise ToolchainError(
@@ -325,6 +336,15 @@ class OCIToolchainLibrary:
         if callable(local_check) and local_check(toolchain):
             return True
         plan = self.plan(toolchain)
+        if plan.download_bytes:
+            self.events.emit(
+                "toolchain.download_planned",
+                f"Check toolchain download planned: {format_byte_size(plan.download_bytes)}",
+                phase="acquisition",
+                toolchain=plan.toolchain,
+                download_bytes=plan.download_bytes,
+                cached_bytes=plan.cached_bytes,
+            )
         self.client.cache_verified_blob(plan.config_data, plan.config_descriptor, self.store)
         try:
             layer = self.client.download_blob(
@@ -346,6 +366,12 @@ class OCIToolchainLibrary:
             cancel=cancel,
         ):
             if self.toolchains.is_available_locally(toolchain):
+                self.events.emit(
+                    "toolchain.ready",
+                    "Lean check toolchain is ready",
+                    phase="acquisition",
+                    toolchain=plan.toolchain,
+                )
                 return True
             staging = destination.parent / f".{destination.name}.staging-{os.getpid()}"
             if staging.exists():
@@ -381,6 +407,12 @@ class OCIToolchainLibrary:
             finally:
                 if staging.exists():
                     shutil.rmtree(staging)
+        self.events.emit(
+            "toolchain.ready",
+            "Lean check toolchain is ready",
+            phase="acquisition",
+            toolchain=plan.toolchain,
+        )
         return True
 
 
