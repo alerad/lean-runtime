@@ -7,10 +7,21 @@ copyright: Copyright © Alejandro Radisic
 
 theme:
   name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
   features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
     - content.code.copy
+    - content.code.annotate
     - navigation.sections
     - navigation.top
+    - search.highlight
+    - search.suggest
+    - toc.follow
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -28,33 +39,54 @@ theme:
         name: Use light mode
 
 nav:
-  - Overview: index.md
-  - Getting started: getting-started.md
-  - Guides:
+  - Home: index.md
+  - Start here:
+      - Installation and first check: getting-started.md
       - Standalone Lean files: standalone-files.md
-      - Environments: environments.md
-      - Lake projects and shared dependencies: local-projects.md
+      - New and existing Lake projects: local-projects.md
+  - Workflows:
+      - Exact environments: environments.md
       - Portable copies and libraries: portable-copies.md
       - Publishing a Lean project: project-publishing.md
       - Ready-to-run programs: ready-programs.md
+  - Reference:
+      - Command line: cli.md
       - Python API: python-api.md
-      - CLI: cli.md
       - Execution captures: captures.md
       - Verify, compare, profile, and matrix: v1-precision.md
-      - V1 release case study: case-study-v1.md
   - Concepts:
       - Architecture: architecture.md
-      - Lake artifact-cache design: lake-artifact-cache-design.md
       - Trust and limitations: trust-and-limitations.md
-  - Development: development.md
+      - Lake artifact-cache design: lake-artifact-cache-design.md
+  - Project:
+      - Release case study: case-study-v1.md
+      - Development: development.md
+
+plugins:
+  - search
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/alerad/lean-runtime
+      name: Lean Runtime on GitHub
 
 markdown_extensions:
   - admonition
   - attr_list
   - pymdownx.highlight:
       anchor_linenums: true
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - pymdownx.inlinehilite
   - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
   - toc:
       permalink: true
 
