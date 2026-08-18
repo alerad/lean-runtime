@@ -158,6 +158,5 @@ interfaces for infrastructure code.
 - Logical Lean rejections exit 1; invalid/infrastructure invocations exit 2;
   publication failures retain their documented classified exit statuses.
 
-Documentation lives in [`docs/`](docs/index.md). Start with
-[`docs/getting-started.md`](docs/getting-started.md),
-[`docs/cli.md`](docs/cli.md), and [`docs/local-projects.md`](docs/local-projects.md).
+Documentation lives at
+[alerad.github.io/lean-runtime](https://alerad.github.io/lean-runtime/).
