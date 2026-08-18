@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from pathlib import Path
 
@@ -112,6 +113,83 @@ def test_command_uses_the_slim_copy_when_the_full_toolchain_is_gone(tmp_path: Pa
     manager = _manager_with_slim(tmp_path)
     command = manager.command(TOOLCHAIN, "lean", "Main.lean")
     assert command == [str(manager.slim_path(TOOLCHAIN) / "bin" / "lean"), "Main.lean"]
+
+
+def test_command_uses_a_slim_copy_acquired_during_the_first_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ToolchainManager(tmp_path / "runtime")
+    source = _fake_toolchain(tmp_path)
+
+    def acquire(toolchain: str, _cancel: threading.Event | None) -> bool:
+        materialize(
+            source,
+            manager.slim_path(toolchain),
+            toolchain=toolchain,
+            created_at="2026-08-17T00:00:00+00:00",
+        )
+        return True
+
+    manager.remote_ensure = acquire
+    monkeypatch.setattr(
+        manager,
+        "elan_path",
+        lambda: pytest.fail("cold slim execution must not invoke Elan"),
+    )
+
+    command = manager.command(TOOLCHAIN, "lean", "Main.lean")
+
+    assert command == [str(manager.slim_path(TOOLCHAIN) / "bin" / "lean"), "Main.lean"]
+
+
+def test_command_ignores_an_incomplete_elan_toolchain_directory(tmp_path: Path) -> None:
+    manager = _manager_with_slim(tmp_path)
+    manager._elan_toolchain_dir(TOOLCHAIN).mkdir(parents=True)
+
+    command = manager.command(TOOLCHAIN, "lean", "Main.lean")
+
+    assert command == [str(manager.slim_path(TOOLCHAIN) / "bin" / "lean"), "Main.lean"]
+
+
+def test_command_prefers_a_usable_full_toolchain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _manager_with_slim(tmp_path)
+    full_lean = manager._elan_toolchain_dir(TOOLCHAIN) / "bin" / "lean"
+    full_lean.parent.mkdir(parents=True)
+    full_lean.write_text("full lean")
+    elan = tmp_path / "elan-executable"
+    elan.write_text("elan")
+    monkeypatch.setenv("LEAN_RUNTIME_ELAN", str(elan))
+
+    command = manager.command(TOOLCHAIN, "lean", "Main.lean")
+
+    assert command == [str(elan.absolute()), "run", TOOLCHAIN, "lean", "Main.lean"]
+
+
+def test_executable_digest_uses_a_slim_copy_acquired_during_the_first_call(
+    tmp_path: Path,
+) -> None:
+    manager = ToolchainManager(tmp_path / "runtime")
+    source = _fake_toolchain(tmp_path)
+
+    def acquire(toolchain: str, _cancel: threading.Event | None) -> bool:
+        materialize(
+            source,
+            manager.slim_path(toolchain),
+            toolchain=toolchain,
+            created_at="2026-08-17T00:00:00+00:00",
+        )
+        return True
+
+    manager.remote_ensure = acquire
+
+    assert manager.executable_digest(TOOLCHAIN, "lean") == (
+        "sha256:" + hashlib.sha256(b"bin/lean").hexdigest()
+    )
+    assert not manager.elan_home.exists()
 
 
 def test_command_rejects_executables_outside_the_slim_profile(tmp_path: Path) -> None:

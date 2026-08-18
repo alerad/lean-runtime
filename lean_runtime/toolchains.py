@@ -325,26 +325,33 @@ class ToolchainManager:
         A full Elan installation is preferred; when only a verified slim copy
         remains, its executables are invoked directly.
         """
-        name = normalize_toolchain(toolchain)
-        if self.has_slim(name) and not self._elan_toolchain_dir(name).is_dir():
+        name = self.ensure(toolchain)
+        full = self._elan_toolchain_dir(name)
+        full_lean = full / "bin" / "lean"
+        if os.name == "nt":
+            full_lean = full_lean.with_suffix(".exe")
+        if self.has_slim(name) and not full_lean.is_file():
             binary = self.slim_path(name) / "bin" / executable
+            if os.name == "nt":
+                binary = binary.with_suffix(".exe")
             if not binary.is_file():
                 raise ToolchainError(
                     f"slim toolchain {name!r} does not provide {executable!r}; "
                     "reinstall the full toolchain for this operation"
                 )
             return [str(binary), *args]
-        name = self.ensure(name)
         return [str(self.elan_path()), "run", name, executable, *args]
 
     def executable_digest(self, toolchain: str, executable: str) -> str:
         """Hash the exact resolved executable for compatibility-cache identities."""
-        name = normalize_toolchain(toolchain)
+        name = self.ensure(toolchain)
         full = self._elan_toolchain_dir(name)
-        if self.has_slim(name) and not full.is_dir():
+        full_lean = full / "bin" / "lean"
+        if os.name == "nt":
+            full_lean = full_lean.with_suffix(".exe")
+        if self.has_slim(name) and not full_lean.is_file():
             binary = self.slim_path(name) / "bin" / executable
         else:
-            self.ensure(name)
             binary = full / "bin" / executable
         if os.name == "nt" and not binary.is_file():
             binary = binary.with_suffix(".exe")

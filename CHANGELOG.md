@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 3.0.2 - 2026-08-17
+
+- Route the first check directly through a newly downloaded slim Lean runtime.
+  Command construction and executable hashing now re-evaluate toolchain state
+  after remote acquisition and ignore incomplete Elan toolchain directories,
+  preventing cold discovery from starting an unintended full toolchain install.
+
+
 ## 3.0.1 - 2026-08-17
 
 - Point the portable-copy consuming examples at
