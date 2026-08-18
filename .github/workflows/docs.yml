@@ -29,6 +29,19 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install -e '.[docs]'
       - run: mkdocs build --strict
+      - name: Verify the rendered landing page
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          html = Path("site/index.html").read_text(encoding="utf-8")
+          if "Check the proof. Reuse everything else." not in html:
+              raise SystemExit("landing-page headline was not rendered")
+          if 'class="lr-hero" markdown' in html:
+              raise SystemExit("landing-page Markdown was emitted as raw text")
+          if 'class="grid cards" markdown' in html:
+              raise SystemExit("landing-page cards were emitted as raw text")
+          PY
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
         with:

@@ -112,6 +112,9 @@ def test_existing_user_elan_toolchain_is_reused_read_only(
         str(directory / "lean"),
         "--version",
     ]
+    execution_path = manager.environment_for(toolchain)["PATH"].split(os.pathsep)
+    assert execution_path[0] == str(directory)
+    assert execution_path[1] == str(manager.elan_home / "bin")
     monkeypatch.setattr(manager, "has_slim", lambda _name: True)
     with pytest.raises(ToolchainError, match="user-managed"):
         manager.prune_original(toolchain)

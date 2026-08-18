@@ -530,6 +530,7 @@ class Environment:
         filename: str = "Main.lean",
         policy: ExecutionPolicy | None = None,
         cancel: threading.Event | None = None,
+        _allow_sparse_acquisition: bool = True,
     ) -> ExecutionResult:
         safe_filename = Path(filename).name
         if not safe_filename.endswith(".lean"):
@@ -539,6 +540,7 @@ class Environment:
             entrypoint=safe_filename,
             policy=policy,
             cancel=cancel,
+            _allow_sparse_acquisition=_allow_sparse_acquisition,
         )
 
     def check_files(
@@ -548,6 +550,7 @@ class Environment:
         entrypoint: str = "Main.lean",
         policy: ExecutionPolicy | None = None,
         cancel: threading.Event | None = None,
+        _allow_sparse_acquisition: bool = True,
     ) -> ExecutionResult:
         """Check a safe relative tree of Lean files through one entrypoint."""
         normalized = _source_files(files)
@@ -559,7 +562,12 @@ class Environment:
                 module for source in normalized.values() for module in source_import_roots(source)
             )
         )
-        self.manager.ensure_sparse_modules(self.lock, roots, frozenset({"check"}))
+        self.manager.ensure_sparse_modules(
+            self.lock,
+            roots,
+            frozenset({"check"}),
+            allow_acquisition=_allow_sparse_acquisition,
+        )
         return self._execute_in_instance(
             operation="check",
             files=normalized,
@@ -1112,6 +1120,8 @@ class EnvironmentManager:
         lock: EnvironmentLock,
         roots: tuple[str, ...],
         capabilities: frozenset[str],
+        *,
+        allow_acquisition: bool = True,
     ) -> None:
         """Extend a sparse projection before checking a new import closure."""
         environment_id = environment_identity(lock)
@@ -1130,6 +1140,11 @@ class EnvironmentManager:
                 for artifact in required
             ):
                 return
+            if not allow_acquisition:
+                raise EnvironmentError(
+                    "the retained sparse projection is missing artifacts required by this "
+                    "operation; offline verification does not permit acquisition"
+                )
             if self.sparse_acquirer is None:
                 raise EnvironmentError("sparse environment has no configured acquisition source")
             self.sparse_acquirer(lock, roots, capabilities)

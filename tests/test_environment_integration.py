@@ -309,6 +309,13 @@ def test_resolve_publish_and_reopen_offline_from_second_process(
         imported_check = imported.check(source)
         assert imported_check.ok
         assert imported_check.lock_id == lock.lock_id
+    # Offline verification must use only the retained projection. The fixture
+    # registry has stopped here, so any attempted sparse extension fails.
+    imported_verification = imported_runtime.verify("imported", offline=True)
+    assert imported_verification.ok
+    assert any(
+        item.code == "offline_retained_state_verified" for item in imported_verification.checks
+    )
     assert (runtime.store.executions / f"{first.execution_id}.json").is_file()
     assert (runtime.store.executions / f"{repeated.execution_id}.json").is_file()
     version = environment.execute(["lean", "--version"])

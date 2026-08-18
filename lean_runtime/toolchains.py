@@ -92,6 +92,20 @@ class ToolchainManager:
         env["PATH"] = os.pathsep.join((str(elan_home / "bin"), env.get("PATH", "")))
         return env
 
+    def environment_for(self, toolchain: str) -> dict[str, str]:
+        """Return an environment whose nested tools use the selected full toolchain.
+
+        A directly invoked user Lake can spawn ``lake`` or ``lean`` again while
+        scaffolding. Put that already-verified toolchain ahead of private Elan
+        so those nested calls cannot bootstrap a differently spelled release.
+        """
+        env = self.environment
+        name = normalize_toolchain(toolchain)
+        full = self._full_toolchain_dir(name)
+        if (full / "bin" / "lean").is_file():
+            env["PATH"] = os.pathsep.join((str(full / "bin"), env.get("PATH", "")))
+        return env
+
     def elan_path(self, *, bootstrap: bool = True) -> Path:
         override = os.environ.get("LEAN_RUNTIME_ELAN")
         if override:
