@@ -6,48 +6,54 @@
   max-width: 76rem;
 }
 
-.lr-hero {
-  margin: 1.5rem 0 1.25rem;
-  padding: clamp(1.6rem, 4vw, 3.8rem);
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--md-primary-fg-color) 22%, transparent);
-  border-radius: var(--lr-radius);
-  background:
-    radial-gradient(circle at 88% 12%, color-mix(in srgb, var(--md-accent-fg-color) 22%, transparent), transparent 34%),
-    linear-gradient(135deg, color-mix(in srgb, var(--md-primary-fg-color) 14%, var(--md-default-bg-color)), var(--md-default-bg-color) 64%);
+.lr-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(18rem, 0.65fr);
+  gap: clamp(1.5rem, 4vw, 3.5rem);
+  align-items: end;
+  margin: 1.2rem 0 2rem;
+  padding: 1.25rem 0 2rem;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
 }
 
-.lr-hero h1 {
-  max-width: 16ch;
-  margin: 0.25rem 0 0.8rem;
+.lr-intro h1 {
+  max-width: 18ch;
+  margin: 0 0 0.7rem;
   color: var(--md-default-fg-color);
-  font-size: clamp(2.2rem, 6vw, 4.6rem);
-  font-weight: 760;
-  letter-spacing: -0.045em;
-  line-height: 0.98;
+  font-size: clamp(2rem, 4vw, 3rem);
+  font-weight: 720;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
 }
 
-.lr-hero > p:not(.lr-eyebrow) {
-  max-width: 48rem;
-  font-size: 1.05rem;
+.lr-intro-copy > p {
+  max-width: 42rem;
 }
 
-.lr-hero pre {
-  max-width: 38rem;
-  margin-top: 1.5rem;
+.lr-intro-copy > p:last-child {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 0;
 }
 
-.lr-eyebrow {
-  color: var(--md-accent-fg-color);
-  font-size: 0.7rem;
+.lr-primary-link {
   font-weight: 700;
-  letter-spacing: 0.13em;
 }
 
-.lr-proof-line {
-  margin: 0 0 2.8rem;
+.lr-quickstart > p {
+  margin: 0 0 0.35rem;
   color: var(--md-default-fg-color--light);
-  text-align: center;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.lr-quickstart .highlight {
+  margin: 0;
+}
+
+.lr-quickstart pre {
+  margin: 0;
 }
 
 .lr-pipeline {
@@ -72,12 +78,14 @@
 }
 
 @media screen and (max-width: 44.984375em) {
-  .lr-hero {
-    margin-top: 0.5rem;
-    padding: 1.4rem;
+  .lr-intro {
+    grid-template-columns: 1fr;
+    gap: 1.25rem;
+    margin-top: 0.25rem;
+    padding: 0.75rem 0 1.5rem;
   }
 
-  .lr-proof-line {
-    text-align: left;
+  .lr-intro h1 {
+    font-size: 2rem;
   }
 }

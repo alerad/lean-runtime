@@ -4,18 +4,23 @@ hide:
   - toc
 ---
 
-<div class="lr-hero" markdown>
+<div class="lr-intro" markdown>
 
-<span class="lr-eyebrow">LEAN 4 ENVIRONMENTS, WITHOUT THE BUSYWORK</span>
+<div class="lr-intro-copy" markdown>
 
 # Check the proof. Reuse everything else.
 
-Lean Runtime gives standalone files, Lake projects, and Python programs one
-exact, cache-aware way to run Lean. It discovers the right context, reuses
-compatible toolchains and dependencies, and records precisely what ran.
+Exact, cache-aware Lean environments for standalone files, Lake projects, and
+Python—without managing toolchains, dependency checkouts, or caches.
 
-[Get started](getting-started.md){ .md-button .md-button--primary }
-[Explore the CLI](cli.md){ .md-button }
+[Get started](getting-started.md){ .lr-primary-link }
+[CLI reference](cli.md)
+
+</div>
+
+<div class="lr-quickstart" markdown>
+
+**Quick start**
 
 ```bash
 python -m pip install lean-runtime
@@ -24,14 +29,9 @@ lean-runtime check Main.lean
 
 </div>
 
-<div class="lr-proof-line" markdown>
-
-**One command** · **Exact dependency graphs** · **Warm and offline reuse** ·
-**Structured provenance**
-
 </div>
 
-## Start from where you are
+## Choose your workflow
 
 <div class="grid cards" markdown>
 

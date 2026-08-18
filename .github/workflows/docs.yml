@@ -37,7 +37,7 @@ jobs:
           html = Path("site/index.html").read_text(encoding="utf-8")
           if "Check the proof. Reuse everything else." not in html:
               raise SystemExit("landing-page headline was not rendered")
-          if 'class="lr-hero" markdown' in html:
+          if 'class="lr-intro" markdown' in html:
               raise SystemExit("landing-page Markdown was emitted as raw text")
           if 'class="grid cards" markdown' in html:
               raise SystemExit("landing-page cards were emitted as raw text")
