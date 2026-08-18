@@ -88,6 +88,58 @@ def test_is_installed_lists_toolchains_without_running_lean(
     assert all(command[1:] == ["toolchain", "list"] for command in calls)
 
 
+def test_existing_user_elan_toolchain_is_reused_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user_home = tmp_path / "user"
+    elan_home = user_home / ".elan"
+    elan = elan_home / "bin" / ("elan.exe" if os.name == "nt" else "elan")
+    elan.parent.mkdir(parents=True)
+    elan.write_text("")
+    toolchain = "leanprover/lean4:v4.33.0"
+    directory = elan_home / "toolchains" / "leanprover--lean4---v4.33.0" / "bin"
+    directory.mkdir(parents=True)
+    (directory / "lean").write_text("")
+    (directory / "lake").write_text("")
+    monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.setenv("PATH", str(elan.parent))
+    monkeypatch.delenv("LEAN_RUNTIME_ELAN", raising=False)
+    monkeypatch.delenv("LEAN_RUNTIME_ELAN_HOME", raising=False)
+
+    manager = ToolchainManager(tmp_path / "runtime")
+    assert manager.ensure_full(toolchain) == toolchain
+    assert manager.command(toolchain, "lean", "--version") == [
+        str(directory / "lean"),
+        "--version",
+    ]
+    monkeypatch.setattr(manager, "has_slim", lambda _name: True)
+    with pytest.raises(ToolchainError, match="user-managed"):
+        manager.prune_original(toolchain)
+
+
+def test_package_manager_elan_uses_the_default_user_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user_home = tmp_path / "user"
+    manager_bin = tmp_path / "package-manager" / "bin"
+    manager_bin.mkdir(parents=True)
+    elan = manager_bin / "elan"
+    elan.write_text("#!/bin/sh\n")
+    elan.chmod(0o755)
+    toolchain = "leanprover/lean4:v4.32.2"
+    lean = user_home / ".elan" / "toolchains" / "leanprover--lean4---v4.32.2" / "bin" / "lean"
+    lean.parent.mkdir(parents=True)
+    lean.write_text("")
+    (lean.parent / "lake").write_text("")
+    monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.setenv("PATH", str(manager_bin))
+    monkeypatch.delenv("LEAN_RUNTIME_ELAN", raising=False)
+    monkeypatch.delenv("LEAN_RUNTIME_ELAN_HOME", raising=False)
+
+    manager = ToolchainManager(tmp_path / "runtime")
+    assert manager.command(toolchain, "lean") == [str(lean)]
+
+
 def test_executable_digest_identifies_the_exact_toolchain_binary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -95,6 +147,7 @@ def test_executable_digest_identifies_the_exact_toolchain_binary(
     toolchain = "leanprover/lean4:v4.33.0"
     binary = manager._elan_toolchain_dir(toolchain) / "bin" / "lake"
     binary.parent.mkdir(parents=True)
+    (binary.parent / "lean").write_bytes(b"exact lean binary")
     binary.write_bytes(b"exact lake binary")
     monkeypatch.setattr(manager, "ensure", lambda _toolchain: toolchain)
 

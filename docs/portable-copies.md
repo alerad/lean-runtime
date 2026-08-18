@@ -4,8 +4,8 @@ Lean Runtime can move an already built environment between compatible machines
 without rebuilding its Lake packages:
 
 ```bash
-lean-runtime copy save research-stack --output research-stack.lean-environment
-lean-runtime --home /tmp/fresh copy open research-stack.lean-environment --name research-stack
+lean-runtime env export research-stack --output research-stack.lean-environment
+LEAN_RUNTIME_HOME=/tmp/fresh lean-runtime env import research-stack.lean-environment --name research-stack
 ```
 
 The equivalent Python API is:
@@ -80,15 +80,15 @@ Old blobs can be included in garbage collection explicitly:
 
 ```bash
 # Preview, then apply after reviewing the candidates.
-lean-runtime clean --include-downloads
-lean-runtime clean --include-downloads --execute
+lean-runtime clean --all --dry-run
+lean-runtime clean --all --yes
 ```
 
 OCI blobs referenced by ready environments are retained. Sparse CAS
 artifacts may be reclaimed because ready projections hold their own hardlink or
 copy; sparse acquisition holds a collection lease across unpacking and
 projection, and per-artifact locks and recency updates cover publication and
-reuse, so a concurrent `clean --include-downloads` cannot reclaim an artifact
+reuse, so a concurrent `clean --all` cannot reclaim an artifact
 that is being projected.
 
 ### Required publisher verification
@@ -120,8 +120,8 @@ Signature failure is an integrity failure and never triggers source fallback.
 Check push access without building or uploading an environment:
 
 ```bash
-lean-runtime publish environment \
-  --publish-to ghcr.io/OWNER/lean-environments \
+lean-runtime env publish \
+  --to ghcr.io/OWNER/lean-environments \
   --check-access
 ```
 
@@ -155,8 +155,8 @@ Publish the current platform after ensuring the lock:
 export LEAN_RUNTIME_REGISTRY_USERNAME=alerad
 export LEAN_RUNTIME_REGISTRY_PASSWORD="$GHCR_TOKEN"
 
-lean-runtime publish environment environment.lock.json \
-  --publish-to ghcr.io/OWNER/lean-environments \
+lean-runtime env publish environment.lock.json \
+  --to ghcr.io/OWNER/lean-environments \
   --tag v4.32.2.4 \
   --sign --attest
 ```
@@ -218,8 +218,8 @@ For a build matrix, have each platform publish without changing the canonical
 index and retain its JSON result:
 
 ```bash
-lean-runtime publish environment environment.lock.json \
-  --publish-to ghcr.io/OWNER/lean-environments \
+lean-runtime env publish environment.lock.json \
+  --to ghcr.io/OWNER/lean-environments \
   --platform-only > platform-result.json
 ```
 
@@ -227,7 +227,7 @@ After collecting the result files, one final job publishes the deterministic
 multi-platform index and human aliases:
 
 ```bash
-lean-runtime finalize environment "$LOCK_ID" results/*.json \
+lean-runtime env finalize "$LOCK_ID" results/*.json \
   --library ghcr.io/OWNER/lean-environments \
   --tag "$GITHUB_REF_NAME"
 ```

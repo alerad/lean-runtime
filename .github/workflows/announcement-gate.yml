@@ -112,10 +112,10 @@ jobs:
           lock="catalog/locks/$CATALOG_ID.lock.json"
           lean-runtime --home "$acceptance_home" \
             --library ghcr.io/alerad/lean-runtime-cache \
-            --availability required download "$lock" --name acceptance
+            --availability required env acquire "$lock" --name acceptance --download-only
           lean-runtime --home "$acceptance_home" verify acceptance --offline
           printf 'import %s\n' "$ROOT_MODULE" > UserMain.lean
           if [[ "$ROOT_MODULE" == "Mathlib" ]]; then
             printf 'example : 2 + 2 = 4 := by norm_num\n' >> UserMain.lean
           fi
-          lean-runtime --home "$acceptance_home" check acceptance UserMain.lean
+          lean-runtime --home "$acceptance_home" check UserMain.lean --using env:acceptance

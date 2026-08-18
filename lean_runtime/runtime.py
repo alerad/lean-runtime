@@ -375,13 +375,13 @@ class Runtime:
                 raise DownloadLimitExceeded(
                     "acquisition cost is incomplete because no published slim runtime or "
                     "environment could be priced; refusing to continue under a download "
-                    "limit; inspect components with lean-run --plan"
+                    "limit; inspect components with `lean-runtime check FILE --plan`"
                 )
             if isinstance(planned, int) and planned > self.max_download_bytes:
                 raise DownloadLimitExceeded(
                     f"acquiring this check downloads {planned} bytes, above the configured "
                     f"limit of {self.max_download_bytes} bytes; inspect components with "
-                    "lean-run --plan"
+                    "lean-runtime check FILE --plan"
                 )
         if not destination.is_dir() and self.availability != "local":
             rejections: list[str] = []
@@ -1155,9 +1155,9 @@ class Runtime:
                 except ProjectError as exc:
                     raise ProjectError(
                         f"{exc}\nFor automatic standalone context discovery, use "
-                        "`lean-runtime run FILE` (or `lean-run FILE`).\n"
+                        "`lean-runtime check FILE`.\n"
                         "To select core Lean explicitly, pass an exact toolchain: "
-                        "`lean-runtime check FILE --toolchain v4.33.0`."
+                        "`lean-runtime check FILE --using toolchain:v4.33.0`."
                     ) from exc
                 return local_project.check_file(source_path, policy=selected_policy, cancel=cancel)
         return self.check(
@@ -1204,7 +1204,7 @@ class Runtime:
         if shared is False and project_sharing_enabled(context.root):
             raise ProjectError(
                 "project is attached to shared dependencies; run "
-                "`lean-runtime detach . --execute` before requesting a local build"
+                "`lean-runtime project unshare --yes` before requesting a local build"
             )
         return self._build_project(
             context,
@@ -1402,7 +1402,7 @@ class Runtime:
             raise DownloadLimitExceeded(
                 "the full Lake-capable Lean toolchain is not installed and Elan's download "
                 "size cannot be preflighted; refusing under --max-download; install the "
-                "toolchain first with `lean-runtime install VERSION`"
+                "toolchain first with `lean-runtime toolchain install VERSION`"
             )
         ensure_full = getattr(self.toolchains, "ensure_full", self.toolchains.ensure)
         ensure_full(toolchain)
@@ -1552,7 +1552,7 @@ class Runtime:
             if self.availability == "local":
                 raise ProjectError(
                     "offline update needs an exact local latest-Mathlib graph; "
-                    "run `lean-runtime scan PATH` or pass `--seed-from PROJECT`"
+                    "run `lean-runtime project scan PATH` or `lean-runtime adopt PATH`"
                 )
             environment = self.open_exact(latest.lock, import_roots=("Mathlib",))
             raw_dir = latest.lock.manifest.get("packagesDir", ".lake/packages")
@@ -1713,7 +1713,7 @@ class Runtime:
             names = ", ".join(sorted(entry.name for entry in unsupported))
             raise ProjectError(
                 f"initialization target is not empty: {target} ({names}); choose an empty "
-                "directory or run `lean-runtime init .` inside an existing Lake project"
+                "directory or run `lean-runtime adopt` inside an existing Lake project"
             )
         return entries
 
@@ -1892,7 +1892,7 @@ class Runtime:
                 if self.availability == "local":
                     raise ProjectError(
                         "offline initialization needs an exact local Mathlib graph; "
-                        "run `lean-runtime scan PATH` or pass `--seed-from PROJECT`"
+                        "run `lean-runtime project scan PATH` or `lean-runtime adopt PATH`"
                     )
                 environment = self.open_exact(selected.lock, import_roots=("Mathlib",))
                 raw_packages = selected.lock.manifest.get("packagesDir", ".lake/packages")
@@ -2028,7 +2028,7 @@ class Runtime:
                     generated_git.unlink()
             if target.exists():
                 # Keep an existing directory inode alive. Replacing the directory itself
-                # leaves a shell that invoked `lean-runtime init .` inside an unlinked cwd.
+                # leaves a shell that invoked `lean-runtime new PATH` inside an unlinked cwd.
                 # Staging has already been fully initialized, attached, and probed, so only
                 # its children need a small rollback-safe publication transaction here.
                 published_in_place = True
@@ -2257,7 +2257,7 @@ class Runtime:
         if selected is None:
             raise ToolchainError(
                 "check requires an environment, explicit toolchain, or pinned project; "
-                "use `lean-runtime run FILE` for standalone context discovery"
+                "use `lean-runtime check FILE` for standalone context discovery"
             )
         safe_filename = Path(filename).name
         if not safe_filename.endswith(".lean"):

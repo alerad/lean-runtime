@@ -33,7 +33,7 @@ python scripts/run_compatibility.py compatibility/mathlib-4.32.2.json
 The bundled discovery catalog is generated deterministically from exact locks:
 
 ```bash
-lean-runtime-catalog build catalog/environments.toml \
+lean-runtime catalog build catalog/environments.toml \
   --runtime-home .catalog-runtime \
   --output lean_runtime/discovery/data/catalog.json
 ```

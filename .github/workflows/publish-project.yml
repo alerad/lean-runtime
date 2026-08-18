@@ -90,7 +90,7 @@ jobs:
           PROJECT_PATH: ${{ inputs.project }}
           PROJECT_MODULE: ${{ inputs.module }}
         run: |
-          lean-runtime project inspect "$PROJECT_PATH" --module "$PROJECT_MODULE" --check-remote
+          lean-runtime project info "$PROJECT_PATH" --module "$PROJECT_MODULE" --check-remote
           lean-runtime --verbose project lock "$PROJECT_PATH" --module "$PROJECT_MODULE" \
             --output ../environment.lock.json
           python - <<'PY'
@@ -149,10 +149,10 @@ jobs:
           RESULT: platform-result-${{ matrix.platform }}.json
         run: |
           started=$SECONDS
-          lean-runtime --availability local publish environment environment.lock.json \
-            --publish-to "$LIBRARY" --timeout "$BUILD_TIMEOUT" --accelerate \
+          lean-runtime --availability local env publish environment.lock.json \
+            --to "$LIBRARY" --timeout "$BUILD_TIMEOUT" --accelerate \
             --platform-only --attest > "$RESULT"
-          lean-runtime publish toolchain "${{ needs.resolve.outputs.toolchain }}" \
+          lean-runtime toolchain publish "${{ needs.resolve.outputs.toolchain }}" \
             --library "$LIBRARY" > "toolchain-result-${{ matrix.platform }}.json"
           elapsed=$((SECONDS - started))
           python - "$RESULT" "$elapsed" <<'PY'
@@ -221,10 +221,10 @@ jobs:
           LOCK_ID: ${{ needs.resolve.outputs.lock-id }}
           ALIAS_TAG: ${{ inputs.tag }}
         run: |
-          lean-runtime finalize toolchain \
+          lean-runtime toolchain finalize \
             "${{ needs.resolve.outputs.toolchain }}" results/toolchain-result-*.json \
             --library "$LIBRARY" --sign
-          args=(finalize environment "$LOCK_ID" results/platform-result-*.json \
+          args=(env finalize "$LOCK_ID" results/platform-result-*.json \
             --library "$LIBRARY" --sign)
           if [[ -n "$ALIAS_TAG" ]]; then args+=(--tag "$ALIAS_TAG"); fi
           lean-runtime "${args[@]}" > publication.json
@@ -294,7 +294,7 @@ jobs:
           fi
           download_started=$SECONDS
           if ! lean-runtime --library "$LIBRARY" --availability required \
-            download environment.lock.json --name acceptance; then
+            env acquire environment.lock.json --name acceptance --download-only; then
             if [[ "$REQUIRE_PUBLIC" == "true" ]]; then
               echo "::error::Anonymous download failed. After the first GHCR publication, make the package public in GitHub package settings and rerun this workflow."
             fi

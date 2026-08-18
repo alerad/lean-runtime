@@ -167,9 +167,63 @@ class ToolchainManager:
     def _toolchain_dir_name(name: str) -> str:
         return name.replace("/", "--").replace(":", "---")
 
+    @staticmethod
+    def _toolchain_name(directory: str) -> str:
+        return directory.replace("---", ":").replace("--", "/")
+
+    def available_toolchains(self) -> tuple[str, ...]:
+        """List private, slim, and safely detected user toolchains."""
+        roots = [self.elan_home / "toolchains", self.slim_root]
+        user_home = self._user_elan_home()
+        if user_home is not None:
+            roots.append(user_home / "toolchains")
+        names: set[str] = set()
+        for root in roots:
+            if not root.is_dir():
+                continue
+            names.update(
+                self._toolchain_name(path.name)
+                for path in root.iterdir()
+                if path.is_dir() and (path / "bin" / "lean").is_file()
+            )
+        return tuple(sorted(names))
+
     def _elan_toolchain_dir(self, name: str) -> Path:
         elan_home = Path(os.environ.get("LEAN_RUNTIME_ELAN_HOME", self.elan_home))
         return elan_home / "toolchains" / self._toolchain_dir_name(name)
+
+    def _user_elan_home(self) -> Path | None:
+        """Find an ordinary user Elan home without taking ownership of it."""
+        if os.environ.get("LEAN_RUNTIME_ELAN") or os.environ.get("LEAN_RUNTIME_ELAN_HOME"):
+            return None
+        candidates: list[Path] = []
+        discovered = shutil.which("elan")
+        if discovered:
+            candidates.append(Path(discovered).expanduser().absolute().parent.parent)
+        candidates.append(Path.home() / ".elan")
+        private = self.elan_home.resolve()
+        for candidate in candidates:
+            try:
+                selected = candidate.resolve()
+            except OSError:
+                continue
+            if selected != private and (selected / "toolchains").is_dir():
+                return selected
+        return None
+
+    def _user_toolchain_dir(self, name: str) -> Path | None:
+        home = self._user_elan_home()
+        if home is None:
+            return None
+        directory = home / "toolchains" / self._toolchain_dir_name(name)
+        return directory if (directory / "bin" / "lean").is_file() else None
+
+    def _full_toolchain_dir(self, name: str) -> Path:
+        private = self._elan_toolchain_dir(name)
+        if (private / "bin" / "lean").is_file():
+            return private
+        external = self._user_toolchain_dir(name)
+        return external if external is not None else private
 
     @property
     def slim_root(self) -> Path:
@@ -188,7 +242,7 @@ class ToolchainManager:
     def is_available_locally(self, toolchain: str) -> bool:
         """Check for a usable local toolchain without bootstrapping or network access."""
         name = normalize_toolchain(toolchain)
-        full = self._elan_toolchain_dir(name)
+        full = self._full_toolchain_dir(name)
         return self.has_slim(name) or (full / "bin" / "lean").is_file()
 
     def materialize_slim(self, toolchain: str, *, verify: bool = True) -> SlimManifest:
@@ -198,7 +252,7 @@ class ToolchainManager:
         afterwards to realize the disk saving.
         """
         name = self.ensure(toolchain)
-        source = self._elan_toolchain_dir(name)
+        source = self._full_toolchain_dir(name)
         if not source.is_dir():
             raise ToolchainError(
                 f"toolchain {name!r} is not present as a full installation; "
@@ -242,6 +296,12 @@ class ToolchainManager:
             raise ToolchainError(
                 f"refusing to prune {name!r}: no verified slim toolchain is present"
             )
+        external = self._user_toolchain_dir(name)
+        if external is not None and not (self._elan_toolchain_dir(name) / "bin" / "lean").is_file():
+            raise ToolchainError(
+                "refusing to prune a user-managed Elan toolchain; Lean Runtime only removes "
+                "toolchains from its private store"
+            )
         process = LocalBackend().execute(
             [str(self.elan_path()), "toolchain", "uninstall", name],
             cwd=self.home,
@@ -262,7 +322,7 @@ class ToolchainManager:
     def ensure(self, toolchain: str, *, cancel: threading.Event | None = None) -> str:
         """Install a toolchain if necessary and return its normalized name."""
         name = normalize_toolchain(toolchain)
-        if self.has_slim(name) or (self._elan_toolchain_dir(name) / "bin" / "lean").is_file():
+        if self.has_slim(name) or (self._full_toolchain_dir(name) / "bin" / "lean").is_file():
             return name
         if self.remote_ensure is not None and self.remote_ensure(name, cancel):
             if not self.has_slim(name):
@@ -293,7 +353,7 @@ class ToolchainManager:
     def ensure_full(self, toolchain: str, *, cancel: threading.Event | None = None) -> str:
         """Install the full Lake-capable toolchain even when a slim copy exists."""
         name = normalize_toolchain(toolchain)
-        directory = self._elan_toolchain_dir(name)
+        directory = self._full_toolchain_dir(name)
         if (directory / "bin" / "lean").is_file() and (directory / "bin" / "lake").is_file():
             return name
         self.events.emit(
@@ -326,7 +386,7 @@ class ToolchainManager:
         remains, its executables are invoked directly.
         """
         name = self.ensure(toolchain)
-        full = self._elan_toolchain_dir(name)
+        full = self._full_toolchain_dir(name)
         full_lean = full / "bin" / "lean"
         if os.name == "nt":
             full_lean = full_lean.with_suffix(".exe")
@@ -340,12 +400,20 @@ class ToolchainManager:
                     "reinstall the full toolchain for this operation"
                 )
             return [str(binary), *args]
+        external = self._user_toolchain_dir(name)
+        if external is not None and full == external:
+            binary = external / "bin" / executable
+            if os.name == "nt":
+                binary = binary.with_suffix(".exe")
+            if not binary.is_file():
+                raise ToolchainError(f"toolchain {name!r} does not provide {executable!r}")
+            return [str(binary), *args]
         return [str(self.elan_path()), "run", name, executable, *args]
 
     def executable_digest(self, toolchain: str, executable: str) -> str:
         """Hash the exact resolved executable for compatibility-cache identities."""
         name = self.ensure(toolchain)
-        full = self._elan_toolchain_dir(name)
+        full = self._full_toolchain_dir(name)
         full_lean = full / "bin" / "lean"
         if os.name == "nt":
             full_lean = full_lean.with_suffix(".exe")

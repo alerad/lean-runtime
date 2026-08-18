@@ -13,7 +13,7 @@ from .errors import DiscoveryError
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="lean-runtime-catalog",
+        prog="lean-runtime catalog",
         description="Build a canonical catalog from exact Lean Runtime locks.",
     )
     parser.add_argument("command", choices=("build",))
@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime=Runtime(home=args.runtime_home, libraries=()),
         )
     except DiscoveryError as exc:
-        print(f"lean-runtime-catalog: {exc}", file=sys.stderr)
+        print(f"lean-runtime catalog: {exc}", file=sys.stderr)
         return 2
     print(
         f"wrote {args.output}: {len(catalog.entries)} environments, "

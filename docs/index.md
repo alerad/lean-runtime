@@ -6,7 +6,7 @@ exact reusable environment, then returns structured results and a record of what
 was used.
 
 ```text
-lean-runtime run FILE / lean-run FILE / lean.setup(CONTEXT)
+lean-runtime check FILE / lean.setup(CONTEXT)
                 │
                 ├── pinned local project ───────────> ProjectEnvironment
                 └── dependencies / exact lock ─────> Environment
@@ -17,9 +17,9 @@ lean-runtime run FILE / lean-run FILE / lean.setup(CONTEXT)
                                                ExecutionResult + provenance
 ```
 
-- `lean-runtime run FILE` discovers or selects context for one file.
-- `lean-runtime check` operates in a known environment or pinned project.
-- `lean-run FILE` is a shortcut for `lean-runtime run FILE`.
+- `lean-runtime check FILE` discovers or selects context for one file.
+- `lean-runtime check` checks the current pinned Lake project.
+- `lean-runtime adopt` safely shares dependencies from existing projects.
 
 It deliberately does not replace the official tools:
 

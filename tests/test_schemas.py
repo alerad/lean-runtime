@@ -219,7 +219,7 @@ def test_publication_access_and_failure_fixtures_match_v1_schema() -> None:
                 "reused_bytes": 6,
                 "reuse_percent": 60.0,
                 "computer_record": {},
-                "consumer_command": "lean-runtime download environment.lock.json",
+                "consumer_command": "lean-runtime env acquire environment.lock.json",
             },
         )
     )

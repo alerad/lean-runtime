@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 4.0.0 - 2026-08-18
+
+- Replace the implementation-shaped CLI with a cwd-first workflow: `new`,
+  `adopt`, universal `check`, `watch`, `build`, `update`, `publish`, `status`,
+  `verify`, `doctor`, and `clean`.
+- Remove the `lean-run` and `lean-runtime-catalog` entry points and all v3
+  compatibility spellings. Exact environment operations now live under `env`;
+  advanced project operations use `project info/scan/share/unshare/lock/export`.
+- Merge standalone discovery into `lean-runtime check`. A single `--using`
+  override replaces the old project, package, lock, environment, and toolchain
+  context flags.
+- Make cwd the implicit subject for project commands. Adoption detects whether
+  its subject is one Lake project or a tree, previews the storage transition,
+  confirms interactively, and preserves atomic rollback.
+- Detect compatible user Elan toolchains automatically and use them read-only.
+  Missing toolchains are still installed in Lean Runtime's private Elan home,
+  and optimization never prunes a user-managed installation.
+- Make cleanup, adoption, updates, publication setup, and safe doctor repairs
+  guided operations. Automation uses `--yes`; inspection uses `--dry-run`.
+
 ## 3.0.3 - 2026-08-18
 
 - Give sparse-environment and slim-toolchain downloads independent progress

@@ -177,7 +177,7 @@ def test_project_publication_workflow_is_a_small_public_caller() -> None:
     workflow = project_publication_workflow(
         library="ghcr.io/example/fixture-environments", module="Fixture"
     )
-    assert "alerad/lean-runtime/.github/workflows/publish-project.yml@v3" in workflow
+    assert "alerad/lean-runtime/.github/workflows/publish-project.yml@v4" in workflow
     assert "library: ghcr.io/example/fixture-environments" in workflow
     assert "module: Fixture" in workflow
     assert "public: true" in workflow
@@ -189,33 +189,8 @@ def test_project_publication_workflow_rejects_invalid_module(module: str) -> Non
         project_publication_workflow(library="ghcr.io/example/fixture", module=module)
 
 
-def test_project_init_publish_writes_workflow_and_refuses_overwrite(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    project = _project(tmp_path / "project")
-    output = project / ".github" / "workflows" / "publish.yml"
-    arguments = [
-        "--home",
-        str(tmp_path / "runtime"),
-        "project",
-        "init-publish",
-        str(project),
-        "--module",
-        "Fixture",
-        "--library",
-        "ghcr.io/example/fixture",
-        "--output",
-        str(output),
-    ]
-    assert main(arguments) == 0
-    assert output.is_file()
-    assert "Created" in capsys.readouterr().out
-    assert main(arguments) == 2
-    assert "already exists" in capsys.readouterr().err
-
-
 def test_invalid_library_is_a_concise_cli_error(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["--library", "not-a-library", "environments"]) == 2
+    assert main(["--library", "not-a-library", "env", "list"]) == 2
     error = capsys.readouterr().err
     assert "invalid environment library" in error
     assert "Traceback" not in error

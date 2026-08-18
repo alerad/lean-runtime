@@ -156,7 +156,9 @@ def main() -> int:
 
     def plan(name: str, source: str) -> tuple[bool, dict[str, object]]:
         code, output, elapsed = run(
-            ["lean-run", source, "--plan", "--json"], timeout=WARM_TIMEOUT, env=env
+            ["lean-runtime", "check", source, "--plan", "--json"],
+            timeout=WARM_TIMEOUT,
+            env=env,
         )
         try:
             value = json.loads(output)
@@ -167,7 +169,7 @@ def main() -> int:
         steps.append(
             {
                 "name": name,
-                "command": ["lean-run", source, "--plan", "--json"],
+                "command": ["lean-runtime", "check", source, "--plan", "--json"],
                 "exit_code": code,
                 "elapsed_seconds": round(elapsed, 2),
                 "ok": ok,
@@ -204,7 +206,8 @@ def main() -> int:
     cold_ok = step(
         "cold-narrow-no-source-build",
         [
-            "lean-run",
+            "lean-runtime",
+            "check",
             narrow_lean,
             "--no-source-build",
             "--lock-out",
@@ -233,20 +236,27 @@ def main() -> int:
     ok = ok and full_budget_ok
     full_ok = step(
         "complete-Mathlib-closure",
-        ["lean-run", main_lean, "--lock", str(lock_path), "--no-source-build"],
+        [
+            "lean-runtime",
+            "check",
+            main_lean,
+            "--using",
+            str(lock_path),
+            "--no-source-build",
+        ],
         timeout=arguments.cold_timeout,
     )
     ok = full_ok and ok
     warm_ok = step(
         "warm",
-        ["lean-run", main_lean],
+        ["lean-runtime", "check", main_lean],
         timeout=WARM_TIMEOUT,
         limit=WARM_LIMIT,
     )
     ok = warm_ok and ok
     diagnostic_ok = step(
         "failing-proof-diagnostics",
-        ["lean-run", fail_lean, "--lock", str(lock_path)],
+        ["lean-runtime", "check", fail_lean, "--using", str(lock_path)],
         timeout=WARM_TIMEOUT,
         expect_exit=1,
         require="Fail.lean",
@@ -255,7 +265,7 @@ def main() -> int:
     ok = diagnostic_ok and ok
     replay_ok = step(
         "lock-reproducibility",
-        ["lean-run", main_lean, "--lock", str(lock_path)],
+        ["lean-runtime", "check", main_lean, "--using", str(lock_path)],
         timeout=WARM_TIMEOUT,
         limit=WARM_LIMIT,
     )

@@ -1,4 +1,4 @@
-"""Zero-configuration command for checking one Lean file."""
+"""Internal zero-configuration discovery engine used by the v4 check command."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ from .wire import envelope, error, serialize_execution_v1
 
 
 def add_run_arguments(parser: argparse.ArgumentParser, *, standalone: bool = True) -> None:
-    """Register the front-door arguments shared by `lean-run` and `lean-runtime run`.
+    """Register the internal standalone-discovery argument contract.
 
     With ``standalone=False`` the options that also exist as `lean-runtime`
     global options use ``argparse.SUPPRESS`` defaults, so a value parsed by the
@@ -120,12 +120,12 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, standalone: bool = Tru
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
-        prog="lean-run",
+        prog="lean-runtime-internal-discovery",
         description=(
             "Discover or select an exact Lean context and check one file. "
-            "Shortcut for `lean-runtime run`."
+            "Used internally by `lean-runtime check`."
         ),
-        epilog="Equivalent canonical spelling: lean-runtime run FILE",
+        epilog="Public spelling: lean-runtime check FILE",
     )
     add_run_arguments(root, standalone=True)
     return root
@@ -335,8 +335,12 @@ def _render_plan(report: dict[str, Any], *, as_json: bool) -> None:
         print(f"Download limit: {format_byte_size(limit)} ({'ok' if allowed else 'exceeded'})")
 
 
-def run(arguments: argparse.Namespace, *, command_name: str = "lean-run") -> int:
-    """Execute the shared front-door workflow for `lean-run` and `lean-runtime run`."""
+def run(
+    arguments: argparse.Namespace,
+    *,
+    command_name: str = "lean-runtime-internal-discovery",
+) -> int:
+    """Execute standalone context selection for the public `check` command."""
     source_path = arguments.file.expanduser().resolve()
     renderer = ConsoleRenderer(
         mode="quiet" if arguments.quiet or arguments.json else None,
@@ -549,7 +553,7 @@ def run(arguments: argparse.Namespace, *, command_name: str = "lean-run") -> int
 
 
 def main(argv: list[str] | None = None) -> int:
-    return run(parser().parse_args(argv), command_name="lean-run")
+    return run(parser().parse_args(argv))
 
 
 if __name__ == "__main__":
