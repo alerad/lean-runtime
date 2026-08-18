@@ -1,88 +1,33 @@
 # Standalone Lean files
 
-`lean-runtime run` — and its `lean-run` shortcut — chooses one execution
-context using the following precedence:
+```bash
+lean-runtime check Main.lean
+```
 
-1. `--lock` or a frontmatter `lock`;
-2. `--with` or frontmatter `requires`;
-3. an explicit `--toolchain` or frontmatter `toolchain`;
-4. the nearest pinned local Lake project discovered from the file;
-5. bounded discovery from the bundled exact-environment catalog;
-6. an actionable discovery or missing-context error.
+Outside a pinned Lake project, `check` analyzes imports and syntax, ranks a
+bounded catalog of exact environments, acquires a verified capsule or builds
+from exact source according to policy, and runs Lean with logical paths in its
+diagnostics. Inside a project, the same command uses Lake project semantics.
 
-Conflicting CLI and frontmatter declarations are rejected. Imports filter and
-rank curated exact catalog entries; they are never treated as proof that an
-environment is compatible. Runtime materializes each bounded candidate and
-Lean authoritatively checks the source before discovery can succeed.
-
-The bundled bootstrap catalog contains core Lean v4.32.2, exact Mathlib v4.30.0
-through v4.33.0 locks, and matching LeanCert releases. `--catalog PATH` selects
-another validated catalog and `--no-discover` restores strict explicit-context
-behavior. Otherwise-equivalent candidates prefer the smallest dependency closure,
-so ordinary Mathlib files do not select the larger LeanCert environment.
-
-Three budgets bound the work independently:
-
-- `--max-candidates` and `--search-timeout` bound the search itself: ranking
-  plus compiler probes.
-- `--check-timeout` bounds each Lean invocation.
-- `--acquire-timeout` bounds downloading, installing, or building one
-  candidate environment, including its source build. Acquisition never
-  consumes the search budget, so a slow first-time toolchain download cannot
-  expire an otherwise healthy search.
-
-`--discovery-timeout` and `--timeout` remain as deprecated aliases of
-`--search-timeout` and `--check-timeout`.
-
-## Frontmatter format
-
-The block must appear before Lean source and uses TOML encoded in Lean comments:
+Put durable context in the file:
 
 ```lean
 -- /// lean-runtime
--- requires = ["leancert@v4.33.0"]
--- toolchain = "leanprover/lean4:v4.33.0"
+-- requires = ["mathlib@v4.33.0"]
 -- ///
 ```
 
-Supported fields are:
+or override once:
 
-- `requires`: an array of exact friendly package references;
-- `toolchain`: an optional compatibility override for those dependencies, or
-  the pinned toolchain for a core-only file;
-- `lock`: an exact lock path, resolved relative to the Lean file.
-
-`lock` cannot be combined with `requires` or `toolchain`. Unknown fields, malformed TOML,
-non-comment content inside the block, and late frontmatter are errors.
-
-## Lock output
-
-`--lock-out PATH` is valid with dependency declarations or automatic discovery.
-It writes the canonical successful lock, ensures the environment, and still
-checks the file. It cannot be combined with an exact input lock or a mutable
-local project.
-
-Discovery tries local and downloadable environments before a source build.
-`--no-source-build` forbids that fallback; `--offline` permits retained local
-environments only.
-
-## Output
-
-Human output is concise, and error locations name the file you passed rather
-than an internal staging path:
-
-```text
-✓ Main.lean accepted in 0.42s
+```bash
+lean-runtime check Main.lean --using mathlib@v4.33.0
+lean-runtime check Main.lean --using lock:environment.lock.json
+lean-runtime check Main.lean --using toolchain:v4.33.0
 ```
 
-```text
-proofs/Bad.lean:1:23: error: Type mismatch
-✗ proofs/Bad.lean rejected in 0.35s
-```
+`--offline` is fail-closed. `--using env:NAME` selects an already-opened named
+environment. Frontmatter rejects malformed TOML, unknown fields, late blocks,
+and conflicting selectors before acquisition.
 
-Only the checked file's own path is rewritten; dependency paths in compiler
-output are shown as Lean printed them.
-
-Cold operations report meaningful dependency, cache, and build phases on
-stderr. `--quiet` suppresses progress and `--json` emits the complete structured
-`ExecutionResult` without progress messages.
+Use `watch FILE` for edit/check loops, `--repeat N` for repeated measurement,
+and `--matrix [FILE]` for compatibility checks.

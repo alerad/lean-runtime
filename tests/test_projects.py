@@ -210,7 +210,7 @@ def test_runtime_check_file_suggests_toolchain_for_a_standalone_file(tmp_path: P
     source.write_text("example : True := by trivial\n")
     runtime = Runtime(home=tmp_path / "runtime", libraries=[])
 
-    with pytest.raises(ProjectError, match=r"check FILE --toolchain v4\.33\.0"):
+    with pytest.raises(ProjectError, match=r"--using toolchain:v4\.33\.0"):
         runtime.check_file(source)
 
 
@@ -359,7 +359,7 @@ def test_attach_replaces_only_packages_and_detach_materializes_them(tmp_path: Pa
     assert checked.provenance.packages[0].tree_hash
     assert checked.provenance.project is not None
     assert checked.provenance.project.workspace_id == attached.results[0].workspace_id
-    with pytest.raises(ProjectError, match="detach"):
+    with pytest.raises(ProjectError, match="unshare"):
         runtime.build(source, shared=False)
     detach_plan = runtime.plan_project_detachment(source)
     assert detach_plan.ready

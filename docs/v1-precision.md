@@ -3,7 +3,7 @@
 Ordinary checks stay deliberately small:
 
 ```bash
-lean-runtime run Main.lean
+lean-runtime check Main.lean
 ```
 
 The v1 precision tools are opt-in and reuse the same locks, environments, and execution
@@ -27,8 +27,8 @@ inventory differences as warnings: source/probe trust and byte equality are dist
 ## Explain context and reuse
 
 ```bash
-lean-runtime run Main.lean --explain
-lean-runtime inspect research-stack --explain
+lean-runtime status Main.lean
+lean-runtime env info research-stack --explain
 ```
 
 The first command only explains routing and does not execute Lean. Environment inspection
@@ -37,8 +37,8 @@ reports stable decision codes, resolved identity, origin, and platform compatibi
 ## Diff
 
 ```bash
-lean-runtime compare old.lock.json new.lock.json
-lean-runtime compare old-environment new-environment --json
+lean-runtime env diff old.lock.json new.lock.json
+lean-runtime env diff old-environment new-environment --json
 ```
 
 Diff compares identity inputs rather than directories. Package order is ignored; changed
@@ -47,9 +47,9 @@ commits and unchanged trees remain separately visible.
 ## Timings and profiles
 
 ```bash
-lean-runtime run Main.lean --timings
-lean-runtime --timings check --environment research-stack Main.lean
-lean-runtime check --environment research-stack Main.lean --warmup 1 --repeat 5
+lean-runtime check Main.lean --timings
+lean-runtime check Main.lean --using env:research-stack
+lean-runtime check Main.lean --using env:research-stack --warmup 1 --repeat 5
 ```
 
 Warmups are excluded. Every measured sample remains an ordinary persisted execution with a
@@ -71,7 +71,7 @@ requires = ["mathlib@v4.32.2"]
 ```
 
 ```bash
-lean-runtime check Main.lean --across matrix.toml --concurrency 2
+lean-runtime check Main.lean --matrix matrix.toml --concurrency 2
 ```
 
 Each context uses exactly one of `requires`, `lock`, `environment`, `toolchain`, or
@@ -82,8 +82,8 @@ entries from beginning execution.
 
 ## Machine-readable output
 
-The versioned precision surfaces — execution results (`run` and its `lean-run`
-alias and `check`), acquisition plans (`run --plan`), multi-file
+The versioned precision surfaces — execution results (`check`
+alias and `check`), acquisition plans (`check --plan`), multi-file
 check batches, `verify`, `compare`, `profile`, `matrix`, `inspect`, `clean`,
 and `publish environment` — emit a closed envelope:
 

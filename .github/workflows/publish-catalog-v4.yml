@@ -15,7 +15,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: lean-runtime-catalog-v3
+  group: lean-runtime-catalog-v4
   cancel-in-progress: false
 
 jobs:
@@ -84,18 +84,18 @@ jobs:
             "$LOCK_PATH")
           # Publication needs the full toolchain both to inventory/probe the
           # capsule and to derive its independently verified slim successor.
-          lean-runtime --home "$runtime_home" install "$toolchain"
+          lean-runtime --home "$runtime_home" toolchain install "$toolchain"
           if [[ "$ENTRY_ID" == core-* ]]; then
             lean-runtime --home "$runtime_home" --availability auto \
-              --library "$LIBRARY" open "$LOCK_PATH" --name publisher
+              --library "$LIBRARY" env acquire "$LOCK_PATH" --name publisher
           else
             lean-runtime --home "$runtime_home" --availability required \
-              --library "$LIBRARY" download "$LOCK_PATH" --name publisher
+              --library "$LIBRARY" env acquire "$LOCK_PATH" --name publisher --download-only
           fi
           lean-runtime --home "$runtime_home" --availability local \
-            publish environment "$LOCK_PATH" --publish-to "$LIBRARY" \
+            env publish "$LOCK_PATH" --to "$LIBRARY" \
             --platform-only --attest > "environment-$RESULT_SUFFIX.json"
-          lean-runtime --home "$runtime_home" publish toolchain "$toolchain" \
+          lean-runtime --home "$runtime_home" toolchain publish "$toolchain" \
             --library "$LIBRARY" > "toolchain-$RESULT_SUFFIX.json"
       - uses: actions/upload-artifact@v7
         with:
@@ -142,9 +142,9 @@ jobs:
           print(lock.lock_id)
           PY
           )
-          lean-runtime finalize toolchain "${identity[0]}" \
+          lean-runtime toolchain finalize "${identity[0]}" \
             results/toolchain-*.json --library "$LIBRARY" --sign
-          lean-runtime finalize environment "${identity[1]}" \
+          lean-runtime env finalize "${identity[1]}" \
             results/environment-*.json --library "$LIBRARY" --sign
 
   verify:

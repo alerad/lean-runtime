@@ -50,7 +50,6 @@ def main() -> int:
         )
         _run([str(python), "-c", probe], cwd=root, environment=clean_environment)
         _run([str(scripts / "lean-runtime"), "--help"], cwd=root, environment=clean_environment)
-        _run([str(scripts / "lean-run"), "--help"], cwd=root, environment=clean_environment)
         if arguments.lean:
             source = root / "Main.lean"
             source.write_text(
@@ -60,7 +59,11 @@ def main() -> int:
                 "example : True := by trivial\n",
                 encoding="utf-8",
             )
-            _run([str(scripts / "lean-run"), str(source)], cwd=root, environment=clean_environment)
+            _run(
+                [str(scripts / "lean-runtime"), "check", str(source)],
+                cwd=root,
+                environment=clean_environment,
+            )
     return 0
 
 

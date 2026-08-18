@@ -40,15 +40,15 @@ changed. The CLI accepts the same metadata as a JSON object through
 Save and open a portable copy:
 
 ```bash
-lean-runtime program save PROGRAM_ID --output my-program.tar.gz
-lean-runtime program open my-program.tar.gz
+lean-runtime program export PROGRAM_ID --output my-program.tar.gz
+lean-runtime program import my-program.tar.gz
 ```
 
 Or use a program library:
 
 ```bash
-lean-runtime program download ghcr.io/example/lean-programs REVISION
-lean-runtime publish program PROGRAM_ID --library ghcr.io/example/lean-programs
+lean-runtime program acquire ghcr.io/example/lean-programs REVISION
+lean-runtime program publish PROGRAM_ID --library ghcr.io/example/lean-programs
 ```
 
 A library can be public or private. Authentication follows the credentials your

@@ -201,7 +201,7 @@ def test_local_runtime_never_falls_through_to_elan_install(tmp_path: Path) -> No
     runtime = Runtime(home=tmp_path / "home", availability="local", libraries=())
 
     with pytest.raises(ToolchainError, match="offline mode does not permit"):
-        runtime.toolchains.ensure("v4.32.2")
+        runtime.toolchains.ensure("v99.99.99")
 
 
 def test_core_environment_never_installs_the_full_toolchain(tmp_path: Path) -> None:

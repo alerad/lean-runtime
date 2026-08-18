@@ -90,7 +90,7 @@ def _lake_metadata(path: Path, toolchain: str, runtime: Runtime) -> tuple[str, t
         if not available(toolchain):
             raise ProjectError(
                 "inspecting lakefile.lean requires its pinned Lean toolchain to be installed; "
-                f"run `lean-runtime install {toolchain}` explicitly, then retry"
+                f"run `lean-runtime toolchain install {toolchain}` explicitly, then retry"
             )
         temporary = tempfile.TemporaryDirectory(prefix="lean-runtime-project-")
         lakefile = Path(temporary.name) / "lakefile.toml"
@@ -306,7 +306,7 @@ permissions:
 
 jobs:
   publish:
-    uses: alerad/lean-runtime/.github/workflows/publish-project.yml@v3
+    uses: alerad/lean-runtime/.github/workflows/publish-project.yml@v4
     with:
       project: .
       library: {library}

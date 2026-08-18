@@ -1,83 +1,48 @@
 # Lean Runtime
 
-Run Lean proofs from Python or a single `.lean` file—without creating a throwaway
-Lake project or rebuilding the same dependencies on every machine.
-
-Lean Runtime discovers the exact Lean environment a project needs and reuses a
-downloadable copy when one is available. It returns structured Lean results
-with a record of the toolchain and dependencies that were actually used.
-
-> **Status:** V1 beta. The local backend runs trusted Lean, Lake, and package code;
-> it is an orchestration boundary, not a security sandbox.
-
-## Install
+Lean Runtime makes Lean projects and standalone proofs work without asking you
+to manage toolchains, dependency checkouts, exact environments, or caches.
 
 ```bash
 python -m pip install lean-runtime
 ```
 
-Lean Runtime manages its own Elan installation on macOS and Linux. Windows
-currently requires `LEAN_RUNTIME_ELAN`.
+## The daily workflow
 
-## Run one Lean file
-
-Lean Runtime's main command is `lean-runtime`; its `run` subcommand discovers a
-context and checks one file. Inside an existing pinned Lake project, just pass
-the file:
+Create a project:
 
 ```bash
-lean-runtime run MyProject/Main.lean
+lean-runtime new MyProof
+cd MyProof
+lean-runtime check
+lean-runtime build
 ```
 
-Standalone files do not need a throwaway Lake project or dependency declaration:
-
-```lean
-import Mathlib
-
-example : 2 + 2 = 4 := by norm_num
-```
+Use an existing pinned Lake project from its directory:
 
 ```bash
-lean-runtime run Main.lean
+lean-runtime check
+lean-runtime adopt
 ```
 
-The shorter `lean-run Main.lean` spelling is an equivalent, permanently
-supported convenience alias; both call the same implementation and produce the
-same results, JSON envelopes, and exit codes.
-
-When no explicit context or pinned Lake project exists, `run` analyzes imports,
-ranks a bounded set of exact environments from its bundled catalog, and asks Lean to
-check each candidate. The successful exact lock is retained by Runtime. Pin it for
-portable reuse whenever desired:
+`adopt` verifies the existing exact dependency graph, previews reuse and disk
+recovery, asks for confirmation, and swaps dependency links atomically. It does
+not change `lean-toolchain` or `lake-manifest.json`. Passing a directory that
+contains several projects discovers them automatically:
 
 ```bash
-lean-runtime run Main.lean --lock-out environment.lock.json
-lean-runtime run Main.lean --lock environment.lock.json
+lean-runtime adopt ~/research
 ```
 
-The bundled catalog covers Mathlib v4.30.0 through v4.33.0 and matching LeanCert
-releases, plus core Lean v4.32.2. Runtime first tries its local store and downloadable
-environment libraries, then builds the exact source environment when necessary. Use
-`--no-source-build` to forbid that potentially large fallback or `--offline` to use
-retained environments only.
-
-Before a cold run, inspect its cost without changing the store:
+Check a standalone source file:
 
 ```bash
-lean-run Main.lean --plan
-lean-run Main.lean --max-download 2GiB
+lean-runtime check Main.lean
 ```
 
-New-format libraries publish two independently verified pieces: a slim Lean
-check runtime and seekable module packs. Lean Runtime computes the source's
-transitive import closure, downloads only the corresponding compressed frames,
-and shares verified module artifacts across Mathlib, LeanCert, and future
-environments. A warm check is silent apart from its result. Environment
-libraries publish and serve capsules only; a complete source-bearing
-environment is still available locally through a source build or a portable
-copy.
-
-Explicit frontmatter remains available when the desired context is already known:
+The same command uses the nearest pinned Lake project when one exists and
+otherwise performs bounded exact-environment discovery. A file can carry its
+context in strict comment frontmatter:
 
 ```lean
 -- /// lean-runtime
@@ -85,206 +50,114 @@ Explicit frontmatter remains available when the desired context is already known
 -- ///
 
 import Mathlib
+example : 2 + 2 = 4 := by norm_num
 ```
 
-The same context can be supplied from the command line:
+When inference needs an override, there is one spelling:
 
 ```bash
-lean-run Main.lean --with mathlib@v4.33.0
+lean-runtime check Main.lean --using mathlib@v4.33.0
+lean-runtime check Main.lean --using environment.lock.json
+lean-runtime check Main.lean --using research-stack
+lean-runtime check Main.lean --using lean:v4.33.0
+lean-runtime check Main.lean --using ~/proofs/MyProject
 ```
 
-Create an exact lock from an explicit dependency for CI without changing the file:
+Typed `package:`, `lock:`, `env:`, `toolchain:`, and `project:` prefixes resolve
+rare ambiguities. Persistent store, registry, and trust policy belongs in
+environment configuration rather than everyday command lines.
+
+## Commands
+
+The normal surface is deliberately small:
+
+```text
+new NAME       create a project
+adopt [PATH]   share dependencies from existing project(s)
+check [PATH…]  check a project, directory, source file, or stdin
+watch FILE     re-check on save
+build [TARGET] build the current project
+update         preview and apply a safe project update
+publish        configure verified project publication
+status [PATH]  explain the selected project or environment
+verify SUBJECT verify an exact artifact
+doctor         diagnose and offer safe repairs
+clean          preview and reclaim unused storage
+```
+
+Project commands use the current directory when no path is supplied. Guided
+mutations show their plan and ask before changing anything; automation passes
+`--yes`, and inspection-only calls pass `--dry-run`.
+
+Persistent registry, availability, store, and publisher-trust policy belongs
+in `~/.config/lean-runtime/config.toml`; the nearest project's
+`lean-runtime.toml` can override it. Daily commands therefore normally need no
+configuration flags.
+
+Exact and operator workflows live under noun namespaces:
+
+```text
+env       list · info · lock · acquire · diff · export · import
+project   info · scan · share · unshare · lock · export
+program   create · run · info · acquire · export · import · publish
+toolchain list · info · install · optimize
+storage   usage · verify
+catalog   catalog maintenance
+```
+
+There are no v3 command aliases. `run`, `init`, `prepare`, `open`, `download`,
+`environments`, `inspect`, `compare`, `copy`, `finalize`, `lean-run`, and
+`lean-runtime-catalog` were removed in 4.0.
+
+## Existing Elan installations
+
+Lean Runtime automatically reuses an exact compatible toolchain already
+installed by the user's Elan. This access is read-only: it never changes the
+user's default, installs into the user's Elan home, or removes user toolchains.
+Missing toolchains and downloadable slim checking runtimes remain isolated in
+Lean Runtime's private store. `lean-runtime status` and `doctor` expose the
+choice when it matters.
+
+## Exact environments
 
 ```bash
-lean-run Main.lean --with mathlib@v4.33.0 \
-  --lock-out environment.lock.json
-lean-run Main.lean --lock environment.lock.json
+lean-runtime env lock environment.toml --output environment.lock.json
+lean-runtime env acquire environment.lock.json --name research-stack
+lean-runtime env info research-stack
+lean-runtime env diff previous.lock.json environment.lock.json
+lean-runtime env export research-stack --output research-stack.lean-environment
+lean-runtime env import research-stack.lean-environment --name imported-stack
 ```
+
+Locks are canonical and content-addressed. Full environments preserve source;
+downloaded sparse capsules project only verified import closures and keep the
+same environment identity as their projection grows.
 
 ## Python
-
-Configure an environment once, then use it repeatedly:
 
 ```python
 import lean_runtime as lean
 
-env = lean.setup(["mathlib@v4.33.0"])
-
-result = env.check(
-    """
-    import Mathlib
-    example : 2 + 2 = 4 := by norm_num
-    """
-)
+env = lean.setup(deps=["mathlib@v4.33.0"])
+result = env.check("import Mathlib\nexample : 2 + 2 = 4 := by norm_num\n")
 result.raise_for_error()
 ```
 
-Rejected proofs carry parsed diagnostics:
+The Python API retains the explicit `Runtime`, `EnvironmentSpec`,
+`EnvironmentLock`, project, capture, program, cancellation, and verification
+interfaces for infrastructure code.
 
-```python
-result = env.check(broken_proof)
+## Guarantees and limits
 
-for error in result.errors:
-    print(error.file, error.line, error.message)
+- Exact Git commits, trees, locks, toolchains, platform identities, and artifact
+  digests are verified before an environment becomes ready.
+- Acquisitions and project sharing are staged, probed, and published atomically.
+- User project metadata and user Elan state are not silently rewritten.
+- The local execution backend enforces supported resource limits but is not a
+  network sandbox; unsupported isolation requests fail explicitly.
+- Logical Lean rejections exit 1; invalid/infrastructure invocations exit 2;
+  publication failures retain their documented classified exit statuses.
 
-result.raise_for_error()  # raises LeanCheckError with the same detail
-```
-
-Core-only work does not need a dependency:
-
-```python
-core = lean.setup(toolchain="v4.32.2")
-core.check("example : 2 + 2 = 4 := rfl").raise_for_error()
-```
-
-Batch and asyncio APIs reuse that prepared environment:
-
-```python
-results = env.check_many(generated_proofs, concurrency=8)
-results = await env.check_many_async(generated_proofs, concurrency=20)
-```
-
-Local projects use the same setup pattern while retaining mutable-project
-semantics:
-
-```python
-project = lean.setup(project="./my-project")
-result = project.check_file("./my-project/MyProject/Main.lean")
-```
-
-Create a normal Lake project. The newest stable cataloged Mathlib is the
-default, and exact dependencies are shared automatically:
-
-```bash
-lean-runtime init MyProof
-cd MyProof
-lean-runtime check MyProof/Basic.lean
-lean-runtime check MyProof/Basic.lean --watch
-# Check every declared local library, in Lake dependency order:
-lean-runtime check
-lean-runtime build
-```
-
-`init` also writes an `AGENTS.md` with the project build, checking, dependency,
-and shared-package rules for coding agents. Pass `--no-agents` to omit it; an
-existing `AGENTS.md` is never overwritten. Use `--core` for no Mathlib, or
-`--mathlib-version 4.33.0` to select a cataloged release. `lean-runtime update`
-explicitly moves a project to the newest cataloged Mathlib after a preview.
-
-Running `lean-runtime init .` in an existing pinned Lake project adopts its
-current exact graph without running `lake update`. If you already have many
-Lake checkouts, register them once as local dependency seeds:
-
-```bash
-lean-runtime project scan ~/research
-lean-runtime init .
-```
-
-`init --plan` performs no downloads, installs, or builds; `--max-download
-500MiB` and `--offline`
-enforce cold-start policy. Advanced bulk migration remains available through
-`project attach`, and `project detach --execute` materializes an independent
-project again.
-For a new project, the target may be absent, empty, or an otherwise empty Git
-repository root; existing Git identity and index state are preserved. A custom
-`AGENTS.md` is also allowed and retained. Other existing contents are rejected
-before acquisition rather than overwritten.
-An existing target directory remains the same live directory, so `init .` does
-not invalidate the invoking shell's working directory.
-When the directory spelling is not the intended Lean module capitalization,
-set it explicitly, for example `lean-runtime init . --name IntegralFramework`.
-
-One-shot helpers are available when setup reuse is unnecessary:
-
-```python
-result = lean.check(source, deps=["mathlib@v4.33.0"])
-result = lean.check_file("./my-project/MyProject/Main.lean")
-```
-
-When you need evidence rather than extra setup, the operations CLI can verify, explain,
-compare, and measure the same exact contexts:
-
-```bash
-lean-runtime verify research-stack --offline
-lean-runtime compare previous.lock.json environment.lock.json
-lean-runtime check --environment research-stack Main.lean --repeat 5
-lean-runtime check Main.lean --across compatibility.toml
-```
-
-Use `lean-run Main.lean --explain` to inspect context routing without executing Lean, and
-`--timings` to expose preparation versus execution time. Successful ordinary checks remain
-one concise line.
-
-Friendly references remain exact: use `mathlib@VERSION`,
-`leancert@VERSION`, `owner/repository@REVISION`, or the explicit
-`github:owner/repository@REVISION` form. Bare floating package names are never
-accepted.
-
-## Share environments
-
-A **project** is your ordinary Lake repository. Its **environment** is the exact
-Lean version, dependencies, and build configuration needed to use it. A
-**downloadable environment** is a ready-to-use copy that collaborators and CI
-can fetch instead of rebuilding Mathlib.
-
-Environment libraries may be public or private. For example:
-
-```bash
-lean-runtime --library ghcr.io/owner/lean-environments download environment.lock.json
-lean-runtime publish environment environment.lock.json \
-  --publish-to ghcr.io/owner/lean-environments
-```
-
-Publication verifies push access before doing an expensive build and reports
-which credential source it selected. Run `lean-runtime publish environment
---publish-to ghcr.io/owner/lean-environments --check-access` to test access by
-itself. A registry denial is a nonzero, machine-distinct failure; success is not
-reported until the remote manifest digest is read back and verified.
-
-To publish an existing clean Git-backed Lean project, inspect it and
-generate the maintained multi-platform workflow:
-
-```bash
-lean-runtime project inspect . --module MyProject
-lean-runtime project init-publish . \
-  --module MyProject \
-  --library ghcr.io/owner/my-project-environments
-```
-
-The workflow builds and verifies Linux and macOS environments, finalizes the
-environment and slim-toolchain indexes atomically, then checks clean consumers.
-For a one-machine handoff, `lean-runtime project export` writes a source-free
-portable capsule containing only the selected public module's closure. See
-[Publishing a Lean project](https://alerad.github.io/lean-runtime/project-publishing/).
-
-For an already-built executable, Lean Runtime can also create a verified
-**ready-to-run program**. It opens without rebuilding the project, can be saved
-as a portable copy, and can be shared through a public or private program
-library. See [Ready-to-run programs](https://github.com/alerad/lean-runtime/blob/main/docs/ready-programs.md).
-
-## Technical details
-
-The simple API is backed by exact Git commits and trees, Lake-resolved locks,
-platform-aware content-addressed environments, atomic cross-process builds,
-downloadable environment reuse, sparse content-addressed module packs,
-replayable provenance, verification, and trusted publishers. The libraries use
-OCI-compatible storage internally, but users do not need Docker or container
-concepts. Advanced protocol details remain in the architecture documentation.
-
-## Documentation
-
-- [Getting started](https://github.com/alerad/lean-runtime/blob/main/docs/getting-started.md)
-- [Python API](https://github.com/alerad/lean-runtime/blob/main/docs/python-api.md)
-- [`lean-run` and operations CLI](https://github.com/alerad/lean-runtime/blob/main/docs/cli.md)
-- [Managed environments](https://github.com/alerad/lean-runtime/blob/main/docs/environments.md)
-- [Local Lake projects](https://github.com/alerad/lean-runtime/blob/main/docs/local-projects.md)
-- [Publishing a Lean project](https://github.com/alerad/lean-runtime/blob/main/docs/project-publishing.md)
-- [Portable copies and environment libraries](https://github.com/alerad/lean-runtime/blob/main/docs/portable-copies.md)
-- [Ready-to-run programs](https://github.com/alerad/lean-runtime/blob/main/docs/ready-programs.md)
-- [Architecture](https://github.com/alerad/lean-runtime/blob/main/docs/architecture.md)
-- [Trust and limitations](https://github.com/alerad/lean-runtime/blob/main/docs/trust-and-limitations.md)
-- [V1 release case study](https://github.com/alerad/lean-runtime/blob/main/docs/case-study-v1.md)
-
-## License
-
-Apache License 2.0.
+Documentation lives in [`docs/`](docs/index.md). Start with
+[`docs/getting-started.md`](docs/getting-started.md),
+[`docs/cli.md`](docs/cli.md), and [`docs/local-projects.md`](docs/local-projects.md).
