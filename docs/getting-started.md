@@ -83,10 +83,7 @@ The installed wheel provides one executable: `lean-runtime`.
     import lean_runtime as lean
 
     env = lean.setup(deps=["mathlib@v4.33.0"])
-    result = env.check(
-        "import Mathlib.Data.Nat.Prime.Basic\n"
-        "example : Nat.Prime 5 := by decide\n"
-    )
+    result = env.check("import Mathlib.Data.Nat.Prime.Basic\nexample : Nat.Prime 5 := by decide\n")
     result.raise_for_error()
     print(result.execution_id)
     ```

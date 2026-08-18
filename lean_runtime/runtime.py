@@ -1909,6 +1909,11 @@ class Runtime:
         published_entries: list[Path] = []
         modified_existing: dict[Path, bytes] = {}
         try:
+            # Lake chooses its own release channel during `lake init` when the
+            # destination has no pin. Publish the already-selected exact pin
+            # before invoking it so nested Lake/Elan calls cannot select or
+            # install a spelling different from the one the plan verified.
+            (staging / "lean-toolchain").write_text(plan.toolchain + "\n", encoding="utf-8")
             custom_agents = target / "AGENTS.md"
             if custom_agents.is_file():
                 (staging / "AGENTS.md").write_bytes(custom_agents.read_bytes())
@@ -1921,10 +1926,16 @@ class Runtime:
                 plan.project_name or target.name,
                 "lib",
             )
+            environment_for = getattr(self.toolchains, "environment_for", None)
+            command_environment = (
+                environment_for(plan.toolchain)
+                if callable(environment_for)
+                else self.toolchains.environment
+            )
             process = subprocess.run(
                 command,
                 cwd=staging,
-                env=self.toolchains.environment,
+                env=command_environment,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -1935,6 +1946,7 @@ class Runtime:
                 raise ProjectError(
                     "Lake could not initialize the project" + (f":\n{detail}" if detail else "")
                 )
+            (staging / "lean-toolchain").write_text(plan.toolchain + "\n", encoding="utf-8")
             for existing in existing_entries:
                 if existing.name in {".git", "AGENTS.md"}:
                     continue
@@ -1962,7 +1974,7 @@ class Runtime:
             updated = subprocess.run(
                 update_command,
                 cwd=staging,
-                env=self.toolchains.environment,
+                env=command_environment,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

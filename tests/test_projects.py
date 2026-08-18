@@ -69,6 +69,7 @@ class InitProjectToolchains(ProjectToolchains):
             )
             script = (
                 "import pathlib,sys; root=pathlib.Path(sys.argv[1]); name=sys.argv[3]; "
+                "assert (root/'lean-toolchain').read_text().strip()==sys.argv[2]; "
                 "(root/'lean-toolchain').write_text(sys.argv[2]+'\\n'); "
                 "(root/'lakefile.toml').write_text(f'name = \\\"{name}\\\"\\n'); "
                 "(root/'.git').mkdir(); "

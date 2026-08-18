@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 4.0.1 - 2026-08-18
+
+- Keep `verify ENV --offline` strictly local for sparse environments by probing
+  a retained capsule module and forbidding projection acquisition during the
+  probe.
+- Pin the selected exact toolchain before project scaffolding and put a reused
+  user toolchain ahead of private Elan for nested Lake commands, preventing
+  `new --core` from downloading an alternate unprefixed toolchain.
+
 ## 4.0.0 - 2026-08-18
 
 - Replace the implementation-shaped CLI with a cwd-first workflow: `new`,

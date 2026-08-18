@@ -104,12 +104,20 @@ def _verify_capsule_state(environment: Environment) -> int:
     return verified
 
 
-def _probe(environment: Environment) -> None:
+def _probe(environment: Environment, *, offline: bool = False) -> None:
     """Probe the immutable compiled environment without asking Lake to resolve it."""
 
-    source = (
-        f"import {ROOT_MODULE}\n" if environment.lock.packages else "example : True := by trivial\n"
-    )
+    if environment.sparse:
+        origin = environment._record.get("origin")
+        retained = origin.get("modules") if isinstance(origin, dict) else None
+        modules = tuple(str(item) for item in retained) if isinstance(retained, list) else ()
+        source = f"import {modules[0]}\n" if modules else "example : True := by trivial\n"
+    else:
+        source = (
+            f"import {ROOT_MODULE}\n"
+            if environment.lock.packages
+            else "example : True := by trivial\n"
+        )
     result = environment.check(
         source,
         # The generated environment module itself is named ROOT_MODULE.  Giving
@@ -117,6 +125,7 @@ def _probe(environment: Environment) -> None:
         # correctly reject it as an import cycle.
         filename="LeanRuntimeVerification.lean",
         policy=ExecutionPolicy(timeout_seconds=300, max_output_bytes=2_000_000),
+        _allow_sparse_acquisition=not offline,
     )
     if not result.ok:
         raise EnvironmentError(
@@ -284,7 +293,7 @@ def verify_environment(
             raise EnvironmentError(
                 "offline verification requires the locked toolchain to be installed"
             )
-        _probe(environment)
+        _probe(environment, offline=offline)
         probe = VerificationCheck("lean_probe_passed", True)
     except EnvironmentError as exc:
         probe = VerificationCheck("probe_failed", False, details={"message": str(exc)})

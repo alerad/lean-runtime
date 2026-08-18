@@ -16,10 +16,21 @@ class ProbeEnvironment:
     lock: EnvironmentLock
     observed_source: str | None = None
     observed_filename: str | None = None
+    observed_allow_sparse_acquisition: bool | None = None
+    sparse: bool = False
+    _record: dict[str, object] | None = None
 
-    def check(self, source: str, *, filename: str, policy: object) -> ExecutionResult:
+    def check(
+        self,
+        source: str,
+        *,
+        filename: str,
+        policy: object,
+        _allow_sparse_acquisition: bool = True,
+    ) -> ExecutionResult:
         self.observed_source = source
         self.observed_filename = filename
+        self.observed_allow_sparse_acquisition = _allow_sparse_acquisition
         return self.result
 
 
@@ -88,3 +99,17 @@ def test_core_verification_probe_does_not_import_synthetic_root() -> None:
     _probe(environment)  # type: ignore[arg-type]
 
     assert environment.observed_source == "example : True := by trivial\n"
+
+
+def test_offline_sparse_probe_uses_retained_module_without_acquisition() -> None:
+    environment = ProbeEnvironment(
+        execution(True),
+        lock(packages=True),
+        sparse=True,
+        _record={"origin": {"modules": ["Sample.Retained", "Sample.Dependency"]}},
+    )
+
+    _probe(environment, offline=True)  # type: ignore[arg-type]
+
+    assert environment.observed_source == "import Sample.Retained\n"
+    assert environment.observed_allow_sparse_acquisition is False
