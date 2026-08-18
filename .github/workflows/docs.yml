@@ -35,7 +35,7 @@ jobs:
           from pathlib import Path
 
           html = Path("site/index.html").read_text(encoding="utf-8")
-          if "Check the proof. Reuse everything else." not in html:
+          if "Check the proof. Skip the setup." not in html:
               raise SystemExit("landing-page headline was not rendered")
           if 'class="lr-intro" markdown' in html:
               raise SystemExit("landing-page Markdown was emitted as raw text")
