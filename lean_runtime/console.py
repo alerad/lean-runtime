@@ -129,6 +129,16 @@ class ConsoleRenderer:
         cached = event.data.get("cached_bytes")
         if not isinstance(download, int) or download <= 0:
             return
+        self._start_download("Downloading environment", download, cached)
+
+    def _render_toolchain_download_planned(self, event: RuntimeEvent) -> None:
+        download = event.data.get("download_bytes")
+        cached = event.data.get("cached_bytes")
+        if not isinstance(download, int) or download <= 0:
+            return
+        self._start_download("Downloading Lean toolchain", download, cached)
+
+    def _start_download(self, label: str, download: int, cached: object) -> None:
         self._download_total = download
         self._layer_bytes.clear()
         self._next_checkpoint = _PLAIN_CHECKPOINT_PERCENT
@@ -139,11 +149,11 @@ class ConsoleRenderer:
             if isinstance(cached, int) and cached > 0
             else ""
         )
-        self._print(f"Downloading environment: {format_byte_size(download)}{suffix}")
+        self._print(f"{label}: {format_byte_size(download)}{suffix}")
 
     def _render_library_layer_progress(self, event: RuntimeEvent) -> None:
         digest = str(event.data.get("digest", ""))
-        if event.current_bytes is None or self._download_total is None:
+        if event.current_bytes is None or self._download_total is None or self._download_finished:
             return
         frame_current = event.data.get("frame_current")
         frame_total = event.data.get("frame_total")
@@ -181,13 +191,19 @@ class ConsoleRenderer:
         self._print("Retrying download after integrity verification failed")
 
     def _render_library_verified(self, event: RuntimeEvent) -> None:
+        self._finish_download("Downloaded and verified environment")
+
+    def _render_toolchain_ready(self, event: RuntimeEvent) -> None:
+        self._finish_download("Downloaded and verified Lean toolchain")
+
+    def _finish_download(self, message: str) -> None:
         if self._download_total is None or self._download_finished:
             return
         self._download_finished = True
         if self.mode == "tty":
             self._draw_bar(self._download_total, self._download_total)
         self._end_progress_line()
-        self._print(self.style.green("Downloaded and verified environment"))
+        self._print(self.style.green(message))
 
     def _render_source_fetch_started(self, event: RuntimeEvent) -> None:
         package = event.data.get("package", "sources")

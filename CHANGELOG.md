@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 3.0.3 - 2026-08-18
+
+- Give sparse-environment and slim-toolchain downloads independent progress
+  lifecycles, so the toolchain transfer reports its real size instead of
+  inheriting a completed environment total.
+- Reject duplicate members and symlink extraction destinations in
+  slim-toolchain archives, matching the portable-environment boundary.
+- Correct the announcement gate's versioned plan-envelope parsing and add the
+  missing macOS Intel clean-consumer job.
+- Expand release acceptance coverage for archive limits and traversal,
+  deterministic multi-platform finalization, duplicate platforms, supported
+  Cosign releases, missing Cosign, and publisher identity/issuer mismatches.
+
 ## 3.0.2 - 2026-08-17
 
 - Route the first check directly through a newly downloaded slim Lean runtime.

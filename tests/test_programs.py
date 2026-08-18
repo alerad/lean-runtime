@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 
 import pytest
 
 from lean_runtime import EnvironmentError, ExecutionPolicy, Runtime
-from lean_runtime.programs import LEGACY_PROGRAM_SCHEMA, ProgramDescription
+from lean_runtime.oci import OCIRepository
+from lean_runtime.programs import LEGACY_PROGRAM_SCHEMA, ProgramDescription, ProgramLibrary
 
 
 def _revision() -> str:
@@ -109,6 +111,53 @@ def test_program_oci_round_trip_is_deterministic(tmp_path: Path) -> None:
     imported = consumer.open_program_copy(first)
     assert imported.id == program.id
     assert imported.copy_id == first_info.copy_id
+
+
+def test_program_index_finalization_is_ordered_and_rejects_duplicate_platforms() -> None:
+    library = ProgramLibrary(
+        OCIRepository.parse("oci://registry.example/owner/programs"),
+        None,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+    )
+    published: list[tuple[str, bytes]] = []
+
+    class IndexClient:
+        def manifest_exists(self, _digest: str) -> bool:
+            return True
+
+        def publish_manifest(self, reference: str, data: bytes, _media_type: str) -> str:
+            published.append((reference, data))
+            return "sha256:" + hashlib.sha256(data).hexdigest()
+
+    library.client = IndexClient()  # type: ignore[assignment]
+
+    def descriptor(system: str, architecture: str, abi: str, digest: str) -> dict[str, object]:
+        return {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:" + digest * 64,
+            "size": 42,
+            "platform": {"os": system, "architecture": architecture},
+            "annotations": {
+                "org.lean-runtime.artifact.kind": "execution-program",
+                "org.lean-runtime.platform.abi": abi,
+            },
+        }
+
+    linux = descriptor("linux", "amd64", "glibc-2.35", "a")
+    macos = descriptor("darwin", "arm64", "darwin-arm64", "b")
+    revision = "c" * 40
+    publication_id = library.publish_index(revision, [linux, macos], tags=("dogfood",))
+
+    assert publication_id.startswith("sha256:")
+    assert [reference for reference, _data in published] == [revision, "dogfood"]
+    assert published[0][1] == published[1][1]
+    index = json.loads(published[0][1])
+    assert [item["platform"]["os"] for item in index["manifests"]] == ["darwin", "linux"]
+
+    duplicate = descriptor("linux", "amd64", "glibc-2.35", "d")
+    with pytest.raises(ValueError, match="duplicate program platform"):
+        library.publish_index(revision, [linux, duplicate])
 
 
 def test_program_rejects_command_outside_payload(tmp_path: Path) -> None:

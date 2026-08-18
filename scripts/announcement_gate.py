@@ -43,6 +43,20 @@ FULL_INCREMENTAL_LIMIT = 2 * 1024**3
 HOME_LIMIT = 9 * 1024**3
 
 
+def plan_data(value: object) -> dict[str, object]:
+    """Return data from a successful, versioned plan envelope."""
+    if not isinstance(value, dict):
+        return {}
+    data = value.get("data")
+    if (
+        value.get("schema") != "lean-runtime.plan/v1"
+        or value.get("ok") is not True
+        or not isinstance(data, dict)
+    ):
+        return {}
+    return data
+
+
 def run(
     command: list[str],
     *,
@@ -148,9 +162,8 @@ def main() -> int:
             value = json.loads(output)
         except json.JSONDecodeError:
             value = {}
-        ok = code == 0 and isinstance(value, dict)
-        if ok:
-            ok = bool(value.get("download_bytes_complete"))
+        data = plan_data(value)
+        ok = code == 0 and data.get("download_bytes_complete") is True
         steps.append(
             {
                 "name": name,
@@ -164,7 +177,7 @@ def main() -> int:
             }
         )
         print(f"{'ok  ' if ok else 'FAIL'} {name} ({elapsed:.1f}s)")
-        return ok, value
+        return ok, data
 
     ok, narrow_plan = plan("narrow-plan", narrow_lean)
     narrow_environment = narrow_plan.get("environment_download_bytes")
