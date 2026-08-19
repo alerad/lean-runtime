@@ -2,138 +2,178 @@
 hide:
   - navigation
   - toc
+  - footer
 ---
 
-<div class="lr-intro" markdown>
+<nav class="lr-topbar" aria-label="Main navigation">
+  <div class="lr-topbar-inner">
+    <a class="lr-wordmark" href="./">lean<span>-</span>runtime</a>
+    <span class="lr-version-chip">Lean 4 · Python 3.10+</span>
+    <div class="lr-topnav">
+      <a href="tutorial/">Start</a>
+      <a href="workflows/check-files/">Workflows</a>
+      <a href="concepts/context-selection/">Concepts</a>
+      <a href="reference/commands/">Reference</a>
+      <a href="trust/">Trust</a>
+      <a href="https://github.com/alerad/lean-runtime">GitHub</a>
+    </div>
+  </div>
+</nav>
 
-<div class="lr-intro-copy" markdown>
+<section class="lr-hero" data-run-demo>
+  <div class="lr-hero-copy">
+    <p class="lr-eyebrow"><span aria-hidden="true">⊢</span> Compiler-backed Lean execution</p>
+    <h1>Check a Lean file in the environment it needs.</h1>
+    <p class="lr-lead">Lean Runtime resolves an exact toolchain and dependency context, runs Lean, and records what actually ran.</p>
+    <div class="lr-actions">
+      <a class="md-button md-button--primary" href="tutorial/">Run your first check</a>
+      <a class="md-button" href="concepts/context-selection/">How context is selected</a>
+    </div>
+    <div class="lr-install" aria-label="Install command">
+      <code>python -m pip install lean-runtime</code>
+      <button type="button" data-copy-install aria-label="Copy install command">Copy</button>
+    </div>
+    <p class="lr-platform-note">Python 3.10 or newer and Git are required. Automatic Elan bootstrap is available on macOS and Linux.</p>
+  </div>
 
-# Check the proof. Skip the setup.
+  <div class="lr-instrument" aria-label="Interactive Lean Runtime example">
+    <div class="lr-mode-tabs" role="tablist" aria-label="Execution context">
+      <button type="button" role="tab" aria-selected="true" data-demo-mode="automatic">Automatic</button>
+      <button type="button" role="tab" aria-selected="false" data-demo-mode="pinned">Pinned</button>
+      <button type="button" role="tab" aria-selected="false" data-demo-mode="project">Lake project</button>
+    </div>
 
-Write a Lean file. Run one command. Lean Runtime picks a compatible
-Mathlib release, downloads only what your imports need, and checks your
-proof — no toolchain install, no Lake project, no cache scripts.
+    <div class="lr-source-pane">
+      <div class="lr-pane-bar">
+        <span class="lr-pane-dot" aria-hidden="true"></span>
+        <span data-source-name>Primes.lean</span>
+        <span class="lr-pane-context" data-source-context>standalone file</span>
+      </div>
+      <pre data-source><code><span class="lr-kw">import</span> <mark>Mathlib.Data.Nat.Prime.Infinite</mark>
 
-[Get started in two minutes](getting-started.md){ .lr-primary-link }
-[CLI reference](cli.md)
+<span class="lr-kw">example</span> : ∀ n : ℕ, ∃ p, n ≤ p ∧ p.Prime :=
+  Nat.exists_infinite_primes</code></pre>
+    </div>
 
-</div>
+    <div class="lr-terminal-pane">
+      <div class="lr-pane-bar">
+        <span class="lr-pane-dot" aria-hidden="true"></span>
+        terminal
+        <span class="lr-pane-context" data-run-state>ready</span>
+      </div>
+      <div class="lr-terminal" data-terminal aria-live="polite"></div>
+    </div>
 
-<div class="lr-demo" markdown>
+    <div class="lr-demo-controls">
+      <button type="button" class="lr-replay" data-replay><span aria-hidden="true">↻</span> Replay</button>
+      <button type="button" class="lr-inspect-button" data-inspect aria-expanded="false">Inspect this run</button>
+    </div>
 
-**An empty directory. One file.**
+    <div class="lr-run-record" data-run-record hidden>
+      <dl>
+        <div><dt>Context source</dt><dd data-record-context>automatic discovery</dd></div>
+        <div><dt>Toolchain</dt><dd><code>leanprover/lean4:v4.33.0</code></dd></div>
+        <div><dt>Environment</dt><dd><code>mathlib-v4.33.0</code></dd></div>
+        <div><dt>Verdict</dt><dd class="lr-accepted">accepted</dd></div>
+      </dl>
+      <p>The environment is proposed from source evidence. The verdict is produced by Lean.</p>
+    </div>
+  </div>
+</section>
 
-```lean
--- Main.lean
-import Mathlib
-example : 2 + 2 = 4 := by norm_num
-```
+<section class="lr-process" aria-labelledby="process-title">
+  <div class="lr-section-heading">
+    <p class="lr-kicker">One execution</p>
+    <h2 id="process-title">From source to a recorded verdict</h2>
+    <p>The active step follows the terminal demonstration. Select any step for its role in the run.</p>
+  </div>
+  <div class="lr-process-grid" data-process>
+    <button type="button" data-process-step="source">
+      <span>01</span><strong>Source</strong><small>Read declared imports</small>
+    </button>
+    <button type="button" data-process-step="context">
+      <span>02</span><strong>Context</strong><small>Select an exact candidate</small>
+    </button>
+    <button type="button" data-process-step="environment">
+      <span>03</span><strong>Environment</strong><small>Acquire and verify</small>
+    </button>
+    <button type="button" data-process-step="lean">
+      <span>04</span><strong>Lean</strong><small>Check the source</small>
+    </button>
+    <button type="button" data-process-step="record">
+      <span>05</span><strong>Result</strong><small>Record the execution</small>
+    </button>
+  </div>
+  <div class="lr-process-detail" data-process-detail>
+    <strong>Source</strong>
+    <p>Lean Runtime reads the imports declared by the file. It does not execute the source during this step.</p>
+  </div>
+</section>
 
-```console
-$ lean-runtime check Main.lean
-✓ Main.lean accepted in 1.60s
-```
+<section class="lr-contexts" aria-labelledby="contexts-title">
+  <div class="lr-section-heading">
+    <p class="lr-kicker">Predictable context</p>
+    <h2 id="contexts-title">Automatic when useful. Explicit when specified.</h2>
+    <p>Every check runs in one context. The first applicable source below is used.</p>
+  </div>
+  <ol class="lr-context-ladder">
+    <li><span>01</span><div><strong>Command line or Python API</strong><code>--using mathlib@v4.33.0</code></div></li>
+    <li><span>02</span><div><strong>File frontmatter</strong><code>requires = ["mathlib@v4.33.0"]</code></div></li>
+    <li><span>03</span><div><strong>Nearest pinned Lake project</strong><small>Its toolchain and manifest remain authoritative.</small></div></li>
+    <li><span>04</span><div><strong>Automatic discovery</strong><small>Candidates are accepted only after Lean checks the source.</small></div></li>
+  </ol>
+  <p><a href="concepts/context-selection/">Read the complete context selection model</a></p>
+</section>
 
-<p class="lr-demo-note">That is the entire setup. The second run reuses everything and works offline.</p>
+<section class="lr-workflows" aria-labelledby="workflows-title">
+  <div class="lr-section-heading">
+    <p class="lr-kicker">Workflows</p>
+    <h2 id="workflows-title">Use the entry point that matches your work.</h2>
+  </div>
+  <div class="lr-card-grid">
+    <article>
+      <p class="lr-card-label">Standalone file</p>
+      <h3>Bring a Lean source file</h3>
+      <pre><code>lean-runtime check Main.lean</code></pre>
+      <p>Use automatic discovery, a package reference, frontmatter, or an exact lock.</p>
+      <a href="workflows/check-files/">Check Lean files</a>
+    </article>
+    <article>
+      <p class="lr-card-label">Lake project</p>
+      <h3>Keep the project authoritative</h3>
+      <pre><code>lean-runtime adopt . --yes
+lean-runtime build</code></pre>
+      <p>The project keeps its pinned toolchain and manifest. Dependency storage and compatible artifacts can be reused.</p>
+      <a href="workflows/lake-projects/">Work with Lake projects</a>
+    </article>
+    <article>
+      <p class="lr-card-label">Exact and offline</p>
+      <h3>Record the environment</h3>
+      <pre><code>lean-runtime check Main.lean \
+  --lock-out environment.lock.json</code></pre>
+      <p>Reuse the resulting lock explicitly, including with network access disabled.</p>
+      <a href="workflows/check-files/#record-and-reuse-an-exact-lock">Use an exact lock</a>
+    </article>
+  </div>
+</section>
 
-</div>
+<section class="lr-verdicts" aria-labelledby="verdicts-title">
+  <div class="lr-section-heading">
+    <p class="lr-kicker">Stable automation</p>
+    <h2 id="verdicts-title">A proof failure and an environment failure are different results.</h2>
+  </div>
+  <div class="lr-verdict-grid">
+    <div class="is-ok"><span>0</span><strong>Accepted</strong><p>Lean accepted the source.</p></div>
+    <div class="is-rejected"><span>1</span><strong>Rejected</strong><p>Lean ran and rejected the source.</p></div>
+    <div class="is-unavailable"><span>2</span><strong>Unavailable</strong><p>The invocation or required context failed.</p></div>
+  </div>
+</section>
 
-</div>
-
-## Start where you are
-
-<div class="grid cards" markdown>
-
--   :material-file-code-outline:{ .lg .middle } **I have a Lean file**
-
-    ---
-
-    Your imports already say what you need. Lean Runtime finds a matching
-    Mathlib release, fetches only the pieces your file uses, and reports
-    errors on your own filename.
-
-    [`lean-runtime check Main.lean` →](standalone-files.md)
-
--   :material-folder-cog-outline:{ .lg .middle } **I have a Lake project**
-
-    ---
-
-    Works in place. Your toolchain and manifest stay exactly as they are;
-    sharing dependency storage across projects is optional and reversible.
-
-    [`lean-runtime check` →](local-projects.md)
-
--   :material-creation-outline:{ .lg .middle } **I'm starting fresh**
-
-    ---
-
-    One command creates a project pinned to a known-good Mathlib and
-    toolchain pair, ready to check immediately.
-
-    [`lean-runtime new MyProof` →](getting-started.md)
-
--   :material-language-python:{ .lg .middle } **I'm calling Lean from Python**
-
-    ---
-
-    Set up once, then check one proof or thousands — concurrently, with
-    typed results, timeouts, and cancellation.
-
-    [`lean.setup(...)` →](python-api.md)
-
-</div>
-
-## Seven commands cover a normal day
-
-```text
-new NAME       create a project
-adopt [PATH]   share dependency storage with existing projects
-check [PATH…]  check a project, directory, file, or stdin
-watch FILE     re-check on save
-build [TARGET] build the current project
-update         preview and apply a dependency update
-status [PATH]  explain what Lean Runtime selected and why
-```
-
-Everything defaults to the current directory. The heavier machinery
-(publishing, exports, storage) lives under namespaces like `env` and
-`program`, out of your way until you want it.
-
-[Full CLI reference](cli.md){ .md-button }
-
-## What happens when you run `check`
-
-1. **It reads your file.** The imports tell it which packages you need.
-2. **It picks an exact environment.** Not "latest Mathlib" — one specific
-   release, pinned down to the commit, so the result is repeatable.
-3. **It fetches only what's needed.** Verified pieces land in a shared
-   cache; your next file or project reuses them instead of re-downloading.
-4. **It runs Lean.** You get ordinary diagnostics on your own filename,
-   plus a record of exactly what ran — enough to reproduce the same check
-   tomorrow or on another machine.
-
-Want the exactness story in full — locks, identities, verification?
-
-[Verify and compare](v1-precision.md){ .md-button }
-[Architecture](architecture.md){ .md-button }
-
-!!! warning "Trusted code only"
-
-    Lean packages can run code while they build. Lean Runtime verifies
-    everything it downloads, but it is not a sandbox — only check sources
-    and dependencies you trust. [Read the trust boundary](trust-and-limitations.md).
-
-## Go deeper
-
-<div class="grid cards" markdown>
-
-- **Take it anywhere** — export a built environment as one file and open it
-  on another machine, no rebuild. [Portable environments →](portable-copies.md)
-- **Prove it ran** — verify identities, diff environments, capture and
-  replay executions, measure timings. [Verify and compare →](v1-precision.md)
-- **Publish your project** — one command generates a multi-platform GitHub
-  workflow with signing and clean-machine checks. [Publishing →](project-publishing.md)
-- **Automate with Python** — sync, async, batch, matrix, and interactive
-  APIs with the same exactness guarantees. [Python API →](python-api.md)
-
-</div>
+<section class="lr-boundary" aria-labelledby="boundary-title">
+  <div>
+    <p class="lr-kicker">Execution boundary</p>
+    <h2 id="boundary-title">Exact and inspectable does not mean sandboxed.</h2>
+  </div>
+  <p>Lean Runtime records identities and verifies downloaded content. Lake packages and build scripts can execute code during acquisition or compilation. Only use source and dependencies you trust.</p>
+  <a href="trust/">Read the trust boundary</a>
+</section>

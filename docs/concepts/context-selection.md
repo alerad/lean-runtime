@@ -1,0 +1,54 @@
+# Context selection
+
+Every check runs inside one selected context. Context selection and compiler acceptance are separate decisions.
+
+## Precedence
+
+For a Lean file, Lean Runtime considers context sources in this order:
+
+1. An explicit command-line or Python API context
+2. Lean Runtime frontmatter in the file
+3. The nearest pinned Lake project
+4. Automatic catalog discovery
+
+If none can produce a context, the operation fails before Lean runs.
+
+## Explicit context
+
+```console
+lean-runtime check Main.lean --using mathlib@v4.33.0
+```
+
+An explicit context can identify a project, lock file, stored environment, toolchain, or package reference. Explicit input does not need discovery.
+
+## Frontmatter
+
+```lean
+-- /// lean-runtime
+-- toolchain = "leanprover/lean4:v4.33.0"
+-- ///
+example : 1 + 1 = 2 := by decide
+```
+
+Frontmatter travels with the source while remaining valid Lean comments.
+
+## Pinned project context
+
+A file beneath a Lake project uses the nearest project with both a pinned toolchain and manifest. Lean Runtime does not replace those version decisions during a normal project check.
+
+## Automatic discovery
+
+Discovery begins with declared source imports. The bundled catalog associates exact environments with module inventories. Plausible candidates are ordered under a bounded policy and checked in turn.
+
+Static analysis proposes candidates. It does not prove compatibility. A candidate is accepted only if Lean accepts the source inside that exact environment.
+
+Candidate count, compiler time, wall time, remote acquisition, offline mode, and source-build permission can bound the search. Reaching a bound can produce an inconclusive discovery result rather than a claim that no compatible environment exists.
+
+## Inspect the decision
+
+```console
+lean-runtime status Main.lean
+lean-runtime status Main.lean --json
+```
+
+`status` reports evidence and routing. A successful `check` reports compiler acceptance and execution provenance.

@@ -35,14 +35,17 @@ jobs:
           from pathlib import Path
 
           html = Path("site/index.html").read_text(encoding="utf-8")
-          if "Check the proof. Skip the setup." not in html:
+          script = Path("site/javascripts/run-inspector.js").read_text(encoding="utf-8")
+          if "Check a Lean file in the environment it needs." not in html:
               raise SystemExit("landing-page headline was not rendered")
-          if 'class="lr-intro" markdown' in html:
-              raise SystemExit("landing-page Markdown was emitted as raw text")
-          if 'class="grid cards" markdown' in html:
-              raise SystemExit("landing-page cards were emitted as raw text")
-          if "Discovering an exact environment" not in html:
-              raise SystemExit("landing-page proof demo was not rendered")
+          if "Discovering an exact environment" not in script:
+              raise SystemExit("landing-page animation transcript was not rendered")
+          if "Primes.lean accepted" not in script:
+              raise SystemExit("landing-page hero verdict was not rendered")
+          if "Inspect this run" not in html:
+              raise SystemExit("landing-page run inspector was not rendered")
+          if "run-inspector.js" not in html:
+              raise SystemExit("landing-page interaction script was not included")
           PY
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
