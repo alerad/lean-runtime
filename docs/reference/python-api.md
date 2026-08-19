@@ -88,7 +88,7 @@ exhaustive rejection:
 
 ```python
 if result.outcome == "inconclusive":
-    print(result.completion)   # candidate_limit | acquisition_limit | time_limit
+    print(result.completion)  # candidate_limit | acquisition_limit | time_limit
 ```
 
 Planning metadata narrows candidates. It never asserts compatibility.
