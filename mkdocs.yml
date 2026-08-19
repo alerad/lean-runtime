@@ -35,6 +35,7 @@ nav:
       - Context selection: concepts/context-selection.md
   - Reference:
       - Commands: reference/commands.md
+      - Python API: reference/python-api.md
   - Trust and limitations: trust.md
 
 plugins:
