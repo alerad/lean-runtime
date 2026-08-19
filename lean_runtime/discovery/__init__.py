@@ -4,7 +4,6 @@ from .analyzer import SourceEvidence, analyze_source
 from .api import Discovery, discover_and_check, plan
 from .candidate import (
     PLAN_SCHEMA,
-    AvailabilityObservation,
     Candidate,
     CandidateReason,
     DiscoveryPlan,
@@ -19,6 +18,7 @@ from .catalog_manifest import (
 )
 from .defaults import DEFAULT_CATALOG_PATH, default_catalog
 from .errors import CatalogError, DiscoveryError, PolicyError
+from .history import DecisionHint, DiscoveryHistory
 from .planner import Planner
 from .policy import DiscoveryPolicy
 from .probe import AcquiredCandidate, CandidateProbe, LeanRuntimeProbe, ProbeOutcome
@@ -36,7 +36,6 @@ __all__ = [
     "DEFAULT_CATALOG_PATH",
     "PLAN_SCHEMA",
     "RESULT_SCHEMA",
-    "AvailabilityObservation",
     "Candidate",
     "CandidateAttempt",
     "AcquiredCandidate",
@@ -49,9 +48,11 @@ __all__ = [
     "CatalogSourceManifest",
     "Discovery",
     "DiscoveryError",
+    "DiscoveryHistory",
     "DiscoveryPlan",
     "DiscoveryPolicy",
     "DiscoveryResult",
+    "DecisionHint",
     "ExcludedCandidate",
     "LeanRuntimeProbe",
     "Planner",

@@ -139,25 +139,22 @@ def _tree_bytes(root: Path) -> int:
     """Sum regular-file sizes under a directory, tolerating races."""
     if not root.is_dir():
         return 0
-    du = shutil.which("gdu") if platform.system() == "Darwin" else shutil.which("du")
-    if os.name != "nt" and du is not None:
-        with suppress(OSError, ValueError):
-            arguments = [du, "-s", "--apparent-size", "--block-size=1", str(root)]
-            process = subprocess.run(
-                arguments,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                timeout=300,
-                check=False,
-            )
-            if process.returncode == 0:
-                return int(process.stdout.split()[0])
     total = 0
-    for path in root.rglob("*"):
+    pending = [root]
+    while pending:
+        directory = pending.pop()
         try:
-            if path.is_file() and not path.is_symlink():
-                total += path.stat().st_size
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                        elif entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                    except OSError:
+                        continue
         except OSError:
             continue
     return total

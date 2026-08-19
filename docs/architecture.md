@@ -48,6 +48,16 @@ dedicated managers. Mutable local-project checks and builds pass through
 locking. This is the integration boundary for Lake facilities such as its
 artifact cache; `Runtime` should not grow a second project build planner.
 
+Shared project reuse has three independent strengths. A repository with the
+same canonical origin may donate Git objects for any commit it contains. A
+clean checkout at the exact resolved commit may donate source. Compiled package
+artifacts additionally require the same root toolchain, platform ABI, package
+configuration, and resolved dependency cone. Complete workspace identity is
+the preferred fast path because it preserves coherent Lake trace paths;
+package-cone matching is the fallback for overlapping but unequal project
+graphs. All imported material is copied into managed storage rather than
+linked to a mutable donor checkout.
+
 Environment capsules, slim toolchains, and ready-to-run programs have distinct
 payload schemas. Their common OCI descriptor, digest, JSON, and platform
 selection contract lives in `oci_protocol`. Payload implementations must not
@@ -85,6 +95,10 @@ Resolution:
 Tags exist only at the specification boundary. The lock and all subsequent
 identities contain the resolved full commit and Git tree.
 
+Lake's `inputRev` is likewise display provenance only. Mutable tags with the
+same resolved commit share package identities, while identical tag spellings
+with different resolved commits never do.
+
 Packages may intentionally declare an earlier toolchain while remaining
 compatible with the selected environment. Direct and transitive differences
 emit compatibility events; the actual environment build remains authoritative
@@ -101,24 +115,37 @@ Discovery is an internal subsystem layered above the exact Runtime API:
 Lean source
     │
     ▼
-static evidence + exact catalog
+explicit context resolution
     │
     ▼
-bounded candidate plan
+static evidence + indexed exact catalog
     │
     ▼
-Runtime.open_exact(candidate lock)
+pure plausible-candidate plan
+    │
+    ▼
+compiler history + local readiness ordering
+    │
+    ▼
+lazy Runtime.open_exact(candidate lock)
     │
     ▼
 Lean acceptance or rejection
 ```
 
-Catalog metadata and deterministic scores only choose which exact locks to
-try. A candidate succeeds exclusively when Runtime materializes its verified
+Catalog metadata and deterministic lexicographic ordering only choose which
+exact locks to try. Remote availability is resolved lazily for the current
+candidate instead of sweeping the catalog. A candidate succeeds exclusively
+when Runtime materializes its verified
 identity and Lean accepts the source. Discovery does not resolve transitive
 dependencies, alter environment identity, infer minimum versions, or replace
 Lake. Once a lock is found, callers can use the ordinary deterministic Runtime
 path directly.
+
+The default automatic path permits verified local or downloadable environments
+but not source construction. Source construction is an explicit opt-in. One
+wall-clock deadline includes acquisition and compiler probes, and incomplete
+searches report whether a candidate, acquisition, or time limit stopped them.
 
 ## Materialization
 

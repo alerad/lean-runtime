@@ -13,7 +13,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "channel", "toolchain", "lock_id", "lock", "modules", "library_hints", "created_at"],
+        "required": ["id", "channel", "toolchain", "lock_id", "lock", "modules", "created_at"],
         "properties": {
           "id": {"type": "string", "minLength": 1},
           "channel": {"type": "string", "minLength": 1},

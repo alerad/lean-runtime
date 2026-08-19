@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -17,10 +18,12 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
 
 if TYPE_CHECKING:
     from .events import EventEmitter
+    from .models import PackageProvenance
     from .projects import ProjectContext
     from .toolchains import ToolchainManager
 
 from .decisions import Decision
+from .references import artifact_accelerators
 from .serialization import sha256_id
 from .store import platform_compatibility
 from .toolchains import normalize_toolchain
@@ -194,6 +197,28 @@ class LakeArtifactCache:
             }
         )
         return environment
+
+    @staticmethod
+    def dependency_accelerators(
+        packages: Sequence[PackageProvenance],
+    ) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """Return trusted cache commands for exact dependencies in a project graph.
+
+        Accelerators are keyed by canonical repository URL.  Package names are
+        deliberately not sufficient: a fork named ``mathlib`` must not gain the
+        upstream project's executable as an implicit build step.
+        """
+
+        known = {
+            url.lower().removesuffix(".git"): command
+            for url, command in artifact_accelerators().items()
+        }
+        selected: list[tuple[str, tuple[str, ...]]] = []
+        for package in packages:
+            command = known.get(package.url.lower().removesuffix(".git"))
+            if command:
+                selected.append((package.name, command))
+        return tuple(selected)
 
     def decision(self, context: ProjectContext) -> Decision:
         opted_in = self.project_opted_in(context)

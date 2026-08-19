@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from .errors import EnvironmentError
+from .import_syntax import IMPORT_STATEMENT
 from .lockfiles import EnvironmentLock
 from .serialization import canonical_json_bytes, write_json_atomic
 
@@ -33,14 +34,15 @@ IMPORT_PARSER_SOURCE = (
 
 ArtifactCapability = Literal["check", "native", "editor", "development", "metadata"]
 _LEAN_VERSION = re.compile(r"(?:leanprover/lean4:)?v?(\d+)\.(\d+)(?:\.(\d+))?")
-_SOURCE_IMPORT = re.compile(r"^\s*(?:(?:public|meta)\s+)*import\s+(.+?)\s*$", re.MULTILINE)
 
 
 def source_import_roots(source: str) -> tuple[str, ...]:
     """Return unique top-level module roots from ordinary Lean import headers."""
     return tuple(
         dict.fromkeys(
-            module for match in _SOURCE_IMPORT.finditer(source) for module in match.group(1).split()
+            module
+            for match in IMPORT_STATEMENT.finditer(source)
+            for module in match.group(1).split()
         )
     )
 

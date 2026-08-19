@@ -6,6 +6,7 @@ from pathlib import Path
 
 from lean_runtime.events import EventEmitter, RuntimeEvent
 from lean_runtime.lake_cache import LakeArtifactCache
+from lean_runtime.models import PackageProvenance
 from lean_runtime.projects import discover_project
 
 
@@ -84,3 +85,22 @@ def test_root_only_environment_is_opt_in_and_abi_keyed(tmp_path: Path, monkeypat
         lambda: {"schema": "test", "system": "linux", "machine": "x86_64", "abi": "gnu"},
     )
     assert cache.key(context.toolchain) != original_key
+
+
+def test_dependency_accelerators_require_the_canonical_repository() -> None:
+    upstream = PackageProvenance(
+        "mathlib",
+        "https://github.com/leanprover-community/mathlib4",
+        "a" * 40,
+        "tree",
+    )
+    fork = PackageProvenance(
+        "mathlib",
+        "https://github.com/someone-else/mathlib4.git",
+        "a" * 40,
+        "tree",
+    )
+
+    assert LakeArtifactCache.dependency_accelerators((upstream, fork)) == (
+        ("mathlib", ("lake", "exe", "cache", "get")),
+    )

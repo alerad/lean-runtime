@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .console import ConsoleRenderer, styler_for
+from .context_resolution import FileContextResolution, resolve_file_context
 from .discovery import (
     Catalog,
     Discovery,
@@ -19,14 +20,13 @@ from .discovery import (
     DiscoveryResult,
     default_catalog,
 )
-from .discovery.analyzer import analyze_source
-from .errors import LeanRuntimeError, ProjectError, SpecificationError
+from .discovery.analyzer import SourceEvidence, analyze_source
+from .errors import LeanRuntimeError, SpecificationError
 from .events import RuntimeEvent
 from .frontmatter import LeanFrontmatter, parse_frontmatter
 from .lockfiles import EnvironmentLock
 from .models import ExecutionResult, PhaseTiming
 from .policies import ExecutionPolicy, format_byte_size, parse_byte_size
-from .projects import discover_project
 from .runtime import Runtime
 from .timings import render_timings
 from .wire import envelope, error, serialize_execution_v1
@@ -59,15 +59,27 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, standalone: bool = Tru
     parser.add_argument(
         "--no-source-build",
         action="store_true",
-        help="allow verified downloads but do not build missing environments",
+        help="deprecated compatibility spelling; source builds are disabled by default",
+    )
+    parser.add_argument(
+        "--allow-source-build",
+        action="store_true",
+        help="allow automatic discovery to build missing environments from source",
     )
     parser.add_argument("--max-candidates", type=int, default=3)
+    parser.add_argument("--max-remote-acquisitions", type=int, default=2)
     parser.add_argument(
         "--search-timeout",
         dest="search_timeout",
         type=float,
         default=90.0,
-        help="budget for ranking and compiler probes",
+        help="aggregate budget for compiler probes",
+    )
+    parser.add_argument(
+        "--wall-timeout",
+        type=float,
+        default=1800.0,
+        help="wall-clock budget including downloads and compiler probes",
     )
     parser.add_argument(
         "--acquire-timeout",
@@ -139,11 +151,14 @@ def _selected_policy(arguments: argparse.Namespace) -> tuple[str, tuple[str, ...
         raise SpecificationError(
             "--offline cannot be combined with --availability auto or required"
         )
-    if arguments.no_source_build and global_availability == "local":
-        raise SpecificationError("--no-source-build cannot be combined with --availability local")
+    allow_source_build = getattr(arguments, "allow_source_build", False)
+    if allow_source_build and arguments.no_source_build:
+        raise SpecificationError("--allow-source-build cannot be combined with --no-source-build")
+    if allow_source_build and arguments.offline:
+        raise SpecificationError("--allow-source-build cannot be combined with --offline")
     if arguments.offline:
         return "local", ()
-    availability = "required" if arguments.no_source_build else (global_availability or "auto")
+    availability = "auto" if allow_source_build else (global_availability or "required")
     libraries = tuple(global_libraries) if global_libraries else None
     return availability, libraries
 
@@ -153,11 +168,18 @@ def _catalog(path: Path | None) -> Catalog:
 
 
 def _discovery_policy(arguments: argparse.Namespace) -> DiscoveryPolicy:
+    allow_source_build = getattr(arguments, "allow_source_build", False)
+    if allow_source_build and arguments.catalog is not None:
+        raise SpecificationError(
+            "automatic source builds are not allowed from a custom discovery catalog"
+        )
     return DiscoveryPolicy(
         max_candidates=arguments.max_candidates,
+        max_remote_acquisitions=arguments.max_remote_acquisitions,
         max_total_seconds=arguments.search_timeout,
+        max_wall_seconds=arguments.wall_timeout,
         allow_download=not arguments.offline,
-        allow_source_build=not arguments.offline and not arguments.no_source_build,
+        allow_source_build=allow_source_build,
         candidate_timeout_seconds=arguments.check_timeout,
         acquisition_timeout_seconds=arguments.acquire_timeout,
     )
@@ -167,15 +189,43 @@ def _discovery_failure(result: DiscoveryResult) -> str:
     details = [item.detail for item in result.diagnostics]
     if not details:
         details = [item.diagnostics[0].detail for item in result.attempts if item.diagnostics]
-    suffix = f" ({len(result.attempts)} candidate(s) tested)" if result.attempts else ""
+    tested = len(result.attempts)
+    planned = len(getattr(result.plan, "planned_candidates", result.plan.candidates))
+    untried = max(0, planned - tested)
+    suffix = f" ({tested} candidate(s) tested"
+    if untried:
+        suffix += f", {untried} untried"
+    suffix += ")"
     return (details[0] if details else "no compatible environment was found") + suffix
 
 
-def _explain_discovery(arguments: argparse.Namespace, source: str) -> dict[str, object]:
+def _discovery_summary(result: DiscoveryResult) -> str:
+    tested = len(result.attempts)
+    planned = len(getattr(result.plan, "planned_candidates", result.plan.candidates))
+    untried = max(0, planned - tested)
+    completion = result.completion
+    reason = {
+        "time_limit": "wall-clock time limit reached",
+        "candidate_limit": "candidate limit reached",
+        "acquisition_limit": "remote acquisition limit reached",
+        "complete": "plausible candidates exhausted",
+    }.get(completion, "discovery did not find a compatible environment")
+    suffix = f"; {untried} planned candidate(s) untried" if untried else ""
+    return (
+        f"Discovery: {reason} after {tested}/{planned} candidate(s) "
+        f"in {result.duration_seconds:.2f}s{suffix}"
+    )
+
+
+def _explain_discovery(
+    arguments: argparse.Namespace,
+    source: str,
+    evidence: SourceEvidence,
+) -> dict[str, object]:
     plan = Discovery(
         catalog=_catalog(arguments.catalog),
         policy=_discovery_policy(arguments),
-    ).plan(source)
+    ).plan(source, evidence=evidence)
     return {
         "decision": "automatic_discovery",
         "context": "catalog candidates",
@@ -226,6 +276,8 @@ def _emit(
     filename: str,
     display_path: str | None = None,
     show_timings: bool = False,
+    summary_elapsed_seconds: float | None = None,
+    discovery_summary: str | None = None,
 ) -> None:
     if as_json:
         print(
@@ -239,11 +291,18 @@ def _emit(
     if result.stderr:
         stderr = _display_text(result.stderr, result, filename, shown)
         print(stderr, end="" if stderr.endswith("\n") else "\n", file=sys.stderr)
+    for hint in result.hints:
+        if discovery_summary is not None and hint == discovery_summary:
+            continue
+        print(f"Hint: {hint}", file=sys.stderr)
     style = styler_for(sys.stdout)
     symbol = style.green("✓") if result.ok else style.red("✗")
     status = style.green("accepted") if result.ok else style.red("rejected")
-    timing = style.dim(f"in {result.elapsed_seconds:.2f}s")
+    elapsed = result.elapsed_seconds if summary_elapsed_seconds is None else summary_elapsed_seconds
+    timing = style.dim(f"in {elapsed:.2f}s")
     print(f"{symbol} {shown} {status} {timing}")
+    if discovery_summary is not None:
+        print(discovery_summary)
     if show_timings:
         print(render_timings(result.timings))
 
@@ -253,6 +312,8 @@ def _plan_lock(
     context: LeanFrontmatter,
     source: str,
     source_path: Path,
+    resolution: FileContextResolution,
+    evidence: SourceEvidence,
 ) -> tuple[EnvironmentLock, str | None]:
     """Select the exact lock whose acquisition cost --plan should report."""
     if context.requires or context.toolchain is not None:
@@ -263,20 +324,21 @@ def _plan_lock(
     if context.lock is not None:
         path = _lock_path(context.lock, source_path, embedded=arguments.lock is None)
         return EnvironmentLock.load(path), None
-    try:
-        project = discover_project(source_path)
-    except ProjectError:
+    if resolution.kind == "discovery":
         plan = Discovery(
             catalog=_catalog(arguments.catalog),
             policy=_discovery_policy(arguments),
-        ).plan(source)
+        ).plan(source, evidence=evidence)
         if not plan.candidates:
             raise SpecificationError(
                 "no plausible catalog candidate for this file; nothing to plan"
             ) from None
         candidate = plan.candidates[0]
         return candidate.entry.lock, candidate.entry.id
-    raise SpecificationError(f"--plan is not supported inside a Lake project: {project.root}")
+    assert resolution.project is not None
+    raise SpecificationError(
+        f"--plan is not supported inside a Lake project: {resolution.project.root}"
+    )
 
 
 def _render_plan(report: dict[str, Any], *, as_json: bool) -> None:
@@ -348,10 +410,16 @@ def run(
     )
     try:
         source = source_path.read_text(encoding="utf-8")
+        evidence = analyze_source(source)
         embedded = parse_frontmatter(source)
         context = _combine(arguments, embedded)
+        context_resolution = resolve_file_context(
+            source_path,
+            context,
+            discover=not arguments.no_discover,
+        )
         if arguments.explain:
-            if context.lock is not None:
+            if context_resolution.kind == "lock":
                 selected = "exact lock"
                 detail = context.lock
                 explanation: dict[str, object] = {
@@ -359,7 +427,7 @@ def run(
                     "context": selected,
                     "subject": detail,
                 }
-            elif context.requires:
+            elif context_resolution.kind == "references":
                 selected = "standalone dependencies"
                 detail = ", ".join(context.requires)
                 explanation = {
@@ -367,7 +435,7 @@ def run(
                     "context": selected,
                     "subject": detail,
                 }
-            elif context.toolchain is not None:
+            elif context_resolution.kind == "toolchain":
                 selected = "standalone toolchain"
                 detail = context.toolchain
                 explanation = {
@@ -375,29 +443,21 @@ def run(
                     "context": selected,
                     "subject": detail,
                 }
+            elif context_resolution.kind == "project":
+                assert context_resolution.project is not None
+                selected = "local project"
+                detail = str(context_resolution.project.root)
+                explanation = {
+                    "decision": "context_selected",
+                    "context": selected,
+                    "subject": detail,
+                    "reasons": list(context_resolution.reasons),
+                }
             else:
-                try:
-                    project = discover_project(source_path)
-                except ProjectError:
-                    if arguments.no_discover:
-                        raise SpecificationError(
-                            "the file has no explicit context or pinned Lake project"
-                        ) from None
-                    explanation = _explain_discovery(arguments, source)
-                    selected = "automatic discovery"
-                    candidates = explanation["subject"]
-                    if isinstance(candidates, list):
-                        detail = ", ".join(candidates)
-                    else:
-                        detail = str(candidates)
-                else:
-                    selected = "local project"
-                    detail = str(project.root)
-                    explanation = {
-                        "decision": "context_selected",
-                        "context": selected,
-                        "subject": detail,
-                    }
+                explanation = _explain_discovery(arguments, source, evidence)
+                selected = "automatic discovery"
+                candidates = explanation["subject"]
+                detail = ", ".join(candidates) if isinstance(candidates, list) else str(candidates)
             if arguments.json:
                 print(
                     json.dumps(
@@ -411,14 +471,21 @@ def run(
                 print(f"Context: {selected}\nSelected: {detail}")
             return 0
         if arguments.plan:
-            lock, candidate_id = _plan_lock(arguments, context, source, source_path)
+            lock, candidate_id = _plan_lock(
+                arguments,
+                context,
+                source,
+                source_path,
+                context_resolution,
+                evidence,
+            )
             _, plan_libraries = _selected_policy(arguments)
             runtime = Runtime(
                 home=arguments.home,
                 max_download_bytes=arguments.max_download,
                 libraries=plan_libraries,
             )
-            report = runtime.plan_exact(lock, import_roots=analyze_source(source).imports)
+            report = runtime.plan_exact(lock, import_roots=evidence.imports)
             if candidate_id is not None:
                 report["candidate"] = candidate_id
             _render_plan(report, as_json=arguments.json)
@@ -441,25 +508,27 @@ def run(
             availability=availability,
             libraries=libraries,
             max_download_bytes=arguments.max_download,
-            allow_source_build=not arguments.offline and not arguments.no_source_build,
+            allow_source_build=getattr(arguments, "allow_source_build", False),
         )
         policy = ExecutionPolicy(timeout_seconds=arguments.check_timeout)
-        if context.lock is not None:
+        rejected_discovery: DiscoveryResult | None = None
+        if context_resolution.kind == "lock":
             if arguments.lock_out is not None:
                 raise SpecificationError("--lock-out cannot be combined with an exact lock")
+            assert context.lock is not None
             lock_path = _lock_path(
                 context.lock,
                 source_path,
                 embedded=arguments.lock is None,
             )
             environment = runtime.open_exact(
-                EnvironmentLock.load(lock_path), import_roots=analyze_source(source).imports
+                EnvironmentLock.load(lock_path), import_roots=evidence.imports
             )
             preparation = PhaseTiming(
                 "environment_open", round((time.monotonic() - preparation_started) * 1000)
             )
             result = environment.check(source, filename=source_path.name, policy=policy)
-        elif context.requires:
+        elif context_resolution.kind == "references":
             resolution_started = time.monotonic()
             lock = runtime.prepare_references(context.requires, toolchain=context.toolchain)
             resolution = PhaseTiming(
@@ -467,57 +536,62 @@ def run(
             )
             if arguments.lock_out is not None:
                 lock.write(arguments.lock_out)
-            environment = runtime.open_exact(lock, import_roots=analyze_source(source).imports)
+            environment = runtime.open_exact(lock, import_roots=evidence.imports)
             preparation = PhaseTiming(
                 "environment_open",
                 round((time.monotonic() - resolution_started) * 1000) - resolution.duration_ms,
             )
             result = environment.check(source, filename=source_path.name, policy=policy)
             result = replace(result, timings=(resolution, preparation, *result.timings))
-        elif context.toolchain is not None:
+        elif context_resolution.kind == "toolchain":
             preparation = PhaseTiming(
                 "toolchain", round((time.monotonic() - preparation_started) * 1000)
             )
             result = runtime.check_file(source_path, toolchain=context.toolchain, policy=policy)
+        elif context_resolution.kind == "project":
+            if arguments.lock_out is not None:
+                raise SpecificationError(
+                    "--lock-out is only available for explicit dependencies or discovery"
+                )
+            preparation = PhaseTiming(
+                "environment_open", round((time.monotonic() - preparation_started) * 1000)
+            )
+            result = runtime.check_file(source_path, policy=policy)
         else:
-            try:
-                preparation = PhaseTiming(
-                    "environment_open", round((time.monotonic() - preparation_started) * 1000)
-                )
-                result = runtime.check_file(source_path, policy=policy)
-                if arguments.lock_out is not None:
-                    raise SpecificationError(
-                        "--lock-out is only available for explicit dependencies or discovery"
-                    )
-            except ProjectError:
-                if arguments.no_discover:
-                    raise SpecificationError(
-                        "the file has no execution context; add frontmatter, pass --with or "
-                        "--toolchain, provide --lock, or place it in a pinned Lake project"
-                    ) from None
+            discovery_started = time.monotonic()
+            discovery_catalog = _catalog(arguments.catalog)
+            discovery_policy = _discovery_policy(arguments)
+            discovery = Discovery(
+                catalog=discovery_catalog,
+                policy=discovery_policy,
+                runtime=runtime,
+                runtime_events=runtime_events,
+                filename=source_path.name,
+            )
+            if not discovery.has_local_history_hint(source, evidence=evidence):
                 renderer.note("Discovering an exact environment")
-                discovery_started = time.monotonic()
-                discovered = Discovery(
-                    catalog=_catalog(arguments.catalog),
-                    policy=_discovery_policy(arguments),
-                    runtime=runtime,
-                    runtime_events=runtime_events,
-                ).discover_and_check(source)
-                if discovered.status != "found" or discovered.execution_result is None:
-                    rejection = discovered.rejection_attempt
-                    if rejection is None or rejection.execution_result is None:
-                        raise SpecificationError(_discovery_failure(discovered)) from None
-                    result = rejection.execution_result
-                else:
-                    if arguments.lock_out is not None:
-                        assert discovered.lock is not None
-                        discovered.lock.write(arguments.lock_out)
-                    result = discovered.execution_result
-                preparation = PhaseTiming(
-                    "discovery", round((time.monotonic() - discovery_started) * 1000)
-                )
-        if context.lock is not None or context.toolchain is not None or not context.requires:
+            discovered = discovery.discover_and_check(source, evidence=evidence)
+            if discovered.status != "found" or discovered.execution_result is None:
+                rejection = discovered.best_rejection
+                if rejection is None or rejection.execution_result is None:
+                    raise SpecificationError(_discovery_failure(discovered)) from None
+                result = rejection.execution_result
+                rejected_discovery = discovered
+            else:
+                if arguments.lock_out is not None:
+                    assert discovered.lock is not None
+                    discovered.lock.write(arguments.lock_out)
+                result = discovered.execution_result
+            preparation = PhaseTiming(
+                "discovery", round((time.monotonic() - discovery_started) * 1000)
+            )
+        if context_resolution.kind in {"lock", "toolchain", "project", "discovery"}:
             result = replace(result, timings=(preparation, *result.timings))
+        if rejected_discovery is not None:
+            result = replace(
+                result,
+                hints=(*result.hints, _discovery_summary(rejected_discovery)),
+            )
         renderer.close()
         _emit(
             result,
@@ -525,6 +599,12 @@ def run(
             filename=source_path.name,
             display_path=str(arguments.file),
             show_timings=arguments.timings,
+            summary_elapsed_seconds=(
+                rejected_discovery.duration_seconds if rejected_discovery is not None else None
+            ),
+            discovery_summary=(
+                _discovery_summary(rejected_discovery) if rejected_discovery is not None else None
+            ),
         )
         return 0 if result.ok else 1
     except KeyboardInterrupt:

@@ -395,13 +395,9 @@ class OCIRegistryClient:
                 media_type = response.headers.get_content_type()
                 recorded_digest = response.headers.get("Docker-Content-Digest")
         except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                raise DownloadUnavailable(
-                    f"OCI manifest is not available: {self.repository.display}:{reference}"
-                ) from exc
-            raise DownloadUnavailable(f"OCI registry request failed: HTTP {exc.code}") from exc
+            raise _request_failure("manifest pull", exc) from exc
         except OSError as exc:
-            raise DownloadUnavailable(f"OCI registry is unavailable: {exc}") from exc
+            raise _request_failure("manifest pull", exc) from exc
         if len(data) > 4 * 1024 * 1024:
             raise EnvironmentError("OCI manifest exceeds the supported size limit")
         digest = "sha256:" + hashlib.sha256(data).hexdigest()
@@ -806,7 +802,11 @@ class OCIEnvironmentCache:
                 item for item in manifests if isinstance(item, dict) and _platform_matches(item)
             ]
             if not candidates:
-                raise DownloadUnavailable("OCI index has no compatible platform manifest")
+                raise DownloadUnavailable(
+                    "OCI index has no compatible platform manifest",
+                    reason_code="platform_compatibility_mismatch",
+                    retryable=False,
+                )
             descriptor = candidates[0]
             selected = self.client.manifest(str(descriptor.get("digest")))
             if selected.digest != descriptor.get("digest") or len(selected.data) != descriptor.get(

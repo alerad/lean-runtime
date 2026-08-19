@@ -18,10 +18,13 @@ from lean_runtime import (
     ProjectError,
     Runtime,
     RuntimeEvent,
+    SpecificationError,
     discover_project,
 )
 from lean_runtime._git import git_command
 from lean_runtime.errors import DownloadLimitExceeded
+from lean_runtime.models import ExecutionResult
+from lean_runtime.policies import ExecutionPolicy
 from lean_runtime.serialization import sha256_id
 
 
@@ -55,6 +58,19 @@ class ProjectToolchains:
             )
             return [sys.executable, "-c", script, args[-1]]
         return [sys.executable, "-c", "raise SystemExit(0)", executable, *args]
+
+
+class ArtifactProjectToolchains(ProjectToolchains):
+    def __init__(self, home: Path, *, cache_exit_code: int = 0) -> None:
+        super().__init__(home)
+        self.cache_exit_code = cache_exit_code
+        self.calls: list[tuple[str, ...]] = []
+
+    def command(self, toolchain: str, executable: str, *args: str) -> list[str]:
+        self.calls.append((executable, *args))
+        if executable == "lake" and args == ("exe", "cache", "get"):
+            return [sys.executable, "-c", f"raise SystemExit({self.cache_exit_code})"]
+        return super().command(toolchain, executable, *args)
 
 
 class InitProjectToolchains(ProjectToolchains):
@@ -125,6 +141,27 @@ def _project(root: Path, *, name: str = "sample") -> Path:
     return source
 
 
+def _project_with_mathlib_manifest(root: Path) -> Path:
+    source = _project(root)
+    (root / "lake-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": "1.2.0",
+                "packagesDir": ".lake/packages",
+                "packages": [
+                    {
+                        "type": "git",
+                        "name": "mathlib",
+                        "url": "https://github.com/leanprover-community/mathlib4.git",
+                        "rev": "a" * 40,
+                    }
+                ],
+            }
+        )
+    )
+    return source
+
+
 def _shared_project(root: Path, dependency: Path) -> tuple[Path, str]:
     source = _project(root)
     subprocess.run(git_command("init", "--quiet", str(dependency)), check=True)
@@ -184,6 +221,116 @@ def _shared_project(root: Path, dependency: Path) -> tuple[Path, str]:
     return source, revision
 
 
+def _remembered_package_pair(
+    root: Path,
+    *,
+    producer_toolchain: str = "leanprover/lean4:v4.32.0",
+    consumer_toolchain: str = "leanprover/lean4:v4.32.0",
+    producer_base_revision: str | None = None,
+    consumer_base_revision: str | None = None,
+    input_revision: str = "v1.0.0",
+) -> tuple[Path, Path, str]:
+    producer = root / "producer"
+    producer.mkdir(parents=True)
+    (producer / ".gitignore").write_text("/.lake/\n")
+    (producer / "lean-toolchain").write_text(producer_toolchain + "\n")
+    (producer / "lakefile.toml").write_text('name = "dep"\n')
+    producer_packages: list[dict[str, object]] = []
+    if producer_base_revision is not None:
+        producer_packages.append(
+            {
+                "name": "base",
+                "type": "git",
+                "url": "https://example.invalid/base.git",
+                "rev": producer_base_revision,
+                "inputRev": "base-display-tag",
+                "configFile": "lakefile.toml",
+            }
+        )
+    (producer / "lake-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": "1.2.0",
+                "name": "dep",
+                "packagesDir": ".lake/packages",
+                "packages": producer_packages,
+            }
+        )
+    )
+    (producer / "Dep.lean").write_text("def rememberedValue := 1\n")
+    subprocess.run(git_command("init", "--quiet", str(producer)), check=True)
+    subprocess.run(
+        git_command(
+            "-C",
+            str(producer),
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:example/dep.git",
+        ),
+        check=True,
+    )
+    subprocess.run(git_command("-C", str(producer), "add", "."), check=True)
+    subprocess.run(
+        git_command(
+            "-C",
+            str(producer),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ),
+        check=True,
+    )
+    revision = subprocess.run(
+        git_command("-C", str(producer), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    artifact = producer / ".lake" / "build" / "lib" / "lean" / "Dep.olean"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"producer artifact")
+
+    consumer_source = _project(root / "consumer")
+    (root / "consumer" / "lean-toolchain").write_text(consumer_toolchain + "\n")
+    consumer_packages: list[dict[str, object]] = [
+        {
+            "name": "dep",
+            "type": "git",
+            "url": "https://github.com/example/dep",
+            "rev": revision,
+            "inputRev": input_revision,
+            "configFile": "lakefile.toml",
+        }
+    ]
+    if consumer_base_revision is not None:
+        consumer_packages.append(
+            {
+                "name": "base",
+                "type": "git",
+                "url": "https://example.invalid/base",
+                "rev": consumer_base_revision,
+                "inputRev": "another-base-tag",
+                "configFile": "lakefile.toml",
+            }
+        )
+    (root / "consumer" / "lake-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": "1.2.0",
+                "packagesDir": ".lake/packages",
+                "packages": consumer_packages,
+            }
+        )
+    )
+    return producer, consumer_source, revision
+
+
 def test_discover_project_walks_up_from_a_lean_file(tmp_path: Path) -> None:
     source = _project(tmp_path / "project")
     context = discover_project(source)
@@ -206,13 +353,13 @@ def test_discover_project_requires_lakefile_and_toolchain(tmp_path: Path) -> Non
         discover_project(source)
 
 
-def test_runtime_check_file_suggests_toolchain_for_a_standalone_file(tmp_path: Path) -> None:
+def test_runtime_check_file_can_require_an_explicit_context(tmp_path: Path) -> None:
     source = tmp_path / "Main.lean"
     source.write_text("example : True := by trivial\n")
     runtime = Runtime(home=tmp_path / "runtime", libraries=[])
 
-    with pytest.raises(ProjectError, match=r"--using toolchain:v4\.33\.0"):
-        runtime.check_file(source)
+    with pytest.raises(SpecificationError, match="no explicit context"):
+        runtime.check_file(source, discover=False)
 
 
 def test_check_builds_a_missing_local_import_then_retries(tmp_path: Path) -> None:
@@ -253,6 +400,150 @@ def test_project_wide_check_builds_only_lake_declared_library_artifacts(
     assert result.ok
     assert result.command[-3:] == ("build", "@/Alpha:leanArts", "@/Beta:leanArts")
     assert "lake" in result.command
+
+
+def test_project_build_restores_known_dependency_artifacts_by_default(tmp_path: Path) -> None:
+    source = _project_with_mathlib_manifest(tmp_path / "project")
+    toolchains = ArtifactProjectToolchains(tmp_path / "runtime")
+    events: list[RuntimeEvent] = []
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=toolchains,
+        libraries=[],  # type: ignore[arg-type]
+        on_event=events.append,
+    )
+
+    result = runtime.build(source, shared=False)
+
+    assert result.ok
+    assert ("lake", "exe", "cache", "get") in toolchains.calls
+    assert ("lake", "build") in toolchains.calls
+    assert result.timings[0].phase == "artifact_hydration"
+    assert any(event.kind == "artifact.hydration_started" for event in events)
+    assert any(event.kind == "artifact.hydration_finished" for event in events)
+
+
+def test_project_build_cache_failure_falls_back_to_source_build(tmp_path: Path) -> None:
+    source = _project_with_mathlib_manifest(tmp_path / "project")
+    toolchains = ArtifactProjectToolchains(tmp_path / "runtime", cache_exit_code=1)
+    events: list[RuntimeEvent] = []
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=toolchains,
+        libraries=[],  # type: ignore[arg-type]
+        on_event=events.append,
+    )
+
+    result = runtime.build(source, shared=False)
+
+    assert result.ok
+    assert ("lake", "build") in toolchains.calls
+    failed = [event for event in events if event.kind == "artifact.hydration_failed"]
+    assert len(failed) == 1
+    assert failed[0].data["exit_code"] == 1
+
+
+def test_project_build_can_disable_dependency_artifact_restoration(tmp_path: Path) -> None:
+    source = _project_with_mathlib_manifest(tmp_path / "project")
+    toolchains = ArtifactProjectToolchains(tmp_path / "runtime")
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=toolchains,
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    result = runtime.build(source, shared=False, artifact_cache=False)
+
+    assert result.ok
+    assert ("lake", "exe", "cache", "get") not in toolchains.calls
+    assert ("lake", "build") in toolchains.calls
+
+
+def test_project_build_offline_policy_skips_dependency_artifact_restoration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _project_with_mathlib_manifest(tmp_path / "project")
+    toolchains = ArtifactProjectToolchains(tmp_path / "runtime")
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=toolchains,
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    def execute(command, **kwargs):
+        return ExecutionResult(
+            ok=True,
+            exit_code=0,
+            toolchain=kwargs["toolchain"],
+            command=tuple(command),
+            cwd=str(kwargs["cwd"]),
+            stdout="",
+            stderr="",
+            elapsed_seconds=0,
+        )
+
+    monkeypatch.setattr(runtime, "_raw_result", execute)
+
+    result = runtime.project(source).build(
+        policy=ExecutionPolicy(timeout_seconds=30, network="disabled"),
+        shared=False,
+    )
+
+    assert result.ok
+    assert ("lake", "exe", "cache", "get") not in toolchains.calls
+
+
+def test_shared_project_cache_uses_the_exact_package_override(tmp_path: Path) -> None:
+    source, _ = _shared_project(tmp_path / "project", tmp_path / "dependency")
+    checkout = tmp_path / "project/.lake/packages/dep"
+    mathlib_checkout = checkout.with_name("mathlib")
+    checkout.rename(mathlib_checkout)
+    subprocess.run(
+        git_command(
+            "-C",
+            str(mathlib_checkout),
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/leanprover-community/mathlib4.git",
+        ),
+        check=True,
+    )
+    manifest = json.loads((tmp_path / "project/lake-manifest.json").read_text())
+    manifest["packages"][0]["name"] = "mathlib"
+    manifest["packages"][0]["url"] = "https://github.com/leanprover-community/mathlib4.git"
+    (tmp_path / "project/lake-manifest.json").write_text(json.dumps(manifest))
+    toolchains = ArtifactProjectToolchains(tmp_path / "runtime")
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=toolchains,
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    result = runtime.build(source, shared=True)
+
+    assert result.ok
+    cache_call = next(call for call in toolchains.calls if call[-3:] == ("exe", "cache", "get"))
+    assert cache_call[0] == "lake"
+    assert cache_call[1].startswith("--packages=")
+
+
+def test_project_check_does_not_restore_dependency_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _project_with_mathlib_manifest(tmp_path / "project")
+    toolchains = ArtifactProjectToolchains(tmp_path / "runtime")
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=toolchains,
+        libraries=[],  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(runtime.project_executor, "_local_libraries", lambda _context: ("Sample",))
+
+    result = runtime.check_project(source)
+
+    assert result.ok
+    assert ("lake", "exe", "cache", "get") not in toolchains.calls
 
 
 def test_shared_project_build_uses_exact_external_package_override(tmp_path: Path) -> None:
@@ -567,6 +858,153 @@ def test_scan_registers_an_exact_local_graph_for_future_reuse(tmp_path: Path) ->
     assert scanned.projects == (context.root,)
     assert donor == context.root
     assert seeds["dep"] == context.root / ".lake" / "packages" / "dep"
+
+
+def test_remembered_project_donates_exact_package_source_and_artifacts(tmp_path: Path) -> None:
+    producer, consumer_source, revision = _remembered_package_pair(tmp_path)
+    (producer / "lean-runtime.toml").write_text(
+        'schema = "lean-runtime-project/1"\ndependencies = "shared"\n'
+    )
+    events: list[RuntimeEvent] = []
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+        on_event=events.append,
+    )
+    runtime.shared_projects.remember_project(discover_project(producer))
+
+    workspace = runtime.prepare_shared_project(consumer_source)
+    package = Path(json.loads(workspace.overrides_file.read_text())["packages"][0]["dir"])
+
+    assert package != producer
+    assert not (package / "lean-runtime.toml").exists()
+    assert (
+        subprocess.run(
+            git_command("-C", str(package), "rev-parse", "HEAD"),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == revision
+    )
+    managed_artifact = package / ".lake" / "build" / "lib" / "lean" / "Dep.olean"
+    assert managed_artifact.read_bytes() == b"producer artifact"
+    (producer / ".lake" / "build" / "lib" / "lean" / "Dep.olean").write_bytes(b"mutated producer")
+    assert managed_artifact.read_bytes() == b"producer artifact"
+    selected = next(
+        event for event in events if event.kind == "project.shared.project_seed_selected"
+    )
+    assert selected.data["revision"] == revision
+    assert selected.data["artifacts"] is True
+
+
+def test_remembered_package_identity_ignores_input_revision_display_tag(
+    tmp_path: Path,
+) -> None:
+    producer, first_source, _revision = _remembered_package_pair(
+        tmp_path / "first", input_revision="v-display-one"
+    )
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+    runtime.shared_projects.remember_project(discover_project(producer))
+    first = runtime.prepare_shared_project(first_source)
+    first_package = Path(json.loads(first.overrides_file.read_text())["packages"][0]["dir"])
+
+    second_source = _project(tmp_path / "second")
+    second_manifest_path = tmp_path / "first" / "consumer" / "lake-manifest.json"
+    second_manifest = json.loads(second_manifest_path.read_text())
+    second_manifest["packages"][0]["inputRev"] = "a-renamed-tag"
+    (tmp_path / "second" / "lake-manifest.json").write_text(json.dumps(second_manifest))
+    second = runtime.prepare_shared_project(second_source)
+    second_package = Path(json.loads(second.overrides_file.read_text())["packages"][0]["dir"])
+
+    assert first.workspace_id != second.workspace_id
+    assert first_package == second_package
+
+
+def test_remembered_package_refuses_same_tag_with_different_resolved_revision(
+    tmp_path: Path,
+) -> None:
+    producer, consumer_source, _revision = _remembered_package_pair(tmp_path)
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+    runtime.shared_projects.remember_project(discover_project(producer))
+    context = discover_project(consumer_source)
+    manifest = json.loads(context.current_manifest().read_text())
+    manifest["packages"][0]["rev"] = "f" * 40
+
+    seeds = runtime.shared_projects.registered_package_seeds(context, manifest["packages"])
+
+    assert "dep" not in seeds
+
+
+def test_remembered_package_reuses_only_source_when_dependency_cone_differs(
+    tmp_path: Path,
+) -> None:
+    producer, consumer_source, _revision = _remembered_package_pair(
+        tmp_path,
+        producer_base_revision="a" * 40,
+        consumer_base_revision="b" * 40,
+    )
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+    runtime.shared_projects.remember_project(discover_project(producer))
+    context = discover_project(consumer_source)
+    manifest = json.loads(context.current_manifest().read_text())
+
+    seed = runtime.shared_projects.registered_package_seeds(context, manifest["packages"])["dep"]
+
+    assert seed.artifact is None
+    assert seed.artifact_miss == "resolved dependency differs: base"
+
+
+def test_remembered_package_reuses_only_source_when_toolchain_differs(tmp_path: Path) -> None:
+    producer, consumer_source, _revision = _remembered_package_pair(
+        tmp_path,
+        producer_toolchain="leanprover/lean4:v4.31.0",
+        consumer_toolchain="leanprover/lean4:v4.32.0",
+    )
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+    runtime.shared_projects.remember_project(discover_project(producer))
+    context = discover_project(consumer_source)
+    manifest = json.loads(context.current_manifest().read_text())
+
+    seed = runtime.shared_projects.registered_package_seeds(context, manifest["packages"])["dep"]
+
+    assert seed.artifact is None
+    assert "toolchain differs" in str(seed.artifact_miss)
+
+
+def test_dirty_remembered_project_is_not_a_package_seed(tmp_path: Path) -> None:
+    producer, consumer_source, _revision = _remembered_package_pair(tmp_path)
+    (producer / "lean-runtime.toml").write_text(
+        'schema = "lean-runtime-project/1"\ndependencies = "shared"\n'
+    )
+    (producer / "untracked.txt").write_text("do not import me\n")
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+    runtime.shared_projects.remember_project(discover_project(producer))
+    context = discover_project(consumer_source)
+    manifest = json.loads(context.current_manifest().read_text())
+
+    assert not runtime.shared_projects.registered_package_seeds(context, manifest["packages"])
 
 
 def test_adoption_does_not_mistake_the_parent_repository_for_a_package(tmp_path: Path) -> None:

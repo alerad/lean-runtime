@@ -15,6 +15,7 @@ RenderMode = Literal["tty", "plain", "quiet"]
 _BAR_WIDTH = 20
 _TTY_REDRAW_SECONDS = 0.1
 _PLAIN_CHECKPOINT_PERCENT = 25
+_LARGE_CLOSURE_BYTES = 1024**3
 
 
 def select_mode(*, quiet: bool = False, stream: TextIO | None = None) -> RenderMode:
@@ -115,6 +116,8 @@ class ConsoleRenderer:
         self._print(f"Resolving {reference}".rstrip())
 
     def _render_discovery_candidate_started(self, event: RuntimeEvent) -> None:
+        if event.data.get("remembered") is True:
+            return
         candidate = event.data.get("candidate", "candidate")
         toolchain = event.data.get("toolchain")
         suffix = f" · {toolchain}" if toolchain else ""
@@ -129,6 +132,11 @@ class ConsoleRenderer:
         cached = event.data.get("cached_bytes")
         if not isinstance(download, int) or download <= 0:
             return
+        if download >= _LARGE_CLOSURE_BYTES:
+            self._print(
+                f"Large import closure: {format_byte_size(download)} to download; "
+                "narrower imports may fetch less"
+            )
         self._start_download("Downloading environment", download, cached)
 
     def _render_toolchain_download_planned(self, event: RuntimeEvent) -> None:
@@ -212,6 +220,14 @@ class ConsoleRenderer:
     def _render_artifact_hydration_started(self, event: RuntimeEvent) -> None:
         package = event.data.get("package", "artifacts")
         self._print(f"Hydrating build artifacts for {package}")
+
+    def _render_artifact_hydration_failed(self, event: RuntimeEvent) -> None:
+        package = event.data.get("package", "dependency")
+        self._print(
+            self.style.yellow(
+                f"WARNING: artifact cache unavailable for {package}; building from source"
+            )
+        )
 
     def _render_availability_fallback(self, event: RuntimeEvent) -> None:
         library = event.data.get("library", "environment library")

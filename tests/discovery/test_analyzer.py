@@ -8,6 +8,13 @@ def test_extracts_multiple_imports_and_roots() -> None:
     assert not evidence.appears_core_only
 
 
+def test_extracts_prefixed_imports() -> None:
+    evidence = analyze_source("public import Mathlib\nmeta import Batteries.Data.List\n")
+    assert evidence.imports == ("Mathlib", "Batteries.Data.List")
+    assert evidence.root_namespaces == ("Mathlib", "Batteries")
+    assert not evidence.appears_core_only
+
+
 def test_ignores_nested_comments_strings_and_line_comments() -> None:
     source = """/- import Fake.One /- import Fake.Two -/ -/
 def text := "import Fake.String"

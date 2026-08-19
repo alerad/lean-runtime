@@ -27,6 +27,7 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
     import tomli as tomllib
 
 from .errors import ProjectError
+from .import_syntax import IMPORT_STATEMENT
 from .models import ExecutionResult, PhaseTiming
 from .policies import ExecutionPolicy
 from .project_sharing import project_sharing_enabled
@@ -38,12 +39,11 @@ _MISSING_MODULE = re.compile(
     r"does not exist"
 )
 _MODULE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*")
-_IMPORT = re.compile(r"^\s*(?:public\s+)?import\s+(.+?)\s*$", re.MULTILINE)
 
 
 def _source_imports(source: str) -> tuple[str, ...]:
     imports: list[str] = []
-    for match in _IMPORT.finditer(source):
+    for match in IMPORT_STATEMENT.finditer(source):
         for token in match.group(1).split():
             if _MODULE_NAME.fullmatch(token) is not None and token not in imports:
                 imports.append(token)
@@ -283,6 +283,7 @@ class ProjectExecutor:
         policy: ExecutionPolicy,
         cancel: threading.Event | None = None,
         shared: bool | None = None,
+        restore_artifacts: bool = False,
     ) -> ExecutionResult:
         selected_shared = project_sharing_enabled(context.root) if shared is None else shared
         workspace = (
@@ -297,6 +298,11 @@ class ProjectExecutor:
         )
         command = self.runtime.toolchains.command(context.toolchain, "lake", *lake_arguments)
         environment = self.runtime.lake_cache.environment(context)
+        project_provenance = context.provenance()
+        package_provenance = context.package_provenance()
+        package_arguments = (
+            (f"--packages={workspace.overrides_file}",) if workspace is not None else ()
+        )
 
         def run() -> ExecutionResult:
             return self.runtime._raw_result(
@@ -305,8 +311,8 @@ class ProjectExecutor:
                 toolchain=context.toolchain,
                 source_digest=sha256_text(""),
                 policy=policy,
-                project=context.provenance(),
-                packages=context.package_provenance(),
+                project=project_provenance,
+                packages=package_provenance,
                 logical_command=(
                     "lake",
                     "build",
@@ -317,12 +323,93 @@ class ProjectExecutor:
                 cancel=cancel,
             )
 
+        def hydrate_and_run() -> ExecutionResult:
+            hydration_seconds = 0.0
+            hydration_timings: list[PhaseTiming] = []
+            accelerators = (
+                self.runtime.lake_cache.dependency_accelerators(package_provenance)
+                if restore_artifacts and policy.network != "disabled"
+                else ()
+            )
+            for package, requested in accelerators:
+                self.runtime.events.emit(
+                    "artifact.hydration_started",
+                    f"Hydrating build artifacts for {package}",
+                    phase="artifact_hydration",
+                    package=package,
+                    automatic=True,
+                )
+                selected = (
+                    self.runtime.toolchains.command(
+                        context.toolchain,
+                        requested[0],
+                        *package_arguments,
+                        *requested[1:],
+                    )
+                    if requested[0] in {"lake", "lean"}
+                    else list(requested)
+                )
+                cache_policy = replace(
+                    policy,
+                    timeout_seconds=min(policy.timeout_seconds, 600.0),
+                )
+                hydrated = self.runtime._raw_result(
+                    selected,
+                    cwd=context.root,
+                    toolchain=context.toolchain,
+                    source_digest=sha256_text(""),
+                    policy=cache_policy,
+                    project=project_provenance,
+                    packages=package_provenance,
+                    logical_command=(requested[0], *package_arguments, *requested[1:]),
+                    environment=environment,
+                    cancel=cancel,
+                )
+                hydration_seconds += hydrated.elapsed_seconds
+                hydration_timings.append(
+                    PhaseTiming(
+                        "artifact_hydration",
+                        round(hydrated.elapsed_seconds * 1000),
+                    )
+                )
+                if hydrated.cancelled:
+                    return replace(
+                        hydrated,
+                        elapsed_seconds=hydration_seconds,
+                        timings=tuple(hydration_timings),
+                    )
+                if hydrated.ok:
+                    self.runtime.events.emit(
+                        "artifact.hydration_finished",
+                        f"Build artifacts ready for {package}",
+                        phase="artifact_hydration",
+                        package=package,
+                        automatic=True,
+                        elapsed_seconds=hydrated.elapsed_seconds,
+                    )
+                else:
+                    self.runtime.events.emit(
+                        "artifact.hydration_failed",
+                        f"Artifact cache unavailable for {package}; building from source",
+                        phase="artifact_hydration",
+                        package=package,
+                        automatic=True,
+                        exit_code=hydrated.exit_code,
+                        timed_out=hydrated.timed_out,
+                    )
+            result = run()
+            return replace(
+                result,
+                elapsed_seconds=hydration_seconds + result.elapsed_seconds,
+                timings=(*hydration_timings, *result.timings),
+            )
+
         if workspace is None:
-            return run()
+            return hydrate_and_run()
         lock_started = time.monotonic()
         with self.runtime.shared_projects.build_lock(workspace, cancel=cancel):
             waited_ms = round((time.monotonic() - lock_started) * 1000)
-            result = run()
+            result = hydrate_and_run()
         return replace(result, timings=(PhaseTiming("workspace_lock", waited_ms), *result.timings))
 
     def check_project(

@@ -70,6 +70,8 @@ class LeanRuntimeProbe:
     runtime: Runtime
     events: list[RuntimeEvent] | None = None
     import_roots: tuple[str, ...] = ()
+    filename: str = "Main.lean"
+    allow_source_build: bool = False
 
     def acquire(
         self,
@@ -81,11 +83,16 @@ class LeanRuntimeProbe:
         event_offset = len(self.events) if self.events is not None else 0
         emitter = getattr(self.runtime, "events", None)
         if emitter is not None:
+            remembered = any(
+                reason.code in {"RANK_EXACT_DECISION", "RANK_HEADER_DECISION"}
+                for reason in candidate.reasons
+            )
             emitter.emit(
                 "discovery.candidate_started",
                 f"Trying {candidate.entry.id}",
                 candidate=candidate.entry.id,
                 toolchain=candidate.entry.toolchain,
+                remembered=remembered,
             )
         try:
             environment = self.runtime.open_exact(
@@ -93,6 +100,7 @@ class LeanRuntimeProbe:
                 build_timeout=timeout_seconds,
                 import_roots=self.import_roots,
                 cancel=cancel,
+                allow_source_build=self.allow_source_build,
             )
             # Acquisition is complete only when the exact candidate can invoke
             # Lean without downloading or installing anything during the
@@ -107,11 +115,10 @@ class LeanRuntimeProbe:
         except (DownloadUnavailable, ToolchainError) as exc:
             raise ProbeUnavailable(str(exc)) from exc
         except EnvironmentError as exc:
-            detail = str(exc)
-            if "unavailable" in detail or "no compatible downloadable environment" in detail:
-                raise ProbeUnavailable(detail) from exc
+            if exc.retryable:
+                raise ProbeUnavailable(str(exc)) from exc
             if self.runtime.availability == "required":
-                raise ProbeIntegrityFailure(detail) from exc
+                raise ProbeIntegrityFailure(str(exc)) from exc
             raise
         acquisition: Acquisition = "unknown"
         if self.events is not None:
@@ -140,11 +147,15 @@ class LeanRuntimeProbe:
         environment = acquired.handle
         if not isinstance(environment, Environment):
             raise ProbeUnavailable("acquired candidate does not hold an open environment")
-        result = environment.check(
-            source,
-            policy=ExecutionPolicy(timeout_seconds=timeout_seconds),
-            cancel=cancel,
-        )
+        try:
+            result = environment.check(
+                source,
+                filename=self.filename,
+                policy=ExecutionPolicy(timeout_seconds=timeout_seconds),
+                cancel=cancel,
+            )
+        except DownloadUnavailable as exc:
+            raise ProbeUnavailable(str(exc)) from exc
         return ProbeOutcome(
             environment_id=environment.id,
             execution_result=result,

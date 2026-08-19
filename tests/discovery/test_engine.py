@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from dataclasses import dataclass, field
 
 import pytest
+from jsonschema import Draft202012Validator
 
-from lean_runtime import ExecutionResult, Runtime
+from lean_runtime import EnvironmentError, ExecutionResult
 from lean_runtime.discovery import (
     Discovery,
     DiscoveryError,
     DiscoveryPolicy,
-    PolicyError,
     ProbeOutcome,
+    schema_path,
 )
 from lean_runtime.discovery.candidate import Candidate
 from lean_runtime.discovery.probe import (
@@ -102,6 +104,9 @@ def test_first_rejection_second_compilation_is_authoritative(sample_catalog) -> 
     assert result.attempts[-1].acquisition == "unknown"
     assert [item.status for item in result.attempts] == ["lean_rejected", "compiled"]
     assert probe.opened == ["mathlib-new", "mathlib-old"]
+    Draft202012Validator(json.loads(schema_path("result-v1.schema.json").read_text())).validate(
+        result.to_dict()
+    )
 
 
 def test_candidate_budget_never_opens_bounded_candidate(sample_catalog) -> None:  # type: ignore[no-untyped-def]
@@ -112,8 +117,46 @@ def test_candidate_budget_never_opens_bounded_candidate(sample_catalog) -> None:
         probe=probe,
     ).discover_and_check("import Mathlib\n")
     assert result.status == "not_found"
+    assert result.outcome == "inconclusive"
+    assert result.completion == "candidate_limit"
+    assert result.confidence == "inconclusive"
     assert len(result.attempts) == 1
     assert result.diagnostics[0].code == "DISCOVERY_CANDIDATE_LIMIT"
+    assert probe.opened == ["mathlib-new"]
+
+
+def test_complete_rejection_is_distinct_from_an_incomplete_search(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    probe = FakeProbe(
+        {
+            "mathlib-new": execution(False),
+            "mathlib-old": execution(False),
+            "core": execution(False),
+        }
+    )
+    result = Discovery(
+        catalog=sample_catalog,
+        policy=DiscoveryPolicy(max_candidates=3, max_remote_acquisitions=3),
+        probe=probe,
+    ).discover_and_check("import Mathlib\n")
+    assert result.outcome == "source_rejected"
+    assert result.completion == "complete"
+    assert result.confidence == "exhausted"
+
+
+def test_remote_acquisition_limit_is_truthful(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    probe = FakeProbe(
+        {
+            "mathlib-new": execution(False),
+            "mathlib-old": execution(True),
+        }
+    )
+    result = Discovery(
+        catalog=sample_catalog,
+        policy=DiscoveryPolicy(max_remote_acquisitions=1),
+        probe=probe,
+    ).discover_and_check("import Mathlib\n")
+    assert result.outcome == "inconclusive"
+    assert result.completion == "acquisition_limit"
     assert probe.opened == ["mathlib-new"]
 
 
@@ -227,20 +270,23 @@ def test_per_candidate_timeout_is_enforced(sample_catalog) -> None:  # type: ign
     assert result.duration_seconds < 0.5
 
 
-def test_slow_acquisition_does_not_consume_search_budget(sample_catalog) -> None:  # type: ignore[no-untyped-def]
-    """A slow download must not expire the search budget before a fast, green check."""
+def test_slow_acquisition_consumes_global_wall_budget(sample_catalog) -> None:  # type: ignore[no-untyped-def]
     probe = FakeProbe({"mathlib-new": execution(True)}, acquisition_delay=0.3)
     result = Discovery(
         catalog=sample_catalog,
-        policy=DiscoveryPolicy(max_candidates=1, max_total_seconds=0.2),
+        policy=DiscoveryPolicy(
+            max_candidates=1,
+            max_total_seconds=1,
+            max_wall_seconds=0.2,
+        ),
         probe=probe,
     ).discover_and_check("import Mathlib\n")
-    assert result.status == "found"
-    assert result.confidence == "compiled"
+    assert result.status == "not_found"
+    assert result.outcome == "inconclusive"
+    assert result.completion == "time_limit"
 
 
-def test_slow_failed_acquisition_does_not_consume_search_budget(sample_catalog) -> None:  # type: ignore[no-untyped-def]
-    """A slow unavailable candidate must not expire the budget for the next one."""
+def test_slow_failed_acquisition_consumes_global_wall_budget(sample_catalog) -> None:  # type: ignore[no-untyped-def]
     probe = FakeProbe(
         {
             "mathlib-new": ProbeUnavailable("not published"),
@@ -250,14 +296,12 @@ def test_slow_failed_acquisition_does_not_consume_search_budget(sample_catalog) 
     )
     result = Discovery(
         catalog=sample_catalog,
-        policy=DiscoveryPolicy(max_total_seconds=0.2),
+        policy=DiscoveryPolicy(max_total_seconds=1, max_wall_seconds=0.2),
         probe=probe,
     ).discover_and_check("import Mathlib\n")
-    assert result.status == "found"
-    assert [item.status for item in result.attempts] == [
-        "environment_unavailable",
-        "compiled",
-    ]
+    assert result.status == "not_found"
+    assert result.completion == "time_limit"
+    assert [item.status for item in result.attempts] == ["timeout"]
 
 
 @dataclass
@@ -319,10 +363,11 @@ def test_lean_runtime_probe_passes_the_acquisition_budget_to_builds(sample_catal
             return toolchain
 
     def open_exact(  # type: ignore[no-untyped-def]
-        lock, *, build_timeout, import_roots=(), cancel=None
+        lock, *, build_timeout, import_roots=(), cancel=None, allow_source_build=None
     ):
         del lock, import_roots, cancel
         captured["build_timeout"] = build_timeout
+        captured["allow_source_build"] = float(bool(allow_source_build))
         return SimpleNamespace(id="env_fake")
 
     runtime = SimpleNamespace(
@@ -335,7 +380,42 @@ def test_lean_runtime_probe_passes_the_acquisition_budget_to_builds(sample_catal
     acquired = probe.acquire(candidate, timeout_seconds=123.0, cancel=threading.Event())
     assert captured["build_timeout"] == 123.0
     assert captured["toolchain_ready"] == 1
+    assert captured["allow_source_build"] == 0
     assert acquired.environment_id == "env_fake"
+
+
+def test_probe_uses_typed_retryability_not_error_text(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    from types import SimpleNamespace
+
+    from lean_runtime.discovery.probe import LeanRuntimeProbe
+
+    candidate = Discovery(catalog=sample_catalog).plan("import Mathlib\n").candidates[0]
+
+    def retryable_open(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise EnvironmentError("temporary transport failure", retryable=True)
+
+    retryable = SimpleNamespace(
+        open_exact=retryable_open,
+        availability="auto",
+        toolchains=SimpleNamespace(ensure=lambda *_args, **_kwargs: None),
+    )
+    with pytest.raises(ProbeUnavailable, match="temporary transport"):
+        LeanRuntimeProbe(runtime=retryable).acquire(  # type: ignore[arg-type]
+            candidate, timeout_seconds=10, cancel=threading.Event()
+        )
+
+    def terminal_open(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise EnvironmentError("artifact unavailable but integrity failed")
+
+    terminal = SimpleNamespace(
+        open_exact=terminal_open,
+        availability="auto",
+        toolchains=SimpleNamespace(ensure=lambda *_args, **_kwargs: None),
+    )
+    with pytest.raises(EnvironmentError, match="artifact unavailable"):
+        LeanRuntimeProbe(runtime=terminal).acquire(  # type: ignore[arg-type]
+            candidate, timeout_seconds=10, cancel=threading.Event()
+        )
 
 
 def test_external_cancellation_stops_active_probe(sample_catalog) -> None:  # type: ignore[no-untyped-def]
@@ -375,8 +455,12 @@ def test_async_cancellation_reaches_active_probe(sample_catalog) -> None:  # typ
 
 
 def test_no_candidates_does_not_require_probe(sample_catalog) -> None:  # type: ignore[no-untyped-def]
-    result = Discovery(catalog=sample_catalog).discover_and_check("import Missing.Module\n")
+    result = Discovery(
+        catalog=sample_catalog,
+        policy=DiscoveryPolicy(channels=("nightly",)),
+    ).discover_and_check("import Missing.Module\n")
     assert result.status == "not_found"
+    assert result.outcome == "no_candidate"
     assert result.attempts == ()
 
 
@@ -391,18 +475,36 @@ example : True := trivial
     assert result.diagnostics[0].code == "DISCOVERY_EXPLICIT_LOCK"
 
 
-def test_injected_runtime_cannot_weaken_source_build_policy(
-    tmp_path,
-    sample_catalog,  # type: ignore[no-untyped-def]
-) -> None:
-    runtime = Runtime(home=tmp_path / "runtime", availability="auto", libraries=())
-    with pytest.raises(PolicyError, match="source fallback"):
-        Discovery(catalog=sample_catalog, runtime=runtime).discover_and_check("import Mathlib\n")
-
-
 def test_probe_types_are_publicly_importable() -> None:
     from lean_runtime.discovery import AcquiredCandidate as PublicAcquired
     from lean_runtime.discovery import CandidateProbe as PublicProbe
 
     assert PublicAcquired is AcquiredCandidate
     assert PublicProbe is not None
+
+
+def test_lean_runtime_probe_preserves_the_user_filename(monkeypatch, sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    import lean_runtime.discovery.probe as probe_module
+    from lean_runtime.discovery.probe import LeanRuntimeProbe
+
+    captured: dict[str, str] = {}
+
+    class FakeEnvironment:
+        id = "env_fixture"
+        sparse = False
+
+        def check(self, _source, *, filename, policy, cancel):
+            del policy, cancel
+            captured["filename"] = filename
+            return execution(True)
+
+    monkeypatch.setattr(probe_module, "Environment", FakeEnvironment)
+    candidate = Discovery(catalog=sample_catalog).plan("import Mathlib\n").candidates[0]
+    acquired = AcquiredCandidate(candidate, "env_fixture", handle=FakeEnvironment())
+    LeanRuntimeProbe(runtime=object(), filename="Tight.lean").check(  # type: ignore[arg-type]
+        acquired,
+        "import Mathlib\n",
+        timeout_seconds=10,
+        cancel=threading.Event(),
+    )
+    assert captured["filename"] == "Tight.lean"

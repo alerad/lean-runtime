@@ -15,7 +15,14 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from importlib.metadata import version as distribution_version
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .context_resolution import FileContextResolution
+    from .discovery.analyzer import SourceEvidence
+    from .discovery.candidate import DiscoveryPlan
+    from .discovery.catalog import Catalog
+    from .discovery.policy import DiscoveryPolicy
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -171,6 +178,9 @@ def _bundled_lock_for_references(
 
 
 def _download_reason(error: Exception) -> str:
+    typed_reason = getattr(error, "reason_code", None)
+    if isinstance(typed_reason, str):
+        return typed_reason
     message = str(error).lower()
     if "platform" in message or "compatible" in message:
         return "platform_compatibility_mismatch"
@@ -327,8 +337,9 @@ class Runtime:
             except DownloadUnavailable as exc:
                 rejections.append(f"{library.repository.display}: {exc}")
         detail = f" ({'; '.join(rejections)})" if rejections else ""
-        raise EnvironmentError(
-            "sparse environment cannot acquire its requested import closure" + detail
+        raise DownloadUnavailable(
+            "sparse environment cannot acquire its requested import closure" + detail,
+            retryable=True,
         )
 
     def prepare(
@@ -350,7 +361,11 @@ class Runtime:
         accelerate: bool = False,
         import_roots: Sequence[str] = (),
         cancel: threading.Event | None = None,
+        allow_source_build: bool | None = None,
     ) -> Environment:
+        source_build_allowed = (
+            self.allow_source_build if allow_source_build is None else allow_source_build
+        )
         environment_id = environment_identity(lock, build_profile)
         destination = self.store.environment_path(environment_id)
         imported = False
@@ -385,12 +400,14 @@ class Runtime:
                 )
         if not destination.is_dir() and self.availability != "local":
             rejections: list[str] = []
+            availability_errors: list[DownloadUnavailable] = []
             for library in self.libraries:
                 try:
                     library.pull_capsule(lock, tuple(import_roots), name=name)
                     imported = True
                     break
                 except DownloadUnavailable as exc:
+                    availability_errors.append(exc)
                     reason_code = _download_reason(exc)
                     rejections.append(f"{library.repository.display}: {reason_code} ({exc})")
                     self.events.emit(
@@ -404,12 +421,22 @@ class Runtime:
                 if not self.libraries:
                     raise EnvironmentError(
                         "a downloadable environment is required but no environment libraries "
-                        "are configured"
+                        "are configured",
+                        reason_code="environment_library_unconfigured",
+                        retryable=False,
                     )
                 nearest = f" Nearest candidates: {'; '.join(rejections)}" if rejections else ""
-                raise EnvironmentError(
+                reason_codes = {_download_reason(item) for item in availability_errors}
+                reason_code = (
+                    next(iter(reason_codes))
+                    if len(reason_codes) == 1
+                    else "remote_candidate_unavailable"
+                )
+                raise DownloadUnavailable(
                     "no compatible downloadable environment was found; availability=required "
-                    "does not permit a source build." + nearest
+                    "does not permit a source build." + nearest,
+                    reason_code=reason_code,
+                    retryable=any(item.retryable for item in availability_errors),
                 )
             if not imported:
                 self.events.emit(
@@ -418,11 +445,13 @@ class Runtime:
                     capability="source_build",
                     environment_id=environment_id,
                 )
-        if not destination.is_dir() and not imported and not self.allow_source_build:
-            raise EnvironmentError(
+        if not destination.is_dir() and not imported and not source_build_allowed:
+            raise DownloadUnavailable(
                 f"environment {environment_id} is not retained locally; offline mode "
                 "does not permit downloading, toolchain installation, or source "
-                "materialization"
+                "materialization",
+                reason_code="local_candidate_missing",
+                retryable=False,
             )
         return self.environments.ensure(
             lock,
@@ -465,6 +494,8 @@ class Runtime:
                             "library": environment_library.repository.display,
                             "available": False,
                             "error": str(exc),
+                            "reason_code": _download_reason(exc),
+                            "retryable": bool(getattr(exc, "retryable", True)),
                         }
                     )
                     continue
@@ -485,6 +516,8 @@ class Runtime:
                             "library": toolchain_library.repository.display,
                             "available": False,
                             "error": str(exc),
+                            "reason_code": _download_reason(exc),
+                            "retryable": bool(getattr(exc, "retryable", True)),
                         }
                     )
                     continue
@@ -520,6 +553,30 @@ class Runtime:
             and isinstance(toolchain_download, int),
             "libraries": libraries,
         }
+
+    def exact_ready_locally(
+        self,
+        lock: EnvironmentLock,
+        *,
+        import_roots: Sequence[str] = (),
+    ) -> bool:
+        """Return whether a lock and import closure can check without acquisition."""
+
+        environment_id = environment_identity(lock)
+        if not self.store.environment_path(environment_id).is_dir():
+            return False
+        if not self._toolchain_installed(lock.toolchain):
+            return False
+        try:
+            self.environments.ensure_sparse_modules(
+                lock,
+                tuple(import_roots),
+                frozenset({"check"}),
+                allow_acquisition=False,
+            )
+        except EnvironmentError:
+            return False
+        return True
 
     def _toolchain_installed(self, toolchain: str) -> bool:
         """Answer without bootstrapping Elan or installing anything."""
@@ -1139,6 +1196,7 @@ class Runtime:
         timeout: float | None = None,
         policy: ExecutionPolicy | None = None,
         cancel: threading.Event | None = None,
+        discover: bool = True,
     ) -> ExecutionResult:
         source_path = Path(path).expanduser().resolve()
         selected_policy = policy or ExecutionPolicy(timeout_seconds=timeout or 120)
@@ -1150,16 +1208,77 @@ class Runtime:
                     source_path, policy=selected_policy, cancel=cancel
                 )
             if toolchain is None:
-                try:
-                    local_project = self.project(source_path)
-                except ProjectError as exc:
-                    raise ProjectError(
-                        f"{exc}\nFor automatic standalone context discovery, use "
-                        "`lean-runtime check FILE`.\n"
-                        "To select core Lean explicitly, pass an exact toolchain: "
-                        "`lean-runtime check FILE --using toolchain:v4.33.0`."
-                    ) from exc
-                return local_project.check_file(source_path, policy=selected_policy, cancel=cancel)
+                from .context_resolution import resolve_file_context
+                from .discovery.analyzer import analyze_source
+                from .discovery.api import Discovery
+                from .discovery.defaults import default_catalog
+                from .frontmatter import LeanFrontmatter, parse_frontmatter
+
+                source = source_path.read_text(encoding="utf-8")
+                evidence = analyze_source(source)
+                resolution = resolve_file_context(
+                    source_path,
+                    parse_frontmatter(source) or LeanFrontmatter(),
+                    discover=discover,
+                )
+                if resolution.kind == "lock":
+                    assert resolution.explicit.lock is not None
+                    lock_path = Path(resolution.explicit.lock).expanduser()
+                    if not lock_path.is_absolute():
+                        lock_path = source_path.parent / lock_path
+                    opened = self.open_exact(
+                        EnvironmentLock.load(lock_path.resolve()),
+                        import_roots=evidence.imports,
+                    )
+                    return opened.check(
+                        source,
+                        filename=source_path.name,
+                        policy=selected_policy,
+                        cancel=cancel,
+                    )
+                if resolution.kind == "references":
+                    lock = self.prepare_references(
+                        resolution.explicit.requires,
+                        toolchain=resolution.explicit.toolchain,
+                    )
+                    opened = self.open_exact(
+                        lock,
+                        import_roots=evidence.imports,
+                    )
+                    return opened.check(
+                        source,
+                        filename=source_path.name,
+                        policy=selected_policy,
+                        cancel=cancel,
+                    )
+                if resolution.kind == "toolchain":
+                    assert resolution.explicit.toolchain is not None
+                    return self.check(
+                        source,
+                        filename=source_path.name,
+                        toolchain=resolution.explicit.toolchain,
+                        policy=selected_policy,
+                        cancel=cancel,
+                    )
+                if resolution.kind == "project":
+                    assert resolution.project is not None
+                    return self.project(resolution.project.root).check_file(
+                        source_path,
+                        policy=selected_policy,
+                        cancel=cancel,
+                    )
+                discovered = Discovery(
+                    catalog=default_catalog(),
+                    runtime=self,
+                    filename=source_path.name,
+                ).discover_and_check(source, evidence=evidence, cancel=cancel)
+                if discovered.execution_result is not None:
+                    return discovered.execution_result
+                rejection = discovered.best_rejection
+                if rejection is not None and rejection.execution_result is not None:
+                    return rejection.execution_result
+                discovered.raise_for_error()
+                raise AssertionError("unreachable discovery result")
         return self.check(
             source_path.read_text(encoding="utf-8"),
             filename=source_path.name,
@@ -1170,6 +1289,58 @@ class Runtime:
             timeout=timeout,
             policy=selected_policy,
             cancel=cancel,
+        )
+
+    def analyze_file(self, path: str | os.PathLike[str]) -> SourceEvidence:
+        """Extract cheap discovery evidence from one Lean file."""
+
+        from .discovery.analyzer import analyze_source
+
+        source = Path(path).expanduser().resolve().read_text(encoding="utf-8")
+        return analyze_source(source)
+
+    def plan_file(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        catalog: Catalog | None = None,
+        policy: DiscoveryPolicy | None = None,
+    ) -> DiscoveryPlan:
+        """Return a pure catalog plan without inspecting local or remote state."""
+
+        from .discovery.analyzer import analyze_source
+        from .discovery.api import Discovery
+        from .discovery.defaults import default_catalog
+        from .discovery.policy import DiscoveryPolicy
+
+        source_path = Path(path).expanduser().resolve()
+        source = source_path.read_text(encoding="utf-8")
+        evidence = analyze_source(source)
+        return Discovery(
+            catalog=catalog or default_catalog(),
+            policy=policy or DiscoveryPolicy(),
+        ).plan(
+            source,
+            evidence=evidence,
+        )
+
+    def resolve_file(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        discover: bool = True,
+    ) -> FileContextResolution:
+        """Resolve explicit frontmatter, a pinned project, or discovery need."""
+
+        from .context_resolution import resolve_file_context
+        from .frontmatter import LeanFrontmatter, parse_frontmatter
+
+        source_path = Path(path).expanduser().resolve()
+        source = source_path.read_text(encoding="utf-8")
+        return resolve_file_context(
+            source_path,
+            parse_frontmatter(source) or LeanFrontmatter(),
+            discover=discover,
         )
 
     def check_files(
@@ -1194,6 +1365,7 @@ class Runtime:
         toolchain: str | None = None,
         timeout: float = 900,
         shared: bool | None = None,
+        artifact_cache: bool = True,
     ) -> ExecutionResult:
         """Build an existing trusted Lake project outside the environment store."""
         context = discover_project(project)
@@ -1211,6 +1383,7 @@ class Runtime:
             targets=targets,
             policy=ExecutionPolicy(timeout_seconds=timeout, max_output_bytes=10_000_000),
             shared=selected_shared,
+            restore_artifacts=artifact_cache,
         )
 
     def check_project(
@@ -2330,6 +2503,7 @@ class Runtime:
         policy: ExecutionPolicy,
         cancel: threading.Event | None = None,
         shared: bool | None = None,
+        restore_artifacts: bool = False,
     ) -> ExecutionResult:
         return self.project_executor.build(
             context,
@@ -2337,6 +2511,7 @@ class Runtime:
             policy=policy,
             cancel=cancel,
             shared=shared,
+            restore_artifacts=restore_artifacts,
         )
 
     def _raw_result(

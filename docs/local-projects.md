@@ -6,14 +6,17 @@ Lake project from wherever you run it:
 ```bash
 lean-runtime check                        # whole project
 lean-runtime check MyProject/Basic.lean   # one file, fast
-lean-runtime build                        # ordinary Lake build
+lean-runtime build                        # restore known caches, then Lake build
 lean-runtime watch MyProject/Basic.lean   # re-check on save
 ```
 
 Checking a single file passes the real project-relative path to Lake, so
 diagnostics look exactly like they would from a local build. Project-wide
-`check` builds your libraries' Lean artifacts; `build` keeps ordinary
-Lake semantics and outputs.
+`check` builds your libraries' Lean artifacts. Before `build` delegates the
+target graph to Lake, it restores dependency artifacts from trusted, known
+providers when one applies. For Mathlib this means `lake exe cache get`.
+An unavailable cache falls back to a source build; use
+`lean-runtime build --no-cache` for the bare Lake build path.
 
 ## Create a project
 
@@ -48,6 +51,15 @@ lean-runtime adopt ~/research
 
 Each project is handled independently — one problematic project doesn't
 block the rest.
+
+Projects built through the same runtime are also remembered as exact package
+donors. When an adopted/shared project later depends on one of them, Lean
+Runtime compares the canonical Git origin and resolved commit. Matching source
+can be copied locally without another fetch. Compiled artifacts are carried
+over only when the root toolchain, platform, and that package's resolved
+dependency closure also match; unrelated packages in the consumer do not
+invalidate the match. The requested tag is shown in diagnostics but never
+participates in identity.
 
 ## Your Elan install is safe
 

@@ -24,7 +24,7 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
     import tomli as tomllib
 
 from ._git import git_command
-from .errors import ProjectError
+from .errors import ProjectError, ProjectNotFoundError
 from .models import ExecutionResult, PackageProvenance, ProjectProvenance
 from .policies import ExecutionPolicy
 from .store import source_snapshot_digest
@@ -436,7 +436,7 @@ def discover_project(path: str | os.PathLike[str]) -> ProjectContext:
                 lakefiles[0],
                 manifest if manifest.is_file() else None,
             )
-    raise ProjectError(f"no pinned Lake project found containing: {selected}")
+    raise ProjectNotFoundError(f"no pinned Lake project found containing: {selected}")
 
 
 class ProjectEnvironment:
@@ -565,6 +565,7 @@ class ProjectEnvironment:
         policy: ExecutionPolicy | None = None,
         cancel: threading.Event | None = None,
         shared: bool | None = None,
+        artifact_cache: bool = True,
     ) -> ExecutionResult:
         return self.runtime._build_project(
             self.context,
@@ -572,4 +573,5 @@ class ProjectEnvironment:
             policy=policy or ExecutionPolicy(timeout_seconds=900, max_output_bytes=10_000_000),
             cancel=cancel,
             shared=shared,
+            restore_artifacts=artifact_cache,
         )

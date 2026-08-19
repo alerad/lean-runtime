@@ -7,7 +7,11 @@ import pytest
 
 from lean_runtime import EnvironmentLock, LockedPackage, Runtime
 from lean_runtime.discovery import Catalog, CatalogError, CatalogSourceManifest, build_catalog_file
-from lean_runtime.discovery.module_inventory import modules_from_source
+from lean_runtime.discovery.module_inventory import (
+    modules_for_lock,
+    modules_from_source,
+)
+from lean_runtime.store import environment_identity
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -82,6 +86,18 @@ def test_modules_are_limited_to_the_locked_root(tmp_path: Path) -> None:
     }
 
 
+def test_inventory_prefers_compiled_modules_from_a_full_environment(tmp_path: Path) -> None:
+    runtime, lock = _lock(tmp_path)
+    build = (
+        runtime.store.environment_path(environment_identity(lock))
+        / "workspace/.lake/packages/fixture/.lake/build/lib/lean/Fixture"
+    )
+    build.mkdir(parents=True)
+    (build / "Compiled.olean").write_bytes(b"compiled")
+
+    assert modules_for_lock(runtime, lock, ("fixture",)) == {"Fixture.Compiled"}
+
+
 def test_builder_is_deterministic_and_reloads_public_catalog(tmp_path: Path) -> None:
     runtime, lock = _lock(tmp_path)
     lock_path = tmp_path / "locks/fixture.lock.json"
@@ -97,7 +113,6 @@ id = "fixture"
 channel = "stable"
 lock = "locks/fixture.lock.json"
 inventory_packages = ["fixture"]
-library_hints = ["oci+http://127.0.0.1:5000/owner/discovery"]
 created_at = "2026-08-01T00:00:00Z"
 """,
         encoding="utf-8",

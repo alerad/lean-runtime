@@ -12,7 +12,21 @@ from .errors import DiscoveryError
 
 RESULT_SCHEMA = "lean-runtime.discovery.result/v1"
 DiscoveryStatus = Literal["found", "not_found", "invalid_request", "cancelled", "failed"]
-DiscoveryConfidence = Literal["compiled", "exhausted"]
+DiscoveryConfidence = Literal["compiled", "exhausted", "inconclusive"]
+DiscoveryOutcome = Literal[
+    "found",
+    "source_rejected",
+    "no_candidate",
+    "inconclusive",
+    "cancelled",
+    "failed",
+]
+DiscoveryCompletion = Literal[
+    "complete",
+    "candidate_limit",
+    "time_limit",
+    "acquisition_limit",
+]
 Acquisition = Literal["local", "downloaded", "source_built", "unknown"]
 AttemptStatus = Literal[
     "compiled",
@@ -77,6 +91,8 @@ class DiscoveryResult:
     plan: DiscoveryPlan
     attempts: tuple[CandidateAttempt, ...]
     duration_seconds: float
+    outcome: DiscoveryOutcome
+    completion: DiscoveryCompletion
     selected_candidate: Candidate | None = None
     lock: EnvironmentLock | None = None
     execution_result: ExecutionResult | None = None
@@ -88,6 +104,8 @@ class DiscoveryResult:
         if self.status == "found":
             if (
                 self.confidence != "compiled"
+                or self.outcome != "found"
+                or self.completion != "complete"
                 or self.selected_candidate is None
                 or self.lock is None
                 or self.execution_result is None
@@ -105,6 +123,10 @@ class DiscoveryResult:
                 raise ValueError("a found result must end with its selected compiled attempt")
         elif self.confidence == "compiled":
             raise ValueError("only a found result may have compiled confidence")
+        elif self.outcome == "inconclusive" and self.confidence != "inconclusive":
+            raise ValueError("an inconclusive outcome requires inconclusive confidence")
+        elif self.completion != "complete" and self.outcome != "inconclusive":
+            raise ValueError("a bounded incomplete search must have inconclusive outcome")
         elif (
             self.selected_candidate is not None
             or self.lock is not None
@@ -136,6 +158,10 @@ class DiscoveryResult:
             None,
         )
 
+    @property
+    def best_rejection(self) -> CandidateAttempt | None:
+        return self.rejection_attempt
+
     def raise_for_error(self) -> DiscoveryResult:
         if self.status != "found":
             details = [item.detail for item in self.diagnostics]
@@ -147,6 +173,8 @@ class DiscoveryResult:
         return {
             "schema": RESULT_SCHEMA,
             "status": self.status,
+            "outcome": self.outcome,
+            "completion": self.completion,
             "confidence": self.confidence,
             "catalog_digest": self.plan.catalog_digest,
             "selected_candidate": (

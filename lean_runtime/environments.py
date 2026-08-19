@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import subprocess
 import tempfile
 import threading
@@ -32,6 +31,7 @@ from .capsules import (
 from .diagnostics import error_diagnostic, map_diagnostic_paths, parse_diagnostics
 from .errors import EnvironmentError, MaterializationError, PolicyError
 from .events import EventEmitter
+from .import_syntax import IMPORT_STATEMENT
 from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock
 from .locking import FileLock
@@ -57,7 +57,6 @@ ENVIRONMENT_SCHEMA = "lean-runtime-published-environment/1"
 EXECUTION_SCHEMA = "lean-runtime-execution/1"
 CAPTURE_SCHEMA = "lean-runtime-execution-capture/1"
 T = TypeVar("T")
-_IMPORT = re.compile(r"^\s*import\s+(.+?)\s*$", re.MULTILINE)
 
 
 def _now() -> str:
@@ -109,7 +108,7 @@ def _support_order(files: Mapping[str, str], entrypoint: str) -> tuple[str, ...]
     dependencies: dict[str, set[str]] = {}
     for path, source in files.items():
         imported: set[str] = set()
-        for match in _IMPORT.finditer(source):
+        for match in IMPORT_STATEMENT.finditer(source):
             for module in match.group(1).split():
                 if module in paths_by_module:
                     imported.add(paths_by_module[module])
@@ -146,7 +145,7 @@ def _package_import_targets(files: Mapping[str, str], lock: EnvironmentLock) -> 
     local_modules = {_module_name(path) for path in files}
     targets: set[str] = set()
     for source in files.values():
-        for match in _IMPORT.finditer(source):
+        for match in IMPORT_STATEMENT.finditer(source):
             for module in match.group(1).split():
                 root = module.split(".", 1)[0]
                 if module not in local_modules and root.lower() in package_names:

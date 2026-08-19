@@ -234,7 +234,11 @@ class OCIToolchainLibrary:
                 else []
             )
             if not candidates:
-                raise DownloadUnavailable("toolchain index has no compatible platform")
+                raise DownloadUnavailable(
+                    "toolchain index has no compatible platform",
+                    reason_code="platform_compatibility_mismatch",
+                    retryable=False,
+                )
             descriptor = candidates[0]
             selected = self.client.manifest(str(descriptor.get("digest")))
             if selected.digest != descriptor.get("digest") or len(selected.data) != descriptor.get(
