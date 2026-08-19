@@ -14,6 +14,8 @@ Lean Runtime records exact identities, verifies retained content, and reports th
 ## What it does not establish
 
 - That a third-party package is trustworthy
+- That a published environment came from a particular publisher, unless
+  `publisher_verification` is set to `required`
 - That a Lake build script is safe to execute
 - That package code cannot access the host system
 - That integrity verification provides process isolation
