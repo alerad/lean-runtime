@@ -126,3 +126,4 @@ Use `--json` for structured results and `--verbose` for the runtime event stream
 - [Work with Lake projects](workflows/lake-projects.md)
 - [Understand context selection](concepts/context-selection.md)
 - [Browse the command summary](reference/commands.md)
+- [Use the Python API](reference/python-api.md)

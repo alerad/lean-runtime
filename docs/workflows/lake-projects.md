@@ -63,6 +63,11 @@ Project package sources can be shared at exact revisions. Compiled artifact reus
 
 Unrelated packages elsewhere in a project graph do not change a package's own dependency cone. A revision or toolchain mismatch prevents compiled artifact reuse, though compatible local Git objects may still reduce network transfer.
 
+Reuse is keyed on the resolved commit. A requested tag such as `v4.33.0.1` is
+shown in diagnostics as provenance but never participates in identity, so two
+projects requesting the same mutable tag share packages only when that tag
+resolved to the same commit.
+
 ## Update safely
 
 Preview the update plan:
