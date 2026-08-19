@@ -81,49 +81,7 @@ hide:
   </div>
 </section>
 
-<section class="lr-process" aria-labelledby="process-title">
-  <div class="lr-section-heading">
-    <p class="lr-kicker">One execution</p>
-    <h2 id="process-title">From source to a recorded verdict</h2>
-    <p>The active step follows the terminal demonstration. Select any step for its role in the run.</p>
-  </div>
-  <div class="lr-process-grid" data-process>
-    <button type="button" data-process-step="source">
-      <span>01</span><strong>Source</strong><small>Read declared imports</small>
-    </button>
-    <button type="button" data-process-step="context">
-      <span>02</span><strong>Context</strong><small>Select an exact candidate</small>
-    </button>
-    <button type="button" data-process-step="environment">
-      <span>03</span><strong>Environment</strong><small>Acquire and verify</small>
-    </button>
-    <button type="button" data-process-step="lean">
-      <span>04</span><strong>Lean</strong><small>Check the source</small>
-    </button>
-    <button type="button" data-process-step="record">
-      <span>05</span><strong>Result</strong><small>Record the execution</small>
-    </button>
-  </div>
-  <div class="lr-process-detail" data-process-detail>
-    <strong>Source</strong>
-    <p>Lean Runtime reads the imports declared by the file. It does not execute the source during this step.</p>
-  </div>
-</section>
 
-<section class="lr-contexts" aria-labelledby="contexts-title">
-  <div class="lr-section-heading">
-    <p class="lr-kicker">Predictable context</p>
-    <h2 id="contexts-title">Automatic when useful. Explicit when specified.</h2>
-    <p>Every check runs in one context. The first applicable source below is used.</p>
-  </div>
-  <ol class="lr-context-ladder">
-    <li><span>01</span><div><strong>Command line or Python API</strong><code>--using mathlib@v4.33.0</code></div></li>
-    <li><span>02</span><div><strong>File frontmatter</strong><code>requires = ["mathlib@v4.33.0"]</code></div></li>
-    <li><span>03</span><div><strong>Nearest pinned Lake project</strong><small>Its toolchain and manifest remain authoritative.</small></div></li>
-    <li><span>04</span><div><strong>Automatic discovery</strong><small>Candidates are accepted only after Lean checks the source.</small></div></li>
-  </ol>
-  <p><a href="concepts/context-selection/">Read the complete context selection model</a></p>
-</section>
 
 <section class="lr-workflows" aria-labelledby="workflows-title">
   <div class="lr-section-heading">
@@ -157,23 +115,4 @@ lean-runtime build</code></pre>
   </div>
 </section>
 
-<section class="lr-verdicts" aria-labelledby="verdicts-title">
-  <div class="lr-section-heading">
-    <p class="lr-kicker">Stable automation</p>
-    <h2 id="verdicts-title">A proof failure and an environment failure are different results.</h2>
-  </div>
-  <div class="lr-verdict-grid">
-    <div class="is-ok"><span>0</span><strong>Accepted</strong><p>Lean accepted the source.</p></div>
-    <div class="is-rejected"><span>1</span><strong>Rejected</strong><p>Lean ran and rejected the source.</p></div>
-    <div class="is-unavailable"><span>2</span><strong>Unavailable</strong><p>The invocation or required context failed.</p></div>
-  </div>
-</section>
 
-<section class="lr-boundary" aria-labelledby="boundary-title">
-  <div>
-    <p class="lr-kicker">Execution boundary</p>
-    <h2 id="boundary-title">Exact and inspectable does not mean sandboxed.</h2>
-  </div>
-  <p>Lean Runtime records identities and verifies downloaded content. Lake packages and build scripts can execute code during acquisition or compilation. Only use source and dependencies you trust.</p>
-  <a href="trust/">Read the trust boundary</a>
-</section>
