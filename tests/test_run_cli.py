@@ -70,9 +70,31 @@ class FakeRuntime:
         return _result()
 
 
+def _pin_project(root: Path) -> None:
+    (root / "lakefile.toml").write_text('name = "fixture"\n')
+    (root / "lean-toolchain").write_text("leanprover/lean4:v4.32.0\n")
+
+
+class _FoundDiscovery:
+    def __init__(self, **_kwargs) -> None:
+        pass
+
+    def has_local_history_hint(self, _source: str, **_kwargs) -> bool:
+        return False
+
+    def discover_and_check(self, _source: str, **_kwargs):  # type: ignore[no-untyped-def]
+        class Found:
+            status = "found"
+            execution_result = _result()
+            lock = Lock()
+
+        return Found()
+
+
 def test_lean_run_discovers_local_project_by_default(monkeypatch, tmp_path: Path, capsys) -> None:
     source = tmp_path / "Main.lean"
     source.write_text("example : True := by trivial\n")
+    _pin_project(tmp_path)
     monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
     assert main([str(source), "--json"]) == 0
     assert FakeRuntime.instance.calls[0][0] == "file"
@@ -166,7 +188,10 @@ def test_lean_run_discovers_standalone_file_and_writes_lock(
         def __init__(self, **_kwargs) -> None:
             pass
 
-        def discover_and_check(self, _source: str) -> Found:
+        def has_local_history_hint(self, _source: str, **_kwargs) -> bool:
+            return False
+
+        def discover_and_check(self, _source: str, **_kwargs) -> Found:
             return Found()
 
     monkeypatch.setattr("lean_runtime.run_cli.Runtime", NoProjectRuntime)
@@ -179,16 +204,16 @@ def test_lean_run_discovers_standalone_file_and_writes_lock(
 def test_lean_run_preserves_discovered_compiler_rejection(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    source = tmp_path / "Main.lean"
+    source = tmp_path / "Tight.lean"
     source.write_text("import Mathlib\nexample : False := by trivial\n")
     rejection = _result(
         ok=False,
-        stderr="Main.lean:2:22: error: tactic 'trivial' failed",
+        stderr="/tmp/Tight.lean:2:22: error: tactic 'trivial' failed",
         diagnostics=(
             Diagnostic(
                 "error",
                 "tactic 'trivial' failed",
-                file="Main.lean",
+                file="Tight.lean",
                 line=2,
                 column=22,
             ),
@@ -209,14 +234,27 @@ def test_lean_run_preserves_discovered_compiler_rejection(
 
     class Rejected:
         status = "not_found"
+        completion = "candidate_limit"
         execution_result = None
         rejection_attempt = Attempt()
+        best_rejection = rejection_attempt
+        duration_seconds = 12.5
+        attempts = (Attempt(),)
+        diagnostics = ()
+
+        class Plan:
+            candidates = (object(), object())
+
+        plan = Plan()
 
     class FakeDiscovery:
         def __init__(self, **_kwargs) -> None:
             pass
 
-        def discover_and_check(self, _source: str) -> Rejected:
+        def has_local_history_hint(self, _source: str, **_kwargs) -> bool:
+            return False
+
+        def discover_and_check(self, _source: str, **_kwargs) -> Rejected:
             return Rejected()
 
     monkeypatch.setattr("lean_runtime.run_cli.Runtime", NoProjectRuntime)
@@ -225,7 +263,11 @@ def test_lean_run_preserves_discovered_compiler_rejection(
     assert main([str(source), "--quiet"]) == 1
     captured = capsys.readouterr()
     assert "tactic 'trivial' failed" in captured.err
+    assert str(source) in captured.err
+    assert "/tmp/Tight.lean" not in captured.err
     assert "rejected" in captured.out
+    assert "in 12.50s" in captured.out
+    assert "1 planned candidate(s) untried" in captured.out
 
     assert main([str(source), "--json", "--quiet"]) == 1
     payload = json.loads(capsys.readouterr().out)
@@ -233,6 +275,7 @@ def test_lean_run_preserves_discovered_compiler_rejection(
     assert payload["data"]["stderr"].endswith("tactic 'trivial' failed")
     assert payload["data"]["diagnostics"][0]["message"] == "tactic 'trivial' failed"
     assert payload["data"]["timings"][0]["phase"] == "discovery"
+    assert "1 planned candidate(s) untried" in payload["data"]["hints"][0]
 
 
 def test_lean_run_can_disable_automatic_discovery(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -245,7 +288,7 @@ def test_lean_run_can_disable_automatic_discovery(monkeypatch, tmp_path: Path, c
 
     monkeypatch.setattr("lean_runtime.run_cli.Runtime", NoProjectRuntime)
     assert main([str(source), "--no-discover", "--quiet"]) == 2
-    assert "no execution context" in capsys.readouterr().err
+    assert "no explicit context or pinned Lake project" in capsys.readouterr().err
 
 
 def test_lean_run_explains_bundled_catalog_candidates(tmp_path: Path, capsys) -> None:
@@ -414,6 +457,7 @@ def test_lean_run_passes_download_limit_to_runtime(monkeypatch, tmp_path: Path) 
 def test_lean_run_rejects_invalid_download_limit(monkeypatch, tmp_path: Path, capsys) -> None:
     source = tmp_path / "Main.lean"
     source.write_text("example : True := by trivial\n")
+    _pin_project(tmp_path)
     monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
     try:
         main([str(source), "--max-download", "lots"])
@@ -430,6 +474,7 @@ def test_check_command_matches_discovery_engine_output(monkeypatch, tmp_path: Pa
     source = tmp_path / "Main.lean"
     source.write_text("example : True := by trivial\n")
     monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
+    monkeypatch.setattr("lean_runtime.run_cli.Discovery", _FoundDiscovery)
     assert main([str(source), "--json"]) == 0
     alias_document = json.loads(capsys.readouterr().out)
     assert lean_runtime_main(["check", str(source), "--json"]) == 0
@@ -443,6 +488,7 @@ def test_check_command_accepts_store_options(monkeypatch, tmp_path: Path, capsys
     source = tmp_path / "Main.lean"
     source.write_text("example : True := by trivial\n")
     monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
+    monkeypatch.setattr("lean_runtime.run_cli.Discovery", _FoundDiscovery)
     assert lean_runtime_main(["--quiet", "--home", str(tmp_path / "s"), "check", str(source)]) == 0
     capsys.readouterr()
     assert FakeRuntime.instance.kwargs["home"] == str(tmp_path / "s")
@@ -491,6 +537,7 @@ def test_check_command_forwards_configured_libraries(monkeypatch, tmp_path: Path
     source = tmp_path / "Main.lean"
     source.write_text("example : True := by trivial\n")
     monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
+    monkeypatch.setattr("lean_runtime.run_cli.Discovery", _FoundDiscovery)
     assert (
         lean_runtime_main(
             ["--library", "ghcr.io/owner/environments", "--quiet", "check", str(source)]

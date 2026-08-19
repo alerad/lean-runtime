@@ -62,6 +62,19 @@ def test_quiet_mode_prints_nothing_ever() -> None:
     assert stream.getvalue() == ""
 
 
+def test_remembered_discovery_candidate_is_silent_in_normal_output() -> None:
+    renderer, stream = _renderer("plain")
+    renderer(
+        _event(
+            "discovery.candidate_started",
+            candidate="mathlib-v4.31.0",
+            toolchain="leanprover/lean4:v4.31.0",
+            remembered=True,
+        )
+    )
+    assert stream.getvalue() == ""
+
+
 def test_check_progress_is_compact_and_tty_only() -> None:
     tty, tty_stream = _renderer("tty")
     tty(_event("check.started", subject="Basic.lean"))
@@ -110,6 +123,15 @@ def test_plan_with_nothing_to_download_is_silent() -> None:
     renderer(_event("acquisition.planned", download_bytes=0, cached_bytes=1024))
     renderer(_event("library.verified", "done"))
     assert stream.getvalue() == ""
+
+
+def test_large_import_closure_gets_a_heads_up() -> None:
+    renderer, stream = _renderer("plain")
+    renderer(_event("acquisition.planned", download_bytes=1_600 * 2**20, cached_bytes=0))
+    assert stream.getvalue().splitlines() == [
+        "Large import closure: 1.6 GiB to download; narrower imports may fetch less",
+        "Downloading environment: 1.6 GiB",
+    ]
 
 
 def test_toolchain_download_starts_a_new_progress_lifecycle() -> None:
@@ -340,3 +362,13 @@ def test_fallback_warning_is_yellow_when_colored() -> None:
     renderer = ConsoleRenderer(stream, mode="plain", color=True)
     renderer(_event("availability.fallback", library="oci://x/y", reason_code="missing"))
     assert stream.getvalue().startswith("\x1b[33mWARNING:")
+
+
+def test_artifact_hydration_failure_explains_source_fallback() -> None:
+    renderer, stream = _renderer("plain")
+
+    renderer(_event("artifact.hydration_failed", package="mathlib"))
+
+    assert stream.getvalue().strip() == (
+        "WARNING: artifact cache unavailable for mathlib; building from source"
+    )

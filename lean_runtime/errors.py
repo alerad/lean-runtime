@@ -33,6 +33,10 @@ class ProjectError(LeanRuntimeError):
     """A Lean project is missing required configuration."""
 
 
+class ProjectNotFoundError(ProjectError):
+    """No pinned Lean project contains the requested path."""
+
+
 class SpecificationError(LeanRuntimeError):
     """An environment specification is invalid."""
 
@@ -59,9 +63,29 @@ class ResolutionError(LeanRuntimeError):
 class EnvironmentError(LeanRuntimeError):
     """A content-addressed environment could not be opened or built."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "environment_error",
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.retryable = retryable
+
 
 class DownloadUnavailable(EnvironmentError):
     """A prebuilt cache had no usable artifact or could not be reached."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "remote_candidate_unavailable",
+        retryable: bool = True,
+    ) -> None:
+        super().__init__(message, reason_code=reason_code, retryable=retryable)
 
 
 class RegistryRequestError(DownloadUnavailable):
@@ -75,7 +99,13 @@ class RegistryRequestError(DownloadUnavailable):
         status_code: int | None = None,
         retryable: bool = False,
     ) -> None:
-        super().__init__(message)
+        super().__init__(
+            message,
+            reason_code=(
+                "remote_candidate_missing" if status_code == 404 else "remote_candidate_unavailable"
+            ),
+            retryable=retryable,
+        )
         self.operation = operation
         self.status_code = status_code
         self.retryable = retryable
@@ -92,10 +122,13 @@ class CredentialAcquisitionError(EnvironmentError):
         failure_kind: str,
         retryable: bool,
     ) -> None:
-        super().__init__(message)
+        super().__init__(
+            message,
+            reason_code=f"credential_{failure_kind}",
+            retryable=retryable,
+        )
         self.provider = provider
         self.failure_kind = failure_kind
-        self.retryable = retryable
 
 
 class PublicationError(EnvironmentError):
@@ -166,6 +199,9 @@ class DownloadLimitExceeded(EnvironmentError):
     must fail the operation instead of silently falling back to another
     library or a source build.
     """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, reason_code="download_limit_exceeded", retryable=False)
 
 
 class MaterializationError(EnvironmentError):

@@ -63,7 +63,6 @@ def build_catalog(manifest: CatalogSourceManifest, *, runtime: Runtime) -> Catal
                 toolchain=lock.toolchain,
                 lock=lock,
                 modules=frozenset(modules),
-                library_hints=source.library_hints,
                 created_at=source.created_at,
             )
         )

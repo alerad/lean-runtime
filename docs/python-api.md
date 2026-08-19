@@ -77,6 +77,8 @@ print(result.environment_id)
 Every successful result contains the exact `EnvironmentLock` accepted by Lean.
 Pass that lock to ordinary Runtime operations to bypass discovery on future
 runs. Planning metadata narrows candidates but never asserts compatibility.
+Searches expose `outcome` and `completion` separately, so a candidate/time
+limit is reported as inconclusive rather than exhaustive rejection.
 
 ## Results
 
@@ -166,13 +168,17 @@ a distinct mutable handle:
 runtime.check(source, toolchain="4.32.2")
 project = runtime.project("./existing-project")
 project.build(("MyLibrary",))
+# Opt out when intentionally measuring or requiring a source-only build.
+project.build(("MyLibrary",), artifact_cache=False)
 project.check_file("./existing-project/MyLibrary/Main.lean")
 project.check(source)
 ```
 
 `runtime.project()` also accepts a contained file and discovers the nearest
-pinned Lake root. `runtime.check_file(path)` performs this discovery
-automatically when no managed environment, packages, or toolchain are supplied.
+pinned Lake root. `runtime.check_file(path)` first resolves that project and,
+for a context-free standalone file, performs the same bounded catalog discovery
+as the CLI. Pass `discover=False` to require an explicit context or pinned
+project.
 See [Local Lake projects](local-projects.md).
 
 ## Environment

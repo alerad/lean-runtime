@@ -13,14 +13,6 @@ PLAN_SCHEMA = "lean-runtime.discovery.plan/v1"
 
 
 @dataclass(frozen=True, slots=True)
-class AvailabilityObservation:
-    """Ephemeral Runtime availability information; never part of lock identity."""
-
-    local: bool = False
-    downloadable: bool = False
-
-
-@dataclass(frozen=True, slots=True)
 class CandidateReason:
     code: str
     detail: str
@@ -33,7 +25,6 @@ class CandidateReason:
 class Candidate:
     rank: int
     entry: CatalogEntry
-    score: int
     reasons: tuple[CandidateReason, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
@@ -43,7 +34,6 @@ class Candidate:
             "lock_id": self.entry.lock.lock_id,
             "toolchain": self.entry.toolchain,
             "channel": self.entry.channel,
-            "score": self.score,
             "reasons": [reason.to_dict() for reason in self.reasons],
         }
 
@@ -76,7 +66,13 @@ class DiscoveryPlan:
 
     @property
     def truncated(self) -> bool:
-        return self.total_plausible_candidates > len(self.candidates)
+        return self.total_plausible_candidates > len(self.planned_candidates)
+
+    @property
+    def planned_candidates(self) -> tuple[Candidate, ...]:
+        """Candidates the bounded executor is permitted to start."""
+
+        return self.candidates[: self.policy.max_candidates]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -89,5 +85,6 @@ class DiscoveryPlan:
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "excluded": [candidate.to_dict() for candidate in self.excluded],
             "total_plausible_candidates": self.total_plausible_candidates,
+            "candidate_limit": self.policy.max_candidates,
             "truncated": self.truncated,
         }

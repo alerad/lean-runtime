@@ -1,15 +1,30 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/alerad/lean-runtime/schemas/discovery/result-v1.schema.json",
-  "title": "Lean Runtime discovery authoritative result envelope v1",
+  "title": "Lean Runtime authoritative discovery result v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "ok", "data", "warnings", "errors"],
+  "required": [
+    "schema", "status", "outcome", "completion", "confidence",
+    "catalog_digest", "selected_candidate", "lock", "lock_id",
+    "environment_id", "execution_result", "attempts", "diagnostics",
+    "duration_seconds", "plan"
+  ],
   "properties": {
     "schema": {"const": "lean-runtime.discovery.result/v1"},
-    "ok": {"type": "boolean"},
-    "data": {"type": ["object", "null"]},
-    "warnings": {"type": "array"},
-    "errors": {"type": "array"}
+    "status": {"enum": ["found", "not_found", "invalid_request", "cancelled", "failed"]},
+    "outcome": {"enum": ["found", "source_rejected", "no_candidate", "inconclusive", "cancelled", "failed"]},
+    "completion": {"enum": ["complete", "candidate_limit", "time_limit", "acquisition_limit"]},
+    "confidence": {"enum": ["compiled", "exhausted", "inconclusive"]},
+    "catalog_digest": {"type": "string"},
+    "selected_candidate": {"type": ["object", "null"]},
+    "lock": {"type": ["object", "null"]},
+    "lock_id": {"type": ["string", "null"]},
+    "environment_id": {"type": ["string", "null"]},
+    "execution_result": {"type": ["object", "null"]},
+    "attempts": {"type": "array", "items": {"type": "object"}},
+    "diagnostics": {"type": "array", "items": {"type": "object"}},
+    "duration_seconds": {"type": "number", "minimum": 0},
+    "plan": {"type": "object"}
   }
 }

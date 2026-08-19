@@ -47,9 +47,10 @@ rebuilds them, reruns the Lean probe, and compares artifact inventories.
 
 A check capsule is evidence that the trusted publisher accepted the recorded
 statements and build artifacts; removing source and build inputs does not make
-those artifacts independently derivable. Native compilation, `native_decide`,
-editor source navigation, and development builds are outside the capsule's
-batch-check capability and require the exact full environment and toolchain.
+those artifacts independently derivable. The batch-check capability includes
+`native_decide` and verifies it in the slim-toolchain corpus. Building native
+executables, editor source navigation, and development builds remain outside
+that capability and require the exact full environment and toolchain.
 
 ## Reproducibility boundary
 

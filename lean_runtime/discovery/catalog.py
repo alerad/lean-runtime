@@ -27,10 +27,12 @@ _ENTRY_KEYS = frozenset(
         "lock_id",
         "lock",
         "modules",
+        # Accepted for compatibility with early v1 catalogs, but ignored.
         "library_hints",
         "created_at",
     }
 )
+_REQUIRED_ENTRY_KEYS = _ENTRY_KEYS - {"library_hints"}
 _ENTRY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*")
 
@@ -64,8 +66,8 @@ class CatalogEntry:
     toolchain: str
     lock: EnvironmentLock
     modules: frozenset[str] = field(default_factory=frozenset)
-    library_hints: tuple[str, ...] = field(default_factory=tuple)
     created_at: str = "1970-01-01T00:00:00Z"
+    _created_timestamp: float = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if _ENTRY_ID.fullmatch(self.id) is None:
@@ -76,13 +78,20 @@ class CatalogEntry:
             raise CatalogError(f"entry {self.id!r} toolchain disagrees with its lock")
         if any(_MODULE.fullmatch(item) is None for item in self.modules):
             raise CatalogError(f"entry {self.id!r} contains an invalid module")
-        if any("\n" in item or "\r" in item for item in self.library_hints):
-            raise CatalogError(f"entry {self.id!r} contains an invalid library hint")
-        _timestamp(self.created_at, f"entry {self.id!r} created_at")
+        created_at = _timestamp(self.created_at, f"entry {self.id!r} created_at")
+        object.__setattr__(
+            self,
+            "_created_timestamp",
+            datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp(),
+        )
 
     @property
     def package_names(self) -> frozenset[str]:
         return frozenset(package.name.lower() for package in self.lock.packages)
+
+    @property
+    def created_timestamp(self) -> float:
+        return self._created_timestamp
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,14 +101,13 @@ class CatalogEntry:
             "lock_id": self.lock.lock_id,
             "lock": self.lock.to_dict(),
             "modules": sorted(self.modules),
-            "library_hints": list(self.library_hints),
             "created_at": self.created_at,
         }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> CatalogEntry:
         unknown = set(value) - _ENTRY_KEYS
-        missing = _ENTRY_KEYS - set(value)
+        missing = _REQUIRED_ENTRY_KEYS - set(value)
         if unknown or missing:
             detail = f"missing={sorted(missing)}, unknown={sorted(unknown)}"
             raise CatalogError(f"catalog entry fields mismatch; {detail}")
@@ -121,7 +129,6 @@ class CatalogEntry:
             toolchain=value["toolchain"],
             lock=lock,
             modules=frozenset(_strings(value["modules"], "modules")),
-            library_hints=_strings(value["library_hints"], "library_hints"),
             created_at=_timestamp(value["created_at"], "created_at"),
         )
 
@@ -133,6 +140,11 @@ class Catalog:
     generated_at: str
     entries: tuple[CatalogEntry, ...]
     schema: str = CATALOG_SCHEMA
+    _digest: str = field(init=False, repr=False, compare=False)
+    _entries_by_id: dict[str, CatalogEntry] = field(init=False, repr=False, compare=False)
+    _entries_by_lock: dict[str, CatalogEntry] = field(init=False, repr=False, compare=False)
+    _module_index: dict[str, frozenset[str]] = field(init=False, repr=False, compare=False)
+    _package_index: dict[str, frozenset[str]] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.schema != CATALOG_SCHEMA:
@@ -144,6 +156,32 @@ class Catalog:
             raise CatalogError("catalog contains duplicate entry ids")
         if len(locks) != len(set(locks)):
             raise CatalogError("catalog contains duplicate exact locks")
+        entries_by_id = {entry.id: entry for entry in self.entries}
+        entries_by_lock = {entry.lock.lock_id: entry for entry in self.entries}
+        module_index: dict[str, set[str]] = {}
+        package_index: dict[str, set[str]] = {}
+        for entry in self.entries:
+            for module in entry.modules:
+                module_index.setdefault(module, set()).add(entry.id)
+            for package in entry.package_names:
+                package_index.setdefault(package, set()).add(entry.id)
+        object.__setattr__(self, "_entries_by_id", entries_by_id)
+        object.__setattr__(self, "_entries_by_lock", entries_by_lock)
+        object.__setattr__(
+            self,
+            "_module_index",
+            {name: frozenset(entry_ids) for name, entry_ids in module_index.items()},
+        )
+        object.__setattr__(
+            self,
+            "_package_index",
+            {name: frozenset(entry_ids) for name, entry_ids in package_index.items()},
+        )
+        object.__setattr__(
+            self,
+            "_digest",
+            f"sha256:{hashlib.sha256(self.canonical_bytes()).hexdigest()}",
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -162,7 +200,28 @@ class Catalog:
 
     @property
     def digest(self) -> str:
-        return f"sha256:{hashlib.sha256(self.canonical_bytes()).hexdigest()}"
+        return self._digest
+
+    def entry_for_lock(self, lock_id: str) -> CatalogEntry | None:
+        return self._entries_by_lock.get(lock_id)
+
+    def entry_ids_for_modules(self, modules: tuple[str, ...]) -> frozenset[str]:
+        """Return entries whose declared inventories contain every external module."""
+
+        if not modules:
+            return frozenset(self._entries_by_id)
+        providers = [self._module_index.get(module, frozenset()) for module in modules]
+        if any(not entry_ids for entry_ids in providers):
+            return frozenset()
+        return frozenset.intersection(*providers)
+
+    def entry_ids_for_packages(self, packages: frozenset[str]) -> frozenset[str]:
+        if not packages:
+            return frozenset(self._entries_by_id)
+        providers = [self._package_index.get(package, frozenset()) for package in packages]
+        if any(not entry_ids for entry_ids in providers):
+            return frozenset()
+        return frozenset.intersection(*providers)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> Catalog:

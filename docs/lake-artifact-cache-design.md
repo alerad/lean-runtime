@@ -25,6 +25,17 @@ their build semantics:
 Consequently, Lean Runtime must not implement a second general-purpose Lake
 target scheduler.
 
+There are two distinct accelerators at this boundary:
+
+- `lean-runtime build` invokes a dependency's trusted, known hydration command
+  before the ordinary build. Mathlib is currently recognized by canonical
+  repository URL and uses `lake exe cache get`. Failure falls back to source;
+  `--no-cache` skips this phase.
+- `LakeArtifactCache` stores opted-in root-package outputs in a toolchain- and
+  ABI-scoped directory. It does not duplicate dependency artifacts.
+
+Both paths leave target selection and dependency traversal to Lake.
+
 ## Public contract
 
 The intended commands are:

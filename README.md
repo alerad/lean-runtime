@@ -17,7 +17,6 @@ example : 2 + 2 = 4 := by norm_num
 
 ```console
 $ lean-runtime check Main.lean
-Discovering an exact environment
 ✓ Main.lean accepted in 1.60s
 ```
 
@@ -63,7 +62,9 @@ lean-runtime check Main.lean
 ```
 
 The same command uses the nearest pinned Lake project when one exists and
-otherwise performs bounded exact-environment discovery. A file can carry its
+otherwise performs bounded exact-environment discovery. Automatic discovery
+uses retained or verified downloadable environments; building a missing
+candidate from source requires `--allow-source-build`. A file can carry its
 context in strict comment frontmatter:
 
 ```lean

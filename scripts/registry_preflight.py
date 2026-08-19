@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -37,12 +38,26 @@ def _get(
     request.add_header("Accept", ACCEPT)
     for name, value in (headers or {}).items():
         request.add_header(name, value)
-    try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-            data = response.read() if method == "GET" else b""
-            return response.status, data, dict(response.headers)
-    except urllib.error.HTTPError as error:
-        return error.code, b"", dict(error.headers)
+    for attempt in range(1, 4):
+        try:
+            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                data = response.read() if method == "GET" else b""
+                return response.status, data, dict(response.headers)
+        except urllib.error.HTTPError as error:
+            if error.code not in {408, 429} and not 500 <= error.code < 600:
+                return error.code, b"", dict(error.headers)
+            failure = f"HTTP {error.code}"
+        except (OSError, urllib.error.URLError) as error:
+            failure = str(error)
+        if attempt < 3:
+            time.sleep(0.25 * attempt)
+    return 0, b"", {"X-Preflight-Error": failure}
+
+
+def _failure(status: int, headers: dict[str, str]) -> str:
+    if status:
+        return f"HTTP {status}"
+    return "transport error: " + headers.get("X-Preflight-Error", "unknown failure")
 
 
 def check_entry(
@@ -76,9 +91,9 @@ def check_entry(
         ),
     )
     for kind, reference, config_type, layer_type, require_range in references:
-        status, data, _ = _get(f"{base}/manifests/{reference}", token)
+        status, data, headers = _get(f"{base}/manifests/{reference}", token)
         if status != 200:
-            failures.append(f"{entry_id}: {kind} index {reference} -> HTTP {status}")
+            failures.append(f"{entry_id}: {kind} index {reference} -> {_failure(status, headers)}")
             continue
         manifests = json.loads(data).get("manifests")
         if not isinstance(manifests, list):
@@ -99,9 +114,9 @@ def check_entry(
             if descriptor is None:
                 failures.append(f"{label} manifest is missing")
                 continue
-            status, data, _ = _get(f"{base}/manifests/{descriptor['digest']}", token)
+            status, data, headers = _get(f"{base}/manifests/{descriptor['digest']}", token)
             if status != 200:
-                failures.append(f"{label} manifest -> HTTP {status}")
+                failures.append(f"{label} manifest -> {_failure(status, headers)}")
                 continue
             platform_manifest = json.loads(data)
             config = platform_manifest.get("config", {})
@@ -120,9 +135,9 @@ def check_entry(
                 if not isinstance(digest, str):
                     failures.append(f"{label} descriptor has no digest")
                     continue
-                status, _, _ = _get(f"{base}/blobs/{digest}", token, method="HEAD")
+                status, _, headers = _get(f"{base}/blobs/{digest}", token, method="HEAD")
                 if status != 200:
-                    failures.append(f"{label} blob {digest[:19]} -> HTTP {status}")
+                    failures.append(f"{label} blob {digest[:19]} -> {_failure(status, headers)}")
             if require_range and layers:
                 digest = layers[0]["digest"]
                 status, ranged, headers = _get(

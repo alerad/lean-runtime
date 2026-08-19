@@ -4,6 +4,7 @@ from importlib.metadata import version as _distribution_version
 
 from .bundles import PortableCopyInfo
 from .comparison import ComparisonEntry, EnvironmentComparison
+from .context_resolution import FileContextResolution, resolve_file_context
 from .decisions import Decision
 from .environments import (
     Environment,
@@ -21,6 +22,7 @@ from .errors import (
     MaterializationError,
     PolicyError,
     ProjectError,
+    ProjectNotFoundError,
     PublicationError,
     RegistryRequestError,
     ResolutionError,
@@ -115,6 +117,7 @@ __all__ = [
     "ExecutionProvenance",
     "ExecutionResult",
     "EventCallback",
+    "FileContextResolution",
     "CleanupReport",
     "GitPackage",
     "LeanCheckError",
@@ -149,6 +152,7 @@ __all__ = [
     "RegistryRequestError",
     "DownloadUnavailable",
     "ProjectError",
+    "ProjectNotFoundError",
     "ResolutionError",
     "Runtime",
     "SCHEMA_NAMES",
@@ -171,6 +175,7 @@ __all__ = [
     "load_frontmatter",
     "parse_frontmatter",
     "replay",
+    "resolve_file_context",
     "setup",
     "schema_path",
 ]

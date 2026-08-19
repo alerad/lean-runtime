@@ -1,15 +1,25 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/alerad/lean-runtime/schemas/discovery/plan-v1.schema.json",
-  "title": "Lean Runtime discovery planning envelope v1",
+  "title": "Lean Runtime static discovery plan v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "ok", "data", "warnings", "errors"],
+  "required": [
+    "schema", "confidence", "catalog_digest", "evidence", "policy",
+    "explicit_lock", "candidates", "excluded", "total_plausible_candidates",
+    "candidate_limit", "truncated"
+  ],
   "properties": {
     "schema": {"const": "lean-runtime.discovery.plan/v1"},
-    "ok": {"type": "boolean"},
-    "data": {"type": ["object", "null"]},
-    "warnings": {"type": "array"},
-    "errors": {"type": "array"}
+    "confidence": {"const": "heuristic_only"},
+    "catalog_digest": {"type": "string"},
+    "evidence": {"type": "object"},
+    "policy": {"type": "object"},
+    "explicit_lock": {"type": ["string", "null"]},
+    "candidates": {"type": "array", "items": {"type": "object"}},
+    "excluded": {"type": "array", "items": {"type": "object"}},
+    "total_plausible_candidates": {"type": "integer", "minimum": 0},
+    "candidate_limit": {"type": "integer", "minimum": 1},
+    "truncated": {"type": "boolean"}
   }
 }

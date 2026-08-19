@@ -15,6 +15,13 @@ def test_catalog_roundtrip_and_digest_are_canonical() -> None:
     assert [entry["id"] for entry in loaded.to_dict()["entries"]] == ["a", "b"]
 
 
+def test_legacy_library_hints_are_accepted_but_not_reemitted() -> None:
+    value = make_entry("a", "a").to_dict()
+    value["library_hints"] = ["legacy"]
+    loaded = type(make_entry("b", "b")).from_dict(value)
+    assert "library_hints" not in loaded.to_dict()
+
+
 def test_unknown_catalog_field_is_rejected() -> None:
     with pytest.raises(CatalogError, match="unknown"):
         Catalog.from_dict(
@@ -56,3 +63,12 @@ def test_naive_timestamp_is_rejected() -> None:
 def test_invalid_module_name_is_rejected() -> None:
     with pytest.raises(CatalogError, match="invalid module"):
         make_entry("bad", "c", modules=("Not a module",))
+
+
+def test_catalog_builds_module_package_and_lock_indexes(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    old = next(entry for entry in sample_catalog.entries if entry.id == "mathlib-old")
+    assert sample_catalog.entry_ids_for_modules(("Mathlib.Legacy",)) == frozenset({"mathlib-old"})
+    assert sample_catalog.entry_ids_for_packages(frozenset({"mathlib"})) == frozenset(
+        {"mathlib-old", "mathlib-new"}
+    )
+    assert sample_catalog.entry_for_lock(old.lock.lock_id) is old

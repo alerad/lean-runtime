@@ -1,17 +1,19 @@
-from conftest import make_entry
+import json
 
-from lean_runtime.discovery import (
-    AvailabilityObservation,
-    Discovery,
-    DiscoveryPolicy,
-    default_catalog,
-)
+from conftest import make_entry
+from jsonschema import Draft202012Validator
+
+from lean_runtime.discovery import Discovery, DiscoveryPolicy, default_catalog, schema_path
 
 
 def test_exact_module_match_beats_newest_release(sample_catalog) -> None:  # type: ignore[no-untyped-def]
     plan = Discovery(catalog=sample_catalog).plan("import Mathlib.Legacy\n")
-    assert [candidate.entry.id for candidate in plan.candidates] == ["mathlib-old"]
-    assert {item.entry_id for item in plan.excluded} == {"core", "mathlib-new"}
+    assert [candidate.entry.id for candidate in plan.candidates] == [
+        "mathlib-old",
+        "core",
+        "mathlib-new",
+    ]
+    assert plan.excluded == ()
 
 
 def test_newest_breaks_ties_after_evidence(sample_catalog) -> None:  # type: ignore[no-untyped-def]
@@ -19,16 +21,40 @@ def test_newest_breaks_ties_after_evidence(sample_catalog) -> None:  # type: ign
     assert [candidate.entry.id for candidate in plan.candidates] == [
         "mathlib-new",
         "mathlib-old",
+        "core",
     ]
 
 
 def test_local_availability_can_break_tie(sample_catalog) -> None:  # type: ignore[no-untyped-def]
     old = next(entry for entry in sample_catalog.entries if entry.id == "mathlib-old")
-    plan = Discovery(
-        catalog=sample_catalog,
-        availability={old.lock.lock_id: AvailabilityObservation(local=True)},
-    ).plan("import Mathlib\n")
+    discovery = Discovery(catalog=sample_catalog)
+    static = discovery.plan("import Mathlib\n")
+    plan = discovery.planner.order(static, local_lock_ids=frozenset({old.lock.lock_id}))
     assert plan.candidates[0].entry.id == "mathlib-old"
+
+
+def test_decision_hint_is_tried_first_without_bypassing_candidates(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    old = next(entry for entry in sample_catalog.entries if entry.id == "mathlib-old")
+    evidence = Discovery(catalog=sample_catalog).analyze("import Mathlib\n")
+    discovery = Discovery(catalog=sample_catalog)
+    plan = discovery.planner.order(
+        discovery.planner.plan(evidence, sample_catalog, DiscoveryPolicy()),
+        preferred_lock_id=old.lock.lock_id,
+        preferred_exact=True,
+    )
+    assert [candidate.entry.id for candidate in plan.candidates] == [
+        "mathlib-old",
+        "mathlib-new",
+        "core",
+    ]
+
+
+def test_negative_history_never_hides_every_compiler_diagnostic(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    discovery = Discovery(catalog=sample_catalog)
+    static = discovery.plan("import Mathlib\n")
+    all_locks = frozenset(candidate.entry.lock.lock_id for candidate in static.candidates)
+    ordered = discovery.planner.order(static, rejected_lock_ids=all_locks)
+    assert ordered.candidates == static.candidates
 
 
 def test_smallest_compatible_environment_breaks_tie() -> None:
@@ -57,7 +83,10 @@ def test_smallest_compatible_environment_breaks_tie() -> None:
     ]
 
     leancert_plan = Discovery(catalog=catalog).plan("import LeanCert\n")
-    assert [candidate.entry.id for candidate in leancert_plan.candidates] == ["leancert"]
+    assert [candidate.entry.id for candidate in leancert_plan.candidates] == [
+        "leancert",
+        "mathlib",
+    ]
 
 
 def test_local_extension_can_still_beat_smaller_remote_environment() -> None:
@@ -71,10 +100,11 @@ def test_local_extension_can_still_beat_smaller_remote_environment() -> None:
         packages=("mathlib", "leancert"),
     )
     catalog = Catalog(generated_at="2026-08-12T00:00:00Z", entries=(mathlib, leancert))
-    plan = Discovery(
-        catalog=catalog,
-        availability={leancert.lock.lock_id: AvailabilityObservation(local=True)},
-    ).plan("import Mathlib\n")
+    discovery = Discovery(catalog=catalog)
+    plan = discovery.planner.order(
+        discovery.plan("import Mathlib\n"),
+        local_lock_ids=frozenset({leancert.lock.lock_id}),
+    )
 
     assert plan.candidates[0].entry.id == "leancert"
 
@@ -84,8 +114,9 @@ def test_candidate_limit_is_strict(sample_catalog) -> None:  # type: ignore[no-u
         catalog=sample_catalog,
         policy=DiscoveryPolicy(max_candidates=1),
     ).plan("import Mathlib\n")
-    assert len(plan.candidates) == 1
-    assert plan.total_plausible_candidates == 2
+    assert len(plan.candidates) == 3
+    assert len(plan.planned_candidates) == 1
+    assert plan.total_plausible_candidates == 3
     assert plan.truncated
 
 
@@ -123,6 +154,9 @@ example : True := trivial
 def test_plan_never_claims_compilation(sample_catalog) -> None:  # type: ignore[no-untyped-def]
     payload = Discovery(catalog=sample_catalog).plan("import Mathlib\n").to_dict()
     assert payload["confidence"] == "heuristic_only"
+    Draft202012Validator(json.loads(schema_path("plan-v1.schema.json").read_text())).validate(
+        payload
+    )
 
 
 def test_bundled_catalog_keeps_mathlib_and_leancert_discovery_distinct() -> None:
@@ -133,6 +167,16 @@ def test_bundled_catalog_keeps_mathlib_and_leancert_discovery_distinct() -> None
 
     assert mathlib.candidates[0].entry.id == "mathlib-v4.33.0"
     assert leancert.candidates[0].entry.id == "leancert-v4.33.0"
+
+
+def test_candidate_limit_diversifies_environment_families() -> None:
+    discovery = Discovery(catalog=default_catalog())
+    plan = discovery.plan("import Mathlib\n")
+    families = [
+        tuple(sorted(candidate.entry.package_names)) for candidate in plan.planned_candidates
+    ]
+    assert "leancert" not in families[0]
+    assert "leancert" in families[1]
 
 
 def test_compatibility_profiles_only_check_advertised_catalog_roots() -> None:

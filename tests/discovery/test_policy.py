@@ -16,4 +16,9 @@ def test_channels_must_be_unique() -> None:
 
 def test_flags_must_be_boolean() -> None:
     with pytest.raises(PolicyError, match="Boolean"):
-        DiscoveryPolicy(prefer_local=1)  # type: ignore[arg-type]
+        DiscoveryPolicy(allow_download=1)  # type: ignore[arg-type]
+
+
+def test_remote_acquisition_limit_is_nonnegative() -> None:
+    with pytest.raises(PolicyError, match="max_remote_acquisitions"):
+        DiscoveryPolicy(max_remote_acquisitions=-1)

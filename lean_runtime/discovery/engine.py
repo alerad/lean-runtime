@@ -8,10 +8,19 @@ import time
 from ..errors import LeanRuntimeError
 from .candidate import DiscoveryPlan
 from .probe import CandidateProbe, ProbeIntegrityFailure, ProbeUnavailable
-from .result import AttemptStatus, CandidateAttempt, DiscoveryResult, ResultDiagnostic
+from .result import (
+    AttemptStatus,
+    CandidateAttempt,
+    DiscoveryCompletion,
+    DiscoveryConfidence,
+    DiscoveryOutcome,
+    DiscoveryResult,
+    ResultDiagnostic,
+)
 
 DISCOVERY_FOUND = "DISCOVERY_FOUND"
 DISCOVERY_CANDIDATE_LIMIT = "DISCOVERY_CANDIDATE_LIMIT"
+DISCOVERY_ACQUISITION_LIMIT = "DISCOVERY_ACQUISITION_LIMIT"
 DISCOVERY_TIME_LIMIT = "DISCOVERY_TIME_LIMIT"
 DISCOVERY_NO_CANDIDATES = "DISCOVERY_NO_CANDIDATES"
 DISCOVERY_EXHAUSTED = "DISCOVERY_EXHAUSTED"
@@ -141,6 +150,8 @@ def discover(
         return DiscoveryResult(
             status="invalid_request",
             confidence="exhausted",
+            outcome="failed",
+            completion="complete",
             plan=plan,
             attempts=(),
             duration_seconds=time.monotonic() - started,
@@ -153,6 +164,8 @@ def discover(
         return DiscoveryResult(
             status="not_found",
             confidence="exhausted",
+            outcome="no_candidate",
+            completion="complete",
             plan=plan,
             attempts=(),
             duration_seconds=time.monotonic() - started,
@@ -161,45 +174,67 @@ def discover(
             ),
         )
 
-    deadline = started + plan.policy.max_total_seconds
+    wall_deadline = started + plan.policy.max_wall_seconds
+    probe_remaining = plan.policy.max_total_seconds
     if probe is None:
         raise ValueError("an authoritative candidate probe is required")
     attempts: list[CandidateAttempt] = []
-    for candidate in plan.candidates:
+    remote_acquisitions = 0
+    for candidate in plan.planned_candidates:
         if cancel is not None and cancel.is_set():
             return DiscoveryResult(
                 status="cancelled",
                 confidence="exhausted",
+                outcome="cancelled",
+                completion="complete",
                 plan=plan,
                 attempts=tuple(attempts),
                 duration_seconds=time.monotonic() - started,
                 diagnostics=_diagnostic(DISCOVERY_CANCELLED, "discovery was cancelled"),
             )
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        remaining_wall = wall_deadline - time.monotonic()
+        if remaining_wall <= 0 or probe_remaining <= 0:
             return DiscoveryResult(
                 status="not_found",
-                confidence="exhausted",
+                confidence="inconclusive",
+                outcome="inconclusive",
+                completion="time_limit",
                 plan=plan,
                 attempts=tuple(attempts),
                 duration_seconds=time.monotonic() - started,
-                diagnostics=_diagnostic(DISCOVERY_TIME_LIMIT, "total search budget expired"),
+                diagnostics=_diagnostic(DISCOVERY_TIME_LIMIT, "total wall-clock budget expired"),
             )
         attempt_started = time.monotonic()
-        acquisition_timeout = plan.policy.acquisition_timeout_seconds
+        candidate_is_local = any(
+            reason.code == "RANK_LOCAL_AVAILABLE" for reason in candidate.reasons
+        )
+        if not candidate_is_local and remote_acquisitions >= plan.policy.max_remote_acquisitions:
+            return DiscoveryResult(
+                status="not_found",
+                confidence="inconclusive",
+                outcome="inconclusive",
+                completion="acquisition_limit",
+                plan=plan,
+                attempts=tuple(attempts),
+                duration_seconds=time.monotonic() - started,
+                diagnostics=_diagnostic(
+                    DISCOVERY_ACQUISITION_LIMIT,
+                    "remote acquisition limit reached",
+                ),
+            )
+        if not candidate_is_local:
+            remote_acquisitions += 1
+        acquisition_timeout = min(
+            plan.policy.acquisition_timeout_seconds,
+            max(0.001, remaining_wall),
+        )
         with _AttemptCancellation(acquisition_timeout, cancel) as acquisition_cancel:
             try:
-                # Acquisition (downloads, toolchain installs, builds) is
-                # budgeted separately; every acquisition outcome, including
-                # failures, credits its elapsed time back to the search budget.
-                try:
-                    acquired = probe.acquire(
-                        candidate,
-                        timeout_seconds=acquisition_timeout,
-                        cancel=acquisition_cancel.cancel,
-                    )
-                finally:
-                    deadline += time.monotonic() - attempt_started
+                acquired = probe.acquire(
+                    candidate,
+                    timeout_seconds=acquisition_timeout,
+                    cancel=acquisition_cancel.cancel,
+                )
             except Exception as exc:  # defensive adapter boundary
                 attempt, action = _failed_attempt(
                     exc,
@@ -215,6 +250,8 @@ def discover(
                 return DiscoveryResult(
                     status="cancelled" if action == "cancelled" else "failed",
                     confidence="exhausted",
+                    outcome="cancelled" if action == "cancelled" else "failed",
+                    completion="complete",
                     plan=plan,
                     attempts=tuple(attempts),
                     duration_seconds=time.monotonic() - started,
@@ -222,12 +259,40 @@ def discover(
                     if action == "generic_failed"
                     else attempt.diagnostics,
                 )
-        remaining = deadline - time.monotonic()
-        # The search budget gates STARTING candidates (checked at the top of
-        # the loop); it must not kill an in-flight authoritative check, which
-        # is bounded by its own per-candidate timeout. A slow machine's first
-        # check may legitimately outlive the remaining search budget.
-        timeout = plan.policy.candidate_timeout_seconds or remaining
+        remaining_wall = wall_deadline - time.monotonic()
+        if remaining_wall <= 0:
+            attempts.append(
+                CandidateAttempt(
+                    candidate_id=candidate.entry.id,
+                    lock_id=candidate.entry.lock.lock_id,
+                    status="timeout",
+                    duration_seconds=time.monotonic() - attempt_started,
+                    acquisition=acquired.acquisition,
+                    environment_id=acquired.environment_id,
+                    diagnostics=_diagnostic(
+                        CANDIDATE_TIMEOUT,
+                        "global wall-clock budget expired after acquisition",
+                    ),
+                )
+            )
+            return DiscoveryResult(
+                status="not_found",
+                confidence="inconclusive",
+                outcome="inconclusive",
+                completion="time_limit",
+                plan=plan,
+                attempts=tuple(attempts),
+                duration_seconds=time.monotonic() - started,
+                diagnostics=_diagnostic(DISCOVERY_TIME_LIMIT, "total wall-clock budget expired"),
+            )
+        # The candidate timeout and remaining global wall budget are both
+        # authoritative; whichever is smaller bounds this Lean invocation.
+        timeout = min(
+            plan.policy.candidate_timeout_seconds or probe_remaining,
+            probe_remaining,
+            remaining_wall,
+        )
+        check_started = time.monotonic()
         with _AttemptCancellation(timeout, cancel) as attempt_cancel:
             try:
                 outcome = probe.check(
@@ -237,6 +302,7 @@ def discover(
                     cancel=attempt_cancel.cancel,
                 )
             except Exception as exc:  # defensive adapter boundary
+                probe_remaining -= time.monotonic() - check_started
                 attempt, action = _failed_attempt(
                     exc,
                     candidate_id=candidate.entry.id,
@@ -251,6 +317,8 @@ def discover(
                 return DiscoveryResult(
                     status="cancelled" if action == "cancelled" else "failed",
                     confidence="exhausted",
+                    outcome="cancelled" if action == "cancelled" else "failed",
+                    completion="complete",
                     plan=plan,
                     attempts=tuple(attempts),
                     duration_seconds=time.monotonic() - started,
@@ -258,6 +326,8 @@ def discover(
                     if action == "generic_failed"
                     else attempt.diagnostics,
                 )
+
+        probe_remaining -= time.monotonic() - check_started
 
         result = outcome.execution_result
         attempt_duration = time.monotonic() - attempt_started
@@ -284,6 +354,8 @@ def discover(
             return DiscoveryResult(
                 status="failed",
                 confidence="exhausted",
+                outcome="failed",
+                completion="complete",
                 plan=plan,
                 attempts=tuple(attempts),
                 duration_seconds=time.monotonic() - started,
@@ -325,6 +397,8 @@ def discover(
             return DiscoveryResult(
                 status="found",
                 confidence="compiled",
+                outcome="found",
+                completion="complete",
                 plan=plan,
                 selected_candidate=candidate,
                 lock=candidate.entry.lock,
@@ -337,24 +411,39 @@ def discover(
             return DiscoveryResult(
                 status="cancelled",
                 confidence="exhausted",
+                outcome="cancelled",
+                completion="complete",
                 plan=plan,
                 attempts=tuple(attempts),
                 duration_seconds=time.monotonic() - started,
                 diagnostics=attempt.diagnostics,
             )
 
-    if time.monotonic() >= deadline:
-        reason = ResultDiagnostic(DISCOVERY_TIME_LIMIT, "total search budget expired")
+    if time.monotonic() >= wall_deadline or probe_remaining <= 0:
+        reason = ResultDiagnostic(DISCOVERY_TIME_LIMIT, "total wall-clock budget expired")
+        completion: DiscoveryCompletion = "time_limit"
+        final_outcome: DiscoveryOutcome = "inconclusive"
+        confidence: DiscoveryConfidence = "inconclusive"
     elif plan.truncated:
         reason = ResultDiagnostic(
             DISCOVERY_CANDIDATE_LIMIT,
             f"tested {len(attempts)} candidates; additional plausible candidates were bounded",
         )
+        completion = "candidate_limit"
+        final_outcome = "inconclusive"
+        confidence = "inconclusive"
     else:
         reason = ResultDiagnostic(
             DISCOVERY_EXHAUSTED,
             f"Lean did not accept the source in any of {len(attempts)} tested candidates",
         )
+        completion = "complete"
+        final_outcome = (
+            "source_rejected"
+            if any(attempt.status == "lean_rejected" for attempt in attempts)
+            else "no_candidate"
+        )
+        confidence = "exhausted"
     rejection_diagnostics = tuple(
         diagnostic
         for attempt in attempts
@@ -369,7 +458,9 @@ def discover(
     )
     return DiscoveryResult(
         status="not_found",
-        confidence="exhausted",
+        confidence=confidence,
+        outcome=final_outcome,
+        completion=completion,
         plan=plan,
         attempts=tuple(attempts),
         duration_seconds=time.monotonic() - started,

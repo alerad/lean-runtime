@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 from .errors import EnvironmentError
+from .import_syntax import is_import_line
 from .locking import FileLock
 from .serialization import sha256_id
 from .store import platform_compatibility
@@ -40,14 +41,14 @@ def _header_identity(source: str) -> str:
     for line in source.splitlines(keepends=True):
         stripped = line.strip()
         block_depth += stripped.count("/-") - stripped.count("-/")
+        import_line = is_import_line(stripped)
         header_line = (
             block_depth > 0
             or not stripped
-            or stripped.startswith(
-                ("--", "/-", "-/", "module", "prelude", "import ", "public import ")
-            )
+            or stripped.startswith(("--", "/-", "-/", "module", "prelude"))
+            or import_line
         )
-        if stripped.startswith(("import ", "public import ")):
+        if import_line:
             saw_import = True
         if saw_import and not header_line:
             break

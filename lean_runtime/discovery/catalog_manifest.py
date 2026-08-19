@@ -26,6 +26,7 @@ _ENTRY_KEYS = frozenset(
         "references",
         "inventory_packages",
         "modules",
+        # Accepted for compatibility with existing source manifests, but ignored.
         "library_hints",
         "created_at",
     }
@@ -63,7 +64,6 @@ class CatalogSourceEntry:
     references: tuple[str, ...]
     inventory_packages: tuple[str, ...]
     modules: tuple[str, ...]
-    library_hints: tuple[str, ...]
     created_at: str
 
     @classmethod
@@ -93,11 +93,6 @@ class CatalogSourceEntry:
             raise CatalogError(
                 f"entry {entry_id!r} must inventory packages or declare explicit modules"
             )
-        library_hints = _strings(
-            value.get("library_hints", []), f"entry {entry_id!r} library_hints"
-        )
-        if any("\n" in item or "\r" in item for item in library_hints):
-            raise CatalogError(f"entry {entry_id!r} contains an invalid library hint")
         path = Path(lock)
         return cls(
             id=entry_id,
@@ -106,7 +101,6 @@ class CatalogSourceEntry:
             references=references,
             inventory_packages=inventory_packages,
             modules=modules,
-            library_hints=library_hints,
             created_at=_timestamp(value["created_at"], f"entry {entry_id!r} created_at"),
         )
 

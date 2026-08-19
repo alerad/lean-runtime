@@ -30,6 +30,7 @@ from .errors import (
     LeanRuntimeError,
     MaterializationError,
     ProjectError,
+    ProjectNotFoundError,
     PublicationError,
     ResolutionError,
 )
@@ -570,6 +571,11 @@ def _add_check_v4(parser: argparse.ArgumentParser, *, watch: bool = False) -> No
     parser.add_argument("--plan", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--lock-out", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--no-source-build", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--allow-source-build",
+        action="store_true",
+        help="allow standalone discovery to build an environment from source",
+    )
     parser.add_argument("--max-download", type=parse_byte_size, help=argparse.SUPPRESS)
     _add_common_output(parser)
     parser.add_argument("--repeat", type=int)
@@ -753,9 +759,20 @@ Advanced namespaces:
 
     build = commands.add_parser("build", help="build the current Lake project")
     build.add_argument("targets", nargs="*")
+    build.add_argument(
+        "--no-cache",
+        dest="artifact_cache",
+        action="store_false",
+        help="skip dependency artifact restoration and build directly with Lake",
+    )
     build.add_argument("--json", action="store_true")
     build.set_defaults(
-        command="build", project=Path.cwd(), toolchain=None, timeout=900, shared=None
+        command="build",
+        project=Path.cwd(),
+        toolchain=None,
+        timeout=900,
+        shared=None,
+        artifact_cache=True,
     )
 
     update = commands.add_parser("update", help="update the current project safely")
@@ -1054,8 +1071,11 @@ def _standalone_check_args(args: argparse.Namespace, source: Path) -> argparse.N
         no_discover=False,
         offline=args.offline,
         no_source_build=args.no_source_build,
+        allow_source_build=args.allow_source_build,
         max_candidates=3,
+        max_remote_acquisitions=2,
         search_timeout=90.0,
+        wall_timeout=1800.0,
         acquire_timeout=1800.0,
         home=args.home,
         json=args.json,
@@ -1113,7 +1133,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     discover_project(source)
                     project_available = True
-                except ProjectError:
+                except ProjectNotFoundError:
                     pass
             explicit_discovery = bool(
                 args.package_refs or args.toolchain or getattr(args, "_using_lock", None)
@@ -1733,11 +1753,14 @@ def main(argv: list[str] | None = None) -> int:
             status_payload: dict[str, Any]
             try:
                 project_status = discover_project(subject_path)
-            except ProjectError:
+            except ProjectNotFoundError:
                 if subject_path.is_file() and subject_path.suffix == ".lean":
-                    discovery_plan = Discovery(catalog=default_catalog()).plan(
-                        subject_path.read_text(encoding="utf-8")
-                    )
+                    catalog = default_catalog()
+                    source_text = subject_path.read_text(encoding="utf-8")
+                    discovery = Discovery(catalog=catalog, runtime=runtime)
+                    evidence = discovery.analyze(source_text)
+                    static_plan = discovery.plan(source_text, evidence=evidence)
+                    discovery_plan, _ = discovery.order(source_text, evidence, static_plan)
                     status_payload = {
                         "kind": "standalone",
                         "subject": str(subject_path.resolve()),
@@ -1745,11 +1768,21 @@ def main(argv: list[str] | None = None) -> int:
                         "candidates": [
                             candidate.entry.id for candidate in discovery_plan.candidates
                         ],
-                        "selected": (
+                        "planned_first": (
                             discovery_plan.candidates[0].entry.id
                             if discovery_plan.candidates
                             else None
                         ),
+                        "availability": {
+                            candidate.entry.id: {
+                                "local": runtime.exact_ready_locally(
+                                    candidate.entry.lock,
+                                    import_roots=evidence.imports,
+                                ),
+                                "remote": "not_probed",
+                            }
+                            for candidate in discovery_plan.candidates
+                        },
                     }
                 elif subject_path.is_file() and subject_path.suffix == ".json":
                     lock = EnvironmentLock.load(subject_path)
@@ -2165,6 +2198,7 @@ def main(argv: list[str] | None = None) -> int:
                 toolchain=args.toolchain,
                 timeout=args.timeout,
                 shared=args.shared,
+                artifact_cache=args.artifact_cache,
             )
     except KeyboardInterrupt:
         renderer.close()

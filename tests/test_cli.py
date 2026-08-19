@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,6 +41,8 @@ def test_project_commands_default_to_cwd(monkeypatch: pytest.MonkeyPatch) -> Non
     assert parser().parse_args(["build"]).project == cwd
     assert parser().parse_args(["update"]).path == cwd
     assert parser().parse_args(["project", "scan"]).path == cwd
+    assert parser().parse_args(["build"]).artifact_cache is True
+    assert parser().parse_args(["build", "--no-cache"]).artifact_cache is False
 
 
 def test_configuration_supplies_persistent_runtime_and_trust_defaults(
@@ -227,3 +230,15 @@ def test_status_without_context_is_actionable(
 ) -> None:
     assert main(["--home", str(tmp_path / "home"), "status", str(tmp_path)]) == 0
     assert "no pinned Lake project" in capsys.readouterr().out
+
+
+def test_standalone_status_reports_plan_not_selection_and_availability(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "Standalone.lean"
+    source.write_text("import Mathlib\n")
+    assert main(["--home", str(tmp_path / "home"), "status", str(source), "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert "selected" not in data
+    assert data["planned_first"] == data["candidates"][0]
+    assert data["availability"][data["planned_first"]]["remote"] == "not_probed"

@@ -31,7 +31,6 @@ example : 2 + 2 = 4 := by norm_num
 
 ```console
 $ lean-runtime check Main.lean
-Discovering an exact environment
 ✓ Main.lean accepted in 1.60s
 ```
 

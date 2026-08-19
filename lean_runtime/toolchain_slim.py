@@ -61,6 +61,7 @@ CAPABILITY_CORPUS: tuple[tuple[str, str], ...] = (
         "example (x : Nat) (h : x > 2) : x ≥ 1 := by omega\n",
     ),
     ("decide", "example : (3 : Nat) < 5 := by decide\n"),
+    ("native-decide", "example : (12345 : Nat) < 12346 := by native_decide\n"),
     ("interpreter", "#eval (List.range 10).map (· * 2) |>.foldl (· + ·) 0\n"),
     (
         "metaprogramming",

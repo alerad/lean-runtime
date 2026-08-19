@@ -8,10 +8,9 @@ from typing import Any
 
 from ..errors import LeanRuntimeError
 from ..frontmatter import parse_frontmatter
+from ..import_syntax import import_payload
 
 _MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*")
-_IMPORT = re.compile(r"^\s*import\s+(.+?)\s*$")
-_QUALIFIED = re.compile(r"\b[A-Z][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)+\b")
 _CORE_ROOTS = frozenset({"Init", "Lean", "Std"})
 
 
@@ -21,7 +20,6 @@ class SourceEvidence:
 
     imports: tuple[str, ...] = field(default_factory=tuple)
     root_namespaces: tuple[str, ...] = field(default_factory=tuple)
-    qualified_identifiers: tuple[str, ...] = field(default_factory=tuple)
     package_hints: tuple[str, ...] = field(default_factory=tuple)
     toolchain_hint: str | None = None
     lock_hint: str | None = None
@@ -32,7 +30,6 @@ class SourceEvidence:
         return {
             "imports": list(self.imports),
             "root_namespaces": list(self.root_namespaces),
-            "qualified_identifiers": list(self.qualified_identifiers),
             "package_hints": list(self.package_hints),
             "toolchain_hint": self.toolchain_hint,
             "lock_hint": self.lock_hint,
@@ -117,10 +114,10 @@ def analyze_source(source: str) -> SourceEvidence:
     cleaned = _without_comments_and_strings(source)
     imports: list[str] = []
     for line_number, line in enumerate(cleaned.splitlines(), start=1):
-        match = _IMPORT.match(line)
-        if match is None:
+        payload = import_payload(line)
+        if payload is None:
             continue
-        tokens = match.group(1).split()
+        tokens = payload.split()
         if not tokens:
             warnings.append(f"empty import at line {line_number}")
             continue
@@ -131,13 +128,6 @@ def analyze_source(source: str) -> SourceEvidence:
                 imports.append(token)
 
     roots = tuple(dict.fromkeys(item.split(".", 1)[0] for item in imports))
-    identifiers = tuple(
-        dict.fromkeys(
-            token
-            for token in _QUALIFIED.findall(cleaned)
-            if token not in imports and not token.startswith("lean.runtime")
-        )
-    )
     appears_core_only = (
         lock_hint is None and not package_hints and all(root in _CORE_ROOTS for root in roots)
     )
@@ -146,7 +136,6 @@ def analyze_source(source: str) -> SourceEvidence:
     return SourceEvidence(
         imports=tuple(imports),
         root_namespaces=roots,
-        qualified_identifiers=identifiers,
         package_hints=package_hints,
         toolchain_hint=toolchain_hint,
         lock_hint=lock_hint,
