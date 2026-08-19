@@ -169,14 +169,34 @@ def test_bundled_catalog_keeps_mathlib_and_leancert_discovery_distinct() -> None
     assert leancert.candidates[0].entry.id == "leancert-v4.33.0"
 
 
-def test_candidate_limit_diversifies_environment_families() -> None:
-    discovery = Discovery(catalog=default_catalog())
-    plan = discovery.plan("import Mathlib\n")
-    families = [
-        tuple(sorted(candidate.entry.package_names)) for candidate in plan.planned_candidates
+def test_mathlib_source_plans_successive_mathlib_releases() -> None:
+    plan = Discovery(catalog=default_catalog()).plan("import Mathlib\n")
+    assert [candidate.entry.id for candidate in plan.planned_candidates] == [
+        "mathlib-v4.33.0",
+        "mathlib-v4.32.2",
+        "mathlib-v4.31.0",
     ]
-    assert "leancert" not in families[0]
-    assert "leancert" in families[1]
+
+
+def test_planned_candidates_never_repeat_one_mathlib_tree() -> None:
+    """A bounded search must spend each acquisition on a distinct hypothesis.
+
+    Every ``leancert-*`` entry bundles the identical Mathlib revision and tree
+    as its ``mathlib-*`` sibling, so probing both cannot change a Mathlib
+    verdict. Planning them adjacently exhausted ``max_remote_acquisitions``
+    against one hypothesis and left older Mathlib releases untried.
+    """
+    plan = Discovery(catalog=default_catalog()).plan("import Mathlib\n")
+
+    def mathlib_tree(candidate):  # type: ignore[no-untyped-def]
+        package = next(
+            (item for item in candidate.entry.lock.packages if item.name == "mathlib"), None
+        )
+        return None if package is None else (package.revision, package.tree_hash)
+
+    planned = plan.planned_candidates
+    trees = [mathlib_tree(candidate) for candidate in planned]
+    assert len(set(trees)) == len(trees), [candidate.entry.id for candidate in planned]
 
 
 def test_compatibility_profiles_only_check_advertised_catalog_roots() -> None:

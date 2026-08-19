@@ -1,5 +1,5 @@
 site_name: Lean Runtime
-site_description: Check Lean proofs with one command — exact, reusable environments included
+site_description: Run Lean files and Lake projects in exact, recorded environments
 site_url: https://alerad.github.io/lean-runtime/
 repo_url: https://github.com/alerad/lean-runtime
 repo_name: alerad/lean-runtime
@@ -13,59 +13,38 @@ theme:
   features:
     - navigation.instant
     - navigation.tracking
-    - navigation.tabs
-    - navigation.tabs.sticky
-    - content.code.copy
-    - content.code.annotate
     - navigation.sections
     - navigation.top
+    - content.code.copy
+    - content.code.annotate
     - search.highlight
     - search.suggest
     - toc.follow
   palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: deep purple
-      accent: purple
-      toggle:
-        icon: material/weather-night
-        name: Use dark mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: deep purple
-      accent: purple
-      toggle:
-        icon: material/weather-sunny
-        name: Use light mode
+    scheme: default
+    primary: custom
+    accent: custom
 
 nav:
   - Home: index.md
-  - Get started: getting-started.md
-  - Guides:
-      - Check a single file: standalone-files.md
-      - Work in a Lake project: local-projects.md
-      - Use Lean from Python: python-api.md
-  - Sharing:
-      - Publish a project: project-publishing.md
-      - Portable environments: portable-copies.md
-      - Ready-to-run programs: ready-programs.md
-  - CLI reference: cli.md
-  - Advanced:
-      - Verify, compare, and measure: v1-precision.md
-      - Environment commands: environments.md
-      - Execution captures: captures.md
-      - Trust and limitations: trust-and-limitations.md
-      - Architecture: architecture.md
-      - Lake artifact-cache design: lake-artifact-cache-design.md
-  - Project:
-      - Release case study: case-study-v1.md
-      - Development: development.md
+  - Start here: tutorial.md
+  - Workflows:
+      - Check Lean files: workflows/check-files.md
+      - Work with Lake projects: workflows/lake-projects.md
+  - Concepts:
+      - Context selection: concepts/context-selection.md
+  - Reference:
+      - Commands: reference/commands.md
+  - Trust and limitations: trust.md
 
 plugins:
   - search
 
 extra_css:
-  - stylesheets/extra.css
+  - stylesheets/site.css
+
+extra_javascript:
+  - javascripts/run-inspector.js
 
 extra:
   social:
@@ -80,9 +59,6 @@ markdown_extensions:
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.details
-  - pymdownx.emoji:
-      emoji_index: !!python/name:material.extensions.emoji.twemoji
-      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - pymdownx.inlinehilite
   - pymdownx.superfences
   - pymdownx.tabbed:

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import replace
-from itertools import groupby
 
 from .analyzer import SourceEvidence
 from .candidate import Candidate, CandidateReason, DiscoveryPlan, ExcludedCandidate
@@ -42,33 +40,6 @@ def _root_package_matches(entry: CatalogEntry, root: str) -> bool:
 
 def _has_reason(candidate: Candidate, code: str) -> bool:
     return any(reason.code == code for reason in candidate.reasons)
-
-
-def _family(candidate: Candidate) -> tuple[str, ...]:
-    packages = tuple(sorted(candidate.entry.package_names))
-    return packages or ("<core>",)
-
-
-def _diversify(
-    candidates: list[Candidate],
-    priority: Callable[[Candidate], object],
-) -> list[Candidate]:
-    """Round-robin environment families within otherwise-equal priority tiers."""
-
-    result: list[Candidate] = []
-    for _, tier_items in groupby(candidates, key=priority):
-        families: dict[tuple[str, ...], list[Candidate]] = {}
-        for candidate in tier_items:
-            families.setdefault(_family(candidate), []).append(candidate)
-        queues = list(families.values())
-        while queues:
-            remaining: list[list[Candidate]] = []
-            for queue in queues:
-                result.append(queue.pop(0))
-                if queue:
-                    remaining.append(queue)
-            queues = remaining
-    return result
 
 
 class Planner:
@@ -172,18 +143,15 @@ class Planner:
                 )
             )
 
+        # Smallest environment first, then newest. Ordering by package count
+        # keeps an extension environment such as LeanCert behind the plain
+        # Mathlib environment that carries the identical Mathlib tree, so a
+        # bounded search spends each acquisition on a distinct compiler
+        # hypothesis instead of on an equivalent superset.
         ranked.sort(key=lambda item: item[:4])
-        static_candidates = [
+        candidates = tuple(
             Candidate(rank=index, entry=item[4], reasons=item[5])
             for index, item in enumerate(ranked, start=1)
-        ]
-        static_candidates = _diversify(
-            static_candidates,
-            lambda candidate: _has_reason(candidate, DEMOTE_MODULE_INVENTORY_MISS),
-        )
-        candidates = tuple(
-            replace(candidate, rank=index)
-            for index, candidate in enumerate(static_candidates, start=1)
         )
         excluded.sort(key=lambda item: item.entry_id)
         return DiscoveryPlan(
@@ -264,7 +232,6 @@ class Planner:
             )
 
         candidates.sort(key=key)
-        candidates = _diversify(candidates, lambda candidate: key(candidate)[:4])
         reranked = tuple(
             replace(candidate, rank=index) for index, candidate in enumerate(candidates, start=1)
         )
