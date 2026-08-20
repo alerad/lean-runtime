@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.1.0 - 2026-08-19
+
 ## 4.0.1 - 2026-08-18
 
 - Keep `verify ENV --offline` strictly local for sparse environments by probing
