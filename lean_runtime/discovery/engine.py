@@ -37,6 +37,8 @@ CANDIDATE_RUNTIME_ERROR = "CANDIDATE_RUNTIME_ERROR"
 
 class _AttemptCancellation:
     def __init__(self, timeout_seconds: float, external: threading.Event | None) -> None:
+        self._timeout_seconds = timeout_seconds
+        self._deadline: float | None = None
         self.cancel = threading.Event()
         self.timed_out = threading.Event()
         self._stop = threading.Event()
@@ -61,6 +63,7 @@ class _AttemptCancellation:
                 return
 
     def __enter__(self) -> _AttemptCancellation:
+        self._deadline = time.monotonic() + self._timeout_seconds
         self._timer.start()
         if self._relay is not None:
             self._relay.start()
@@ -71,6 +74,12 @@ class _AttemptCancellation:
         self._timer.cancel()
         if self._relay is not None:
             self._relay.join(timeout=0.1)
+
+    def expired(self) -> bool:
+        """Return deadline expiry even when the timer callback is scheduled late."""
+        return self.timed_out.is_set() or (
+            self._deadline is not None and time.monotonic() >= self._deadline
+        )
 
 
 def _diagnostic(code: str, detail: str) -> tuple[ResultDiagnostic, ...]:
@@ -242,7 +251,7 @@ def discover(
                     lock_id=candidate.entry.lock.lock_id,
                     attempt_started=attempt_started,
                     cancelled_externally=cancel is not None and cancel.is_set(),
-                    timed_out=acquisition_cancel.timed_out.is_set(),
+                    timed_out=acquisition_cancel.expired() or time.monotonic() >= wall_deadline,
                 )
                 attempts.append(attempt)
                 if action == "continue":
@@ -309,7 +318,7 @@ def discover(
                     lock_id=candidate.entry.lock.lock_id,
                     attempt_started=attempt_started,
                     cancelled_externally=cancel is not None and cancel.is_set(),
-                    timed_out=attempt_cancel.timed_out.is_set(),
+                    timed_out=attempt_cancel.expired() or time.monotonic() >= wall_deadline,
                 )
                 attempts.append(attempt)
                 if action == "continue":
@@ -365,7 +374,7 @@ def discover(
             outcome_status: AttemptStatus = "cancelled"
             code = CANDIDATE_CANCELLED
             detail = "candidate execution was cancelled"
-        elif result.timed_out or attempt_cancel.timed_out.is_set():
+        elif result.timed_out or attempt_cancel.expired() or time.monotonic() >= wall_deadline:
             outcome_status = "timeout"
             code = CANDIDATE_TIMEOUT
             detail = "candidate execution exceeded its time budget"

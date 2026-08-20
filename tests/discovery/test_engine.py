@@ -15,6 +15,7 @@ from lean_runtime.discovery import (
     DiscoveryError,
     DiscoveryPolicy,
     ProbeOutcome,
+    engine,
     schema_path,
 )
 from lean_runtime.discovery.candidate import Candidate
@@ -268,6 +269,19 @@ def test_per_candidate_timeout_is_enforced(sample_catalog) -> None:  # type: ign
     assert result.diagnostics[0].code == "CANDIDATE_TIMEOUT"
     assert "time budget" in result.diagnostics[0].detail
     assert result.duration_seconds < 0.5
+
+
+def test_attempt_deadline_is_authoritative_when_timer_callback_is_delayed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"now": 100.0}
+    monkeypatch.setattr(engine.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(threading.Timer, "start", lambda _timer: None)
+
+    with engine._AttemptCancellation(0.2, None) as cancellation:
+        clock["now"] = 100.21
+        assert cancellation.expired()
+        assert not cancellation.timed_out.is_set()
 
 
 def test_slow_acquisition_consumes_global_wall_budget(sample_catalog) -> None:  # type: ignore[no-untyped-def]
