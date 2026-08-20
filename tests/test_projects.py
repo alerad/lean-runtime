@@ -1384,6 +1384,32 @@ def test_update_plans_catalog_versions_and_applies_exact_graph(
     assert (project / "lean-toolchain").read_text().strip() == "leanprover/lean4:v4.33.0"
 
 
+def test_update_is_a_successful_noop_without_mathlib(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = Runtime(
+        toolchains=InitProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    def accept_attach(path, **_kwargs):
+        root = Path(path)
+        result = AdoptionResult(root, "attached", 0, 0, "workspace")
+        return AdoptionBatchResult(AdoptionPlan((), False, 0, 0), (result,))
+
+    monkeypatch.setattr(runtime, "attach_projects", accept_attach)
+    project = tmp_path / "project"
+    runtime.init_project(project, mathlib=None)
+
+    plan = runtime.plan_project_update(project)
+    assert plan.ready
+    assert not plan.changed
+    assert plan.current_version == plan.target_version == "core"
+    assert plan.packages == ()
+    assert plan.download_bytes == 0
+    assert runtime.update_project(project) == plan
+
+
 def test_update_restores_project_metadata_after_failed_adoption(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

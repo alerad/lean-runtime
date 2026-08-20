@@ -11,7 +11,7 @@ This page summarizes the command surface. Run `lean-runtime COMMAND --help` for 
 | `check [PATH ...]` | Check a project or Lean source with inferred or explicit context. |
 | `watch FILE` | Recheck one project file when it changes. |
 | `build [TARGET ...]` | Build the current Lake project. |
-| `update [PATH]` | Plan and apply a project update. |
+| `update [PATH]` | Apply the latest cataloged Mathlib/toolchain update; non-Mathlib projects are a no-op. |
 | `publish [PATH]` | Configure project publication. |
 
 ## Inspection and maintenance

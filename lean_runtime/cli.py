@@ -275,6 +275,12 @@ def _render_init_plan(plan: ProjectInitPlan) -> None:
 
 def _render_update_plan(plan: ProjectUpdatePlan) -> None:
     if not plan.changed:
+        if not plan.packages:
+            print(
+                "Already current: no cataloged Mathlib dependency to update · "
+                f"{plan.target_toolchain}"
+            )
+            return
         print(f"Already current: Mathlib {plan.target_version} · {plan.target_toolchain}")
         return
     print(
@@ -1432,7 +1438,9 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"Ready to publish: {'yes' if plan.ready else 'no'}")
                     for blocker in plan.blockers:
                         print(f"  - {blocker}")
-                return 0 if plan.ready else 1
+                # `project info` is an inspection command. Publication readiness is
+                # reported as data; it is not a condition for successful inspection.
+                return 0
             if args.project_command == "lock":
                 lock = runtime.prepare_project(args.path, module=args.module, timeout=args.timeout)
                 output = args.output or discover_project(args.path).root / "environment.lock.json"
