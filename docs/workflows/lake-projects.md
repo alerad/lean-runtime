@@ -11,7 +11,9 @@ lean-runtime status .
 lean-runtime project info .
 ```
 
-`status` reports the selected project context. `project info` provides project-specific storage and dependency information.
+`status` reports the selected project context. `project info` provides project-specific
+storage and dependency information. It exits successfully when inspection succeeds;
+publication blockers, if any, appear under `Ready to publish: no`.
 
 ## Adopt shared dependency storage
 
@@ -69,6 +71,10 @@ projects requesting the same mutable tag share packages only when that tag
 resolved to the same commit.
 
 ## Update safely
+
+`update` moves a locked Mathlib project to the latest cataloged stable Mathlib and
+matching toolchain. Projects without a cataloged Mathlib dependency have nothing to
+update and report a successful no-op.
 
 Preview the update plan:
 

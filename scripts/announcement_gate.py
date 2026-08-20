@@ -278,17 +278,25 @@ def main() -> int:
     ok = batch_ok and ok
 
     usage = shutil.disk_usage(home)
-    seen: set[tuple[int, int]] = set()
-    home_bytes = 0
+    files: dict[tuple[int, int], tuple[int, set[str]]] = {}
     for file in home.rglob("*"):
         if not file.is_file() or file.is_symlink():
             continue
         stat = file.stat()
         identity = (stat.st_dev, stat.st_ino)
-        if identity not in seen:
-            seen.add(identity)
-            home_bytes += stat.st_size
+        relative = file.relative_to(home)
+        component = relative.parts[0] if len(relative.parts) > 1 else "_root"
+        if identity in files:
+            files[identity][1].add(component)
+        else:
+            files[identity] = (stat.st_size, {component})
+    home_bytes = sum(size for size, _components in files.values())
+    component_bytes: dict[str, int] = {}
+    for size, components in files.values():
+        component = next(iter(components)) if len(components) == 1 else "_shared_hardlinks"
+        component_bytes[component] = component_bytes.get(component, 0) + size
     report["home_bytes"] = home_bytes
+    report["home_component_bytes"] = dict(sorted(component_bytes.items()))
     report["home_limit_bytes"] = HOME_LIMIT
     size_ok = home_bytes <= HOME_LIMIT
     steps.append(

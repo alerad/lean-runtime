@@ -1621,7 +1621,23 @@ class Runtime:
             None,
         )
         if mathlib_package is None:
-            raise ProjectError("project does not have a locked Mathlib dependency")
+            # `update` owns cataloged Mathlib/toolchain transitions. A valid
+            # project without Mathlib has nothing in that domain to update.
+            return ProjectUpdatePlan(
+                context.root,
+                "core",
+                "core",
+                "",
+                "",
+                context.toolchain,
+                context.toolchain,
+                (),
+                None,
+                0,
+                True,
+                (),
+                self._toolchain_installed(context.toolchain),
+            )
         current_revision = str(mathlib_package.get("rev"))
         current_version = str(mathlib_package.get("inputRev") or current_revision).removeprefix("v")
         from .discovery.defaults import default_catalog

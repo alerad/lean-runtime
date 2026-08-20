@@ -41,6 +41,9 @@ result = lean.check_file("./my-project/MyProject/Main.lean")
 result = lean.replay("execution.capture.json")
 ```
 
+`replay()` requires an existing execution capture; the filename above is a
+placeholder for an artifact supplied by the caller or an execution backend.
+
 ## Read the result
 
 Failed checks expose parsed diagnostics directly:
@@ -101,7 +104,6 @@ from lean_runtime import ExecutionPolicy
 policy = ExecutionPolicy(
     timeout_seconds=30,
     max_output_bytes=1_000_000,
-    memory_mb=2048,
     cpu_seconds=20,
 )
 result = environment.check(source, policy=policy)
@@ -109,7 +111,10 @@ result = environment.check(source, policy=policy)
 
 Consult `result.provenance.enforced_policy_fields`: requested controls vary by
 backend and platform. The local backend rejects network isolation because it
-cannot enforce it.
+cannot enforce it. Memory limits are also backend-dependent. In particular,
+the local Linux backend currently applies `memory_mb` as a virtual-address-space
+limit, so Lean may need substantially more headroom than its resident memory
+suggests. Add that limit only after measuring the selected toolchain and backend.
 
 ## Provenance
 
@@ -180,7 +185,9 @@ result = session.close()
 `close()` is idempotent, closes stdin first so cooperative servers exit on EOF,
 then terminates the process group if needed. `send_line()`, `read_line()`,
 `request_line()`, and `request_json()` are locked so concurrent callers cannot
-interleave protocol frames.
+interleave protocol frames. `lean_bridge` is an example project executable, not
+a program bundled with Lean Runtime; replace it with a line-oriented tool provided
+by the selected environment.
 
 ## Observe progress
 

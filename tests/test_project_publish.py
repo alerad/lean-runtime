@@ -82,6 +82,18 @@ def test_project_preflight_reports_dirty_and_ambiguous_projects(tmp_path: Path) 
     assert not any("multiple importable roots" in blocker for blocker in selected.blockers)
 
 
+def test_project_info_succeeds_when_publication_is_blocked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = _project(tmp_path / "project")
+    (project / "Fixture.lean").write_text("def exportedAnswer : Nat := 43\n")
+
+    assert main(["project", "info", str(project)]) == 0
+    output = capsys.readouterr().out
+    assert "Ready to publish: no" in output
+    assert "checkout is dirty" in output
+
+
 def test_project_preflight_accepts_self_hosted_origin_and_rejects_nested_roots(
     tmp_path: Path,
 ) -> None:
