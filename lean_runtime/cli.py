@@ -428,15 +428,17 @@ def _run_check_batch(runtime: Runtime, files: list[Path], args: argparse.Namespa
         _json(serialize_check_batch_v1(entries, time.monotonic() - started))
     else:
         for display, result in entries:
-            status = "accepted" if result.ok else "rejected"
+            status = "accepted" if result.ok else "timed out" if result.timed_out else "rejected"
             print(f"{display}\t{status}\t{result.elapsed_seconds:.2f}s")
             if not result.ok:
                 output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
                 if output:
-                    print(output, file=sys.stderr)
+                    print(_display_result_text(output, result, display), file=sys.stderr)
         accepted = sum(1 for _, result in entries if result.ok)
         print(f"{accepted}/{len(entries)} accepted")
-    return 0 if all(result.ok for _, result in entries) else 1
+    if all(result.ok for _, result in entries):
+        return 0
+    return 2 if any(result.timed_out for _, result in entries) else 1
 
 
 def _display_result_text(text: str, result: ExecutionResult, display_path: str | None) -> str:
@@ -467,7 +469,7 @@ def _emit_result(
         print(stderr, end="" if stderr.endswith("\n") else "\n", file=sys.stderr)
     for hint in result.hints:
         print(f"hint: {hint}", file=sys.stderr)
-    status = "accepted" if result.ok else "rejected"
+    status = "accepted" if result.ok else "timed out" if result.timed_out else "rejected"
     environment = f" environment={result.environment_id}" if result.environment_id else ""
     print(
         f"{status}:{environment} toolchain={result.toolchain} "
@@ -1021,6 +1023,13 @@ def _confirm(prompt: str, *, yes: bool, json_mode: bool = False) -> bool:
     return input(f"{prompt} [Y/n] ").strip().lower() in {"", "y", "yes"}
 
 
+def _declined_exit(*, json_mode: bool = False) -> int:
+    """An interactive decline succeeds; a prompt that could not be asked fails."""
+    if json_mode or not sys.stdin.isatty():
+        return 2
+    return 0
+
+
 def _path_is_project_root(path: Path) -> bool:
     path = path.expanduser().resolve()
     return any((path / name).is_file() for name in ("lakefile.toml", "lakefile.lean"))
@@ -1038,6 +1047,10 @@ def _apply_using(args: argparse.Namespace) -> None:
         if value.startswith(marker):
             kind, payload = prefix, value[len(marker) :]
             break
+    if kind == "toolchain" and payload.startswith("lean:"):
+        # The explicit prefix accepts the same `lean:vX.Y.Z` shorthand as the
+        # bare spelling instead of passing the raw string to Elan.
+        payload = payload[len("lean:") :]
     candidate = Path(payload).expanduser()
     if kind is None:
         if candidate.is_dir():
@@ -1235,7 +1248,7 @@ def main(argv: list[str] | None = None) -> int:
                     _json({**init_plan.to_dict(), "created": False})
                 else:
                     print("No changes made. Use --yes for non-interactive creation.")
-                return 0
+                return _declined_exit(json_mode=args.json)
             init_result = runtime.init_project(
                 args.path,
                 name=args.name,
@@ -1284,7 +1297,7 @@ def main(argv: list[str] | None = None) -> int:
                     _json({**update_plan.to_dict(), "applied": False})
                 else:
                     print("No changes made. Re-run with --yes to apply noninteractively.")
-                return 0
+                return _declined_exit(json_mode=args.json)
             runtime.update_project(args.path, seed_from=args.seed_from)
             if args.json:
                 _json({**update_plan.to_dict(), "applied": True})
@@ -1331,7 +1344,7 @@ def main(argv: list[str] | None = None) -> int:
                     _json({**preview, "configured": False})
                 else:
                     print("No changes made. Use --yes for non-interactive configuration.")
-                return 0
+                return _declined_exit(json_mode=args.json)
             if output.exists():
                 raise ProjectError(f"publication workflow already exists: {output}")
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -1362,7 +1375,7 @@ def main(argv: list[str] | None = None) -> int:
                     _json({**adoption_plan.to_dict(), "applied": False})
                 else:
                     print("No changes made. Use --yes for non-interactive adoption.")
-                return 0
+                return _declined_exit(json_mode=args.json)
             adoption_result = runtime.attach_projects(
                 args.path,
                 recursive=args.recursive,
@@ -1410,7 +1423,7 @@ def main(argv: list[str] | None = None) -> int:
                     _json({**detachment_plan.to_dict(), "applied": False})
                 else:
                     print("No changes made. Use --yes for non-interactive operation.")
-                return 0
+                return _declined_exit(json_mode=args.json)
             detach_result = runtime.detach_project(args.path)
             if args.json:
                 _json(detach_result.to_dict())
@@ -1828,8 +1841,19 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(f"{status_payload['kind'].title()}")
                 for key, value in status_payload.items():
-                    if key != "kind":
-                        print(f"  {key.replace('_', ' ').title():<14} {value}")
+                    if key == "kind":
+                        continue
+                    label = key.replace("_", " ").title()
+                    if isinstance(value, dict):
+                        print(f"  {label}")
+                        for name, detail in value.items():
+                            if isinstance(detail, dict):
+                                detail = " ".join(f"{k}={v}" for k, v in detail.items())
+                            print(f"    {name:<20} {detail}")
+                    elif isinstance(value, (list, tuple)):
+                        print(f"  {label:<14} {', '.join(str(item) for item in value) or '-'}")
+                    else:
+                        print(f"  {label:<14} {value}")
             return 0
         if args.command == "environments":
             records = runtime.list_environments()
@@ -2070,7 +2094,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     if not warm.ok:
                         _emit_result(warm, args.json)
-                        return 1
+                        return 2 if warm.timed_out else 1
                 repeated_started = time.monotonic()
                 samples = tuple(
                     runtime.check_file(repeated_file, project=args.project, policy=_policy(args))
@@ -2140,9 +2164,17 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 if args.environment is not None:
                     raise ValueError("an environment context requires at least one FILE")
-                result = runtime.check_project(
-                    args.project or Path("."), toolchain=args.toolchain, policy=_policy(args)
-                )
+                try:
+                    result = runtime.check_project(
+                        args.project or Path("."), toolchain=args.toolchain, policy=_policy(args)
+                    )
+                except ProjectNotFoundError as exc:
+                    if not sys.stdin.isatty():
+                        raise ProjectNotFoundError(
+                            f"{exc}\nTo check Lean source from stdin, pass '-': "
+                            "lean-runtime check - --using CONTEXT"
+                        ) from exc
+                    raise
                 source_file = None
             elif args.package_refs:
                 if len(args.inputs) != 1:
@@ -2282,7 +2314,10 @@ def main(argv: list[str] | None = None) -> int:
     _emit_result(result, args.json, display_path=display_path)
     if args.timings:
         print(render_timings(result.timings), file=sys.stderr)
-    return 0 if result.ok else 1
+    if result.ok:
+        return 0
+    # A hit resource limit is an execution-policy outcome, not a verdict.
+    return 2 if result.timed_out else 1
 
 
 if __name__ == "__main__":

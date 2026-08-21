@@ -11,7 +11,7 @@
         ["active", "Discovering an exact environment", "context"],
         ["dim", "Trying mathlib-v4.33.0 · leanprover/lean4:v4.33.0", "environment"],
         ["dim", "Running Lean", "lean"],
-        ["ok", "✓ Primes.lean accepted in 1.39s", "record"]
+        ["ok", "✓ Primes.lean accepted in 4.45s", "record"]
       ]
     },
     pinned: {

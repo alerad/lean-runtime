@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -100,6 +101,17 @@ def _execution_command(command: Sequence[str]) -> tuple[str, ...]:
 
 def _module_name(path: str) -> str:
     return path.removesuffix(".lean").replace("/", ".")
+
+
+_PLAIN_NAME_COMPONENT = re.compile(r"[A-Za-z_][A-Za-z0-9_']*\Z")
+
+
+def _setup_module_name(path: str) -> str:
+    """Guillemet-escape stem components Lean would reject as plain identifiers."""
+    return ".".join(
+        component if _PLAIN_NAME_COMPONENT.match(component) else f"«{component}»"
+        for component in _module_name(path).split(".")
+    )
 
 
 def _support_order(files: Mapping[str, str], entrypoint: str) -> tuple[str, ...]:
@@ -204,7 +216,7 @@ def _capsule_setup(
             artifact_groups[root] = ((str(local),),)
     setup = render_setup(
         lean_version=lock.toolchain,
-        name=_module_name(source_name),
+        name=_setup_module_name(source_name),
         package="lean_runtime_scratch",
         import_artifacts=artifact_groups,
     )

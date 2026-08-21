@@ -108,6 +108,8 @@ def test_invalid_configuration_is_an_invocation_error(
         ("v4.33.0", "toolchain", "v4.33.0"),
         ("env:research", "environment", "research"),
         ("toolchain:v4.32.2", "toolchain", "v4.32.2"),
+        ("lean:v4.33.0", "toolchain", "v4.33.0"),
+        ("toolchain:lean:v4.33.0", "toolchain", "v4.33.0"),
     ],
 )
 def test_using_classifies_context(value: str, field: str, expected: object) -> None:

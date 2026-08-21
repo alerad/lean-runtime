@@ -237,7 +237,7 @@ def _explain_discovery(
 def _combine(arguments: argparse.Namespace, metadata: LeanFrontmatter | None) -> LeanFrontmatter:
     embedded = metadata or LeanFrontmatter()
     if arguments.requires and embedded.requires:
-        raise SpecificationError("cannot combine --with and frontmatter 'requires'")
+        raise SpecificationError("cannot combine --using and frontmatter 'requires'")
     if arguments.lock is not None and embedded.lock is not None:
         raise SpecificationError("cannot combine --lock and frontmatter 'lock'")
     if arguments.toolchain is not None and embedded.toolchain is not None:
@@ -297,7 +297,12 @@ def _emit(
         print(f"Hint: {hint}", file=sys.stderr)
     style = styler_for(sys.stdout)
     symbol = style.green("✓") if result.ok else style.red("✗")
-    status = style.green("accepted") if result.ok else style.red("rejected")
+    if result.ok:
+        status = style.green("accepted")
+    elif result.timed_out:
+        status = style.red("timed out")
+    else:
+        status = style.red("rejected")
     elapsed = result.elapsed_seconds if summary_elapsed_seconds is None else summary_elapsed_seconds
     timing = style.dim(f"in {elapsed:.2f}s")
     print(f"{symbol} {shown} {status} {timing}")
@@ -606,7 +611,10 @@ def run(
                 _discovery_summary(rejected_discovery) if rejected_discovery is not None else None
             ),
         )
-        return 0 if result.ok else 1
+        if result.ok:
+            return 0
+        # A hit resource limit is an execution-policy outcome, not a verdict.
+        return 2 if result.timed_out else 1
     except KeyboardInterrupt:
         renderer.close()
         print(f"{command_name}: interrupted", file=sys.stderr)

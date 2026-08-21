@@ -115,7 +115,7 @@ Offline mode does not acquire missing remote content. Missing requirements produ
 | --- | --- |
 | `0` | Lean accepted the source. |
 | `1` | Lean ran and rejected the source. |
-| `2` | Invocation, context, acquisition, or configuration failed. |
+| `2` | Invocation, context, acquisition, or configuration failed, or a resource limit such as `--timeout` was hit. |
 | `130` | The operation was interrupted. |
 
 Use `--json` for structured results and `--verbose` for the runtime event stream.

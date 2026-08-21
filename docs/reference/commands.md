@@ -44,7 +44,10 @@ lean-runtime check Main.lean --offline
 lean-runtime check Main.lean --json
 lean-runtime check Main.lean --timings
 lean-runtime check Main.lean --repeat 10
+lean-runtime check - --using leanprover/lean4:v4.33.0
 ```
+
+`-` reads Lean source from standard input and requires an explicit context.
 
 `--allow-source-build` permits standalone discovery to build an environment from source when no suitable acquired form is available.
 
@@ -63,5 +66,5 @@ The default build may restore supported dependency artifacts before invoking Lak
 | --- | --- |
 | `0` | Lean accepted the source. |
 | `1` | Lean ran and rejected the source. |
-| `2` | Invocation, context, acquisition, or configuration failed. |
+| `2` | Invocation, context, acquisition, or configuration failed, or a resource limit such as `--timeout` was hit. |
 | `130` | Interrupted. |

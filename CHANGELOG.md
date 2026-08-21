@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Escape source stems that are not plain Lean identifiers when rendering
+  check setups, so files such as `with space.lean` check correctly inside
+  acquired environments.
+- Report a hit `--timeout` as `timed out` with exit 2 instead of presenting
+  it as a Lean rejection with exit 1, and document the classification.
+- Say `--using` in the frontmatter conflict message instead of the removed
+  `--with` spelling.
+- Re-measure the README and landing-page example timings against this
+  machine's warm store and narrow the README hero import to
+  `Mathlib.Tactic.NormNum`.
+- Accept the `lean:vX.Y.Z` shorthand under the explicit `toolchain:` context
+  prefix instead of passing the raw string to Elan.
+- Exit 2 when a guided mutation (`new`, `adopt`, `update`, `publish`,
+  `project unshare`) needs confirmation but cannot prompt; interactive
+  declines still exit 0.
+- Rewrite staged scratch paths to the submitted file names in multi-file
+  check diagnostics, matching single-file output.
+- Render standalone `status` imports, candidates, and availability as
+  aligned text instead of Python reprs.
+- Hint at `lean-runtime check -` when a project-wide check finds no pinned
+  project and stdin is redirected, and document the stdin spelling.
+- Document that a project context applies to files inside the project root,
+  and list `replay` and `completion` in the README command summary.
+
 ## 4.1.0 - 2026-08-19
 
 ## 4.0.1 - 2026-08-18
