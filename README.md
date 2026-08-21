@@ -10,14 +10,14 @@ Give Lean Runtime an ordinary file:
 
 ```lean
 -- Main.lean
-import Mathlib
+import Mathlib.Tactic.NormNum
 
 example : 2 + 2 = 4 := by norm_num
 ```
 
 ```console
 $ lean-runtime check Main.lean
-✓ Main.lean accepted in 1.60s
+✓ Main.lean accepted in 2.60s
 ```
 
 No Lake project, dependency checkout, or toolchain setup required. Lean Runtime
@@ -87,7 +87,8 @@ lean-runtime check Main.lean --using ~/proofs/MyProject
 ```
 
 Typed `package:`, `lock:`, `env:`, `toolchain:`, and `project:` prefixes resolve
-rare ambiguities. Persistent store, registry, and trust policy belongs in
+rare ambiguities. A project context applies to files inside that project's
+root. Persistent store, registry, and trust policy belongs in
 environment configuration rather than everyday command lines.
 
 ## Commands
@@ -95,17 +96,19 @@ environment configuration rather than everyday command lines.
 The normal surface is deliberately small:
 
 ```text
-new NAME       create a project
-adopt [PATH]   share dependencies from existing project(s)
-check [PATH…]  check a project, directory, source file, or stdin
-watch FILE     re-check on save
-build [TARGET] build the current project
-update         preview and apply a safe project update
-publish        configure verified project publication
-status [PATH]  explain the selected project or environment
-verify SUBJECT verify an exact artifact
-doctor         diagnose and offer safe repairs
-clean          preview and reclaim unused storage
+new NAME         create a project
+adopt [PATH]     share dependencies from existing project(s)
+check [PATH…]    check a project, directory, source file, or stdin (-)
+watch FILE       re-check on save
+build [TARGET]   build the current project
+update           preview and apply a safe project update
+publish          configure verified project publication
+status [PATH]    explain the selected project or environment
+verify SUBJECT   verify an exact artifact
+doctor           diagnose and offer safe repairs
+clean            preview and reclaim unused storage
+replay CAPTURE   replay an execution capture
+completion SHELL generate shell completion
 ```
 
 Project commands use the current directory when no path is supplied. Guided

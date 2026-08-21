@@ -143,7 +143,7 @@ def test_lean_run_rejects_conflicting_cli_and_frontmatter(
     )
     monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
     assert main([str(source), "--with", "alerad/leancert@v1"]) == 2
-    assert "cannot combine --with" in capsys.readouterr().err
+    assert "cannot combine --using" in capsys.readouterr().err
 
 
 def test_lean_run_explains_explicit_dependencies_without_execution(
@@ -545,3 +545,28 @@ def test_check_command_forwards_configured_libraries(monkeypatch, tmp_path: Path
         == 0
     )
     assert FakeRuntime.instance.kwargs["libraries"] == ("ghcr.io/owner/environments",)
+
+
+def test_lean_run_reports_a_hit_timeout_as_policy_failure(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := trivial\n")
+
+    class TimedOutRuntime(FakeRuntime):
+        def check_file(self, path, *, toolchain=None, policy=None) -> ExecutionResult:
+            return ExecutionResult(
+                ok=False,
+                exit_code=124,
+                toolchain="leanprover/lean4:v4.32.0",
+                command=("lean", "Main.lean"),
+                cwd="/tmp",
+                stdout="",
+                stderr="",
+                elapsed_seconds=0.01,
+                timed_out=True,
+            )
+
+    monkeypatch.setattr("lean_runtime.run_cli.Runtime", TimedOutRuntime)
+    assert main([str(source), "--toolchain", "leanprover/lean4:v4.32.0"]) == 2
+    assert "timed out" in capsys.readouterr().out

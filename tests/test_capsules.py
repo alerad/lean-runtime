@@ -17,7 +17,7 @@ from lean_runtime.capsules import (
     parse_import_headers,
     render_setup,
 )
-from lean_runtime.environments import _capsule_setup
+from lean_runtime.environments import _capsule_setup, _setup_module_name
 from lean_runtime.errors import EnvironmentError
 from lean_runtime.lockfiles import EnvironmentLock, LockedPackage
 
@@ -248,3 +248,9 @@ def test_sparse_execution_setup_uses_versioned_facet_order(tmp_path: Path) -> No
         "A.olean.server",
         "A.olean.private",
     ]
+
+
+def test_setup_module_names_escape_non_identifier_stems() -> None:
+    assert _setup_module_name("Main.lean") == "Main"
+    assert _setup_module_name("with space.lean") == "«with space»"
+    assert _setup_module_name("dir/héllo 世界.lean") == "dir.«héllo 世界»"

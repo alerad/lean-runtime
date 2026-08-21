@@ -27,7 +27,15 @@ lean-runtime check Main.lean --using leanprover/lean4:v4.33.0
 lean-runtime check Main.lean --using ./some-project
 ```
 
-Package references resolve a published package release. Lock files identify an exact dependency graph. Toolchain references provide a core Lean context. Project paths use the project toolchain and manifest.
+Package references resolve a published package release. Lock files identify an exact dependency graph. Toolchain references provide a core Lean context. Project paths use the project toolchain and manifest; the file must live inside that project's root.
+
+## Check standard input
+
+Pass `-` as the input. Standard input carries no filename evidence, so an explicit context is required:
+
+```console
+echo 'example : True := trivial' | lean-runtime check - --using leanprover/lean4:v4.33.0
+```
 
 ## Put context in the file
 
