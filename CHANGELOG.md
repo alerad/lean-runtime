@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.1.1 - 2026-08-21
+
 - Escape source stems that are not plain Lean identifiers when rendering
   check setups, so files such as `with space.lean` check correctly inside
   acquired environments.
