@@ -97,12 +97,24 @@ jobs:
             --platform-only --attest > "environment-$RESULT_SUFFIX.json"
           lean-runtime --home "$runtime_home" toolchain publish "$toolchain" \
             --library "$LIBRARY" > "toolchain-$RESULT_SUFFIX.json"
+          # Declaration data is platform-neutral. Generate it on the Linux leg,
+          # reusing the full environment already acquired above. Deterministic
+          # package shards deduplicate by digest across catalog environments.
+          if [[ "$RESULT_SUFFIX" == "linux-amd64" ]]; then
+            lean-runtime --home "$runtime_home" --availability local \
+              declaration-index build "$LOCK_PATH" --output declaration-shards
+            lean-runtime --home "$runtime_home" --availability local \
+              declaration-index publish "$LOCK_PATH" \
+              declaration-shards/declaration-index-build.json \
+              --library "$LIBRARY" --sign > declaration-index.json
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: catalog-${{ matrix.entry.id }}-${{ matrix.platform.name }}
           path: |
             environment-${{ matrix.platform.name }}.json
             toolchain-${{ matrix.platform.name }}.json
+            declaration-index.json
           if-no-files-found: error
 
   finalize:

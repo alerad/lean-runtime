@@ -165,16 +165,16 @@ def test_bundled_catalog_keeps_mathlib_and_leancert_discovery_distinct() -> None
     mathlib = discovery.plan("import Mathlib\n")
     leancert = discovery.plan("import LeanCert\n")
 
-    assert mathlib.candidates[0].entry.id == "mathlib-v4.33.0"
+    assert mathlib.candidates[0].entry.id == "mathlib-v4.33.1"
     assert leancert.candidates[0].entry.id == "leancert-v4.33.0"
 
 
 def test_mathlib_source_plans_successive_mathlib_releases() -> None:
     plan = Discovery(catalog=default_catalog()).plan("import Mathlib\n")
     assert [candidate.entry.id for candidate in plan.planned_candidates] == [
+        "mathlib-v4.33.1",
         "mathlib-v4.33.0",
         "mathlib-v4.32.2",
-        "mathlib-v4.31.0",
     ]
 
 

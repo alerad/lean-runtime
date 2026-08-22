@@ -36,12 +36,41 @@ def _lock(entry: CatalogSourceEntry, runtime: Runtime) -> EnvironmentLock:
     return lock
 
 
-def build_catalog(manifest: CatalogSourceManifest, *, runtime: Runtime) -> Catalog:
-    """Resolve missing locks once and build one validated canonical catalog."""
+def build_catalog(
+    manifest: CatalogSourceManifest,
+    *,
+    runtime: Runtime,
+    previous: Catalog | None = None,
+) -> Catalog:
+    """Resolve missing locks once and build one validated canonical catalog.
 
+    A previous catalog lets unchanged entries reuse their module inventories,
+    so an incremental rebuild only materializes sources for new or changed
+    locks.
+    """
+
+    reusable = {} if previous is None else {entry.id: entry for entry in previous.entries}
     entries: list[CatalogEntry] = []
     for source in manifest.entries:
         lock = _lock(source, runtime)
+        prior = reusable.get(source.id)
+        if (
+            prior is not None
+            and prior.lock.lock_id == lock.lock_id
+            and prior.channel == source.channel
+            and set(source.modules) <= prior.modules
+        ):
+            entries.append(
+                CatalogEntry(
+                    id=source.id,
+                    channel=source.channel,
+                    toolchain=lock.toolchain,
+                    lock=lock,
+                    modules=prior.modules,
+                    created_at=source.created_at,
+                )
+            )
+            continue
         modules = set(source.modules)
         if source.inventory_packages:
             try:
@@ -74,10 +103,18 @@ def build_catalog_file(
     output: str | Path,
     *,
     runtime: Runtime,
+    previous_path: str | Path | None = None,
 ) -> Catalog:
     """Build, write, and reload a catalog through its public serialization boundary."""
 
-    catalog = build_catalog(CatalogSourceManifest.from_file(manifest_path), runtime=runtime)
+    previous = None
+    if previous_path is not None:
+        resolved_previous = Path(previous_path).expanduser().resolve()
+        if resolved_previous.is_file():
+            previous = Catalog.from_file(resolved_previous)
+    catalog = build_catalog(
+        CatalogSourceManifest.from_file(manifest_path), runtime=runtime, previous=previous
+    )
     destination = Path(output).expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     catalog.write(destination)

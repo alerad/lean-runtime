@@ -259,6 +259,14 @@ class ToolchainManager:
         full = self._full_toolchain_dir(name)
         return self.has_slim(name) or (full / "bin" / "lean").is_file()
 
+    def full_path(self, toolchain: str) -> Path:
+        """Return the exact full toolchain root, installing it when necessary."""
+        name = self.ensure(toolchain)
+        path = self._full_toolchain_dir(name)
+        if not (path / "bin" / "lean").is_file():
+            raise ToolchainError(f"full toolchain is unavailable: {name}")
+        return path
+
     def materialize_slim(self, toolchain: str, *, verify: bool = True) -> SlimManifest:
         """Materialize and verify a slim check-profile copy of one toolchain.
 

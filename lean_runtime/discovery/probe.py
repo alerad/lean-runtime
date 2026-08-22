@@ -153,6 +153,7 @@ class LeanRuntimeProbe:
                 filename=self.filename,
                 policy=ExecutionPolicy(timeout_seconds=timeout_seconds),
                 cancel=cancel,
+                _declaration_hints=False,
             )
         except DownloadUnavailable as exc:
             raise ProbeUnavailable(str(exc)) from exc

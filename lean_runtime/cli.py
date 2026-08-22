@@ -21,6 +21,12 @@ else:  # pragma: no cover - exercised by Python 3.10 CI
     import tomli as tomllib
 
 from .console import ConsoleRenderer, styler_for
+from .declaration_index import DeclarationIndex, DeclarationIndexSet, DeclarationShard
+from .declaration_index_build import (
+    build_declaration_index,
+    load_declaration_index_build,
+)
+from .declaration_index_oci import OCIDeclarationIndexPublisher
 from .discovery.api import Discovery
 from .discovery.catalog_build import build_catalog_file
 from .discovery.defaults import default_catalog
@@ -41,10 +47,12 @@ from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock
 from .matrix import load_matrix
 from .models import ExecutionResult, PhaseTiming
+from .oci import OCIRepository
 from .policies import ExecutionPolicy, format_byte_size, parse_byte_size
 from .profiling import ProfileReport
 from .project_sharing import AdoptionPlan, ProjectInitPlan, ProjectUpdatePlan
 from .projects import discover_project, project_publication_workflow
+from .publisher_verification import CosignVerifier
 from .run_cli import run as _run_front_door
 from .runtime import Runtime
 from .specs import EnvironmentSpec
@@ -101,6 +109,11 @@ def _render_storage(status: StoreStatus) -> None:
         ("Sources", status.sources, status.sources_bytes),
         ("Download cache", status.oci_blobs, status.oci_blobs_bytes),
         ("Shared module CAS", status.cas_artifacts, status.cas_artifacts_bytes),
+        (
+            "Declaration indexes",
+            status.declaration_indexes,
+            status.declaration_indexes_bytes,
+        ),
         ("Project packages", status.project_packages, status.project_packages_bytes),
         ("Toolchains", None, status.toolchains_bytes),
         ("Executions", status.executions, status.executions_bytes),
@@ -1006,11 +1019,35 @@ Advanced namespaces:
     pfinal.add_argument("--tag", action="append", default=[])
     pfinal.add_argument("--sign", action="store_true")
     pfinal.set_defaults(command="finalize-program")
+    declaration_index = commands.add_parser(
+        "declaration-index", help="build and publish composable declaration shards"
+    )
+    di = declaration_index.add_subparsers(dest="declaration_index_operation", required=True)
+    dib = di.add_parser("build")
+    dib.add_argument("lock", type=Path)
+    dib.add_argument("--output", required=True, type=Path)
+    dib.add_argument("--weights", type=Path)
+    dib.set_defaults(command="declaration-index-build")
+    dip = di.add_parser("publish")
+    dip.add_argument("lock", type=Path)
+    dip.add_argument("build", type=Path)
+    dip.add_argument("--library", required=True)
+    dip.add_argument("--sign", action="store_true")
+    dip.set_defaults(command="declaration-index-publish")
+    dii = di.add_parser("inspect")
+    dii.add_argument("build", type=Path)
+    dii.add_argument("--resolve")
+    dii.set_defaults(command="declaration-index-inspect")
     catalog = commands.add_parser("catalog", help="catalog maintenance")
     cc = catalog.add_subparsers(dest="catalog_operation", required=True)
     cb = cc.add_parser("build")
     cb.add_argument("manifest", type=Path)
     cb.add_argument("--output", required=True, type=Path)
+    cb.add_argument(
+        "--previous",
+        type=Path,
+        help="prior catalog whose unchanged entries skip module re-inventory",
+    )
     cb.set_defaults(command="catalog-build")
     return root
 
@@ -1206,12 +1243,84 @@ def main(argv: list[str] | None = None) -> int:
             trusted_issuer=args.trusted_issuer,
             verification_tool=args.verification_tool,
         )
+        if args.command == "declaration-index-build":
+            lock = EnvironmentLock.load(args.lock)
+            built = build_declaration_index(
+                runtime,
+                lock,
+                args.output,
+                weights_path=args.weights,
+            )
+            _json(built.to_dict())
+            return 0
+        if args.command == "declaration-index-publish":
+            lock = EnvironmentLock.load(args.lock)
+            built = load_declaration_index_build(
+                args.build, expected_lock_id=lock.lock_id
+            )
+            di_repository = OCIRepository.parse(args.library)
+            di_publication = OCIDeclarationIndexPublisher(di_repository).publish(
+                tuple(di_item.source for di_item in built.shards), lock_id=lock.lock_id
+            )
+            if args.sign:
+                CosignVerifier(executable=runtime.verification_executable).sign(
+                    di_repository, di_publication.manifest_digest
+                )
+            _json(di_publication.to_dict())
+            return 0
+        if args.command == "declaration-index-inspect":
+            built = load_declaration_index_build(args.build)
+            indexes = []
+            for di_item in built.shards:
+                di_source = di_item.source
+                shard = DeclarationShard(
+                    di_source.shard_id,
+                    di_source.package,
+                    di_source.source_id,
+                    di_source.toolchain,
+                    di_source.subdir,
+                    di_source.module_roots,
+                    di_source.namespace_roots,
+                    "sha256:" + "0" * 64,
+                    di_source.path.stat().st_size,
+                    "sha256:" + "0" * 64,
+                    1,
+                )
+                indexes.append(
+                    (
+                        shard,
+                        DeclarationIndex(
+                            di_source.path, expected_shard_id=di_source.shard_id
+                        ),
+                    )
+                )
+            index_set = DeclarationIndexSet(built.lock_id, tuple(indexes))
+            di_match = index_set.resolve(args.resolve) if args.resolve else None
+            _json(
+                {
+                    "lock_id": built.lock_id,
+                    "shards": len(built.shards),
+                    "declarations": index_set.declaration_count,
+                    "match": (
+                        {
+                            "name": di_match.name,
+                            "module": di_match.module,
+                            "kind": di_match.kind,
+                            "weight": di_match.weight,
+                        }
+                        if di_match is not None
+                        else None
+                    ),
+                }
+            )
+            return 0
         if args.command == "catalog-build":
             os.environ.setdefault("MATHLIB_NO_CACHE_ON_UPDATE", "1")
             catalog_result = build_catalog_file(
                 args.manifest,
                 args.output,
                 runtime=Runtime(home=args.home, libraries=()),
+                previous_path=args.previous,
             )
             print(
                 f"wrote {args.output}: {len(catalog_result.entries)} environments, "

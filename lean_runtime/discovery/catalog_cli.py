@@ -20,6 +20,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("manifest", help="catalog source TOML manifest")
     parser.add_argument("--output", required=True, help="output catalog JSON")
     parser.add_argument("--runtime-home", help="Lean Runtime store used for exact sources")
+    parser.add_argument(
+        "--previous", help="prior catalog whose unchanged entries skip module re-inventory"
+    )
     return parser
 
 
@@ -33,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
             args.manifest,
             args.output,
             runtime=Runtime(home=args.runtime_home, libraries=()),
+            previous_path=args.previous,
         )
     except DiscoveryError as exc:
         print(f"lean-runtime catalog: {exc}", file=sys.stderr)

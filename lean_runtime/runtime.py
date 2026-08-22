@@ -35,12 +35,21 @@ from .bundles import EnvironmentBundles, PortableCopyInfo
 from .capsules import source_import_roots
 from .comparison import ComparisonEntry, EnvironmentComparison, compare_locks
 from .decisions import Decision
+from .declaration_index import (
+    DeclarationResolver,
+    unknown_declaration_names,
+)
+from .declaration_index_oci import (
+    OCIDeclarationIndexLibrary,
+    retained_declaration_index_set,
+)
 from .diagnostics import error_diagnostic, map_diagnostic_paths, parse_diagnostics
 from .environments import Environment, EnvironmentManager, ExecutionCapture
 from .errors import (
     DownloadLimitExceeded,
     DownloadUnavailable,
     EnvironmentError,
+    LeanRuntimeError,
     ProjectError,
     SpecificationError,
     ToolchainError,
@@ -249,6 +258,7 @@ class Runtime:
         self.lake_cache = LakeArtifactCache(self.home, self.toolchains, self.events)
         self.header_cache = LeanHeaderCache(self.home, self.toolchains, self.events)
         self.identifier_resolver = IdentifierResolver(self.home)
+        self.declaration_resolver = DeclarationResolver()
         self.project_adopter = ProjectAdopter(self.shared_projects)
         self.project_executor = ProjectExecutor(self)
         self.resolver = EnvironmentResolver(self.toolchains, self.store, self.backend, self.events)
@@ -295,8 +305,82 @@ class Runtime:
             )
             for value in configured_libraries
         )
+        self.declaration_index_libraries = tuple(
+            OCIDeclarationIndexLibrary(
+                OCIRepository.parse(value),
+                self.store,
+                self.events,
+                self.signature_verifier,
+                max_download_bytes=max_download_bytes,
+            )
+            for value in configured_libraries
+        )
         self.toolchains.remote_ensure = self._acquire_check_toolchain
         self.environments.sparse_acquirer = self._acquire_sparse_modules
+        self.environments.declaration_hint_resolver = self._environment_declaration_hints
+
+    def _environment_declaration_hints(
+        self,
+        lock: EnvironmentLock,
+        result: ExecutionResult,
+        cancel: threading.Event | None,
+    ) -> ExecutionResult:
+        return self.with_declaration_hints(lock, result, cancel=cancel)
+
+    def with_declaration_hints(
+        self,
+        lock: EnvironmentLock,
+        result: ExecutionResult,
+        *,
+        environment_label: str | None = None,
+        allow_download: bool | None = None,
+        cancel: threading.Event | None = None,
+    ) -> ExecutionResult:
+        """Best-effort enrichment from one exact environment's declaration index."""
+        if result.ok or result.cancelled or result.timed_out:
+            return result
+        requested_names = unknown_declaration_names(result)
+        if not requested_names:
+            return result
+        can_download = self.availability != "local" if allow_download is None else allow_download
+        try:
+            index = retained_declaration_index_set(
+                self.store,
+                lock.lock_id,
+                requested_names,
+                require_complete=can_download,
+            )
+            if index is None and can_download:
+                for library in self.declaration_index_libraries:
+                    try:
+                        index = library.acquire(
+                            lock.lock_id, requested_names, cancel=cancel
+                        )
+                        break
+                    except (LeanRuntimeError, OSError, ValueError) as exc:
+                        self.events.emit(
+                            "declaration_index.unavailable",
+                            "Declaration hints are unavailable from this library",
+                            registry=library.repository.display,
+                            lock_id=lock.lock_id,
+                            error=str(exc),
+                        )
+            if index is None:
+                return result
+            label = environment_label or lock.toolchain.rsplit(":", 1)[-1]
+            return self.declaration_resolver.enrich(
+                index,
+                result,
+                environment_label=label,
+            )
+        except (LeanRuntimeError, OSError, ValueError) as exc:
+            self.events.emit(
+                "declaration_index.invalid",
+                "Retained declaration hints could not be read",
+                lock_id=lock.lock_id,
+                error=str(exc),
+            )
+            return result
 
     def _acquire_check_toolchain(
         self,

@@ -1202,8 +1202,8 @@ def test_init_defaults_to_latest_cataloged_mathlib_without_mutation(tmp_path: Pa
     plan = runtime.plan_project_init(tmp_path / "fresh")
 
     assert plan.action == "create"
-    assert plan.mathlib_version == "4.33.0"
-    assert plan.toolchain == "leanprover/lean4:v4.33.0"
+    assert plan.mathlib_version == "4.33.1"
+    assert plan.toolchain == "leanprover/lean4:v4.33.1"
     assert "mathlib" in plan.packages
     assert not (tmp_path / "fresh").exists()
 
@@ -1339,10 +1339,10 @@ def test_latest_mathlib_init_uses_tag_input_and_exact_manifest(
     root_module = (tmp_path / "fresh" / "fresh.lean").read_text()
     manifest = json.loads((tmp_path / "fresh" / "lake-manifest.json").read_text())
     mathlib = next(item for item in manifest["packages"] if item["name"] == "mathlib")
-    assert 'rev = "v4.33.0"' in lakefile
+    assert 'rev = "v4.33.1"' in lakefile
     assert root_module == "import fresh.Basic\n"
-    assert mathlib["rev"] == "db584cd6d46c92f209a44c0f1c829460d327499d"
-    assert mathlib["inputRev"] == "v4.33.0"
+    assert mathlib["rev"] == "0df444a360eaa60ab8c11dca51a86af692955474"
+    assert mathlib["inputRev"] == "v4.33.1"
 
 
 def test_update_plans_catalog_versions_and_applies_exact_graph(
@@ -1370,7 +1370,7 @@ def test_update_plans_catalog_versions_and_applies_exact_graph(
 
     plan = runtime.plan_project_update(project)
     assert plan.current_version == "4.32.2"
-    assert plan.target_version == "4.33.0"
+    assert plan.target_version == "4.33.1"
     assert plan.changed
     assert plan.seed_root == tmp_path / "donor"
     assert plan.download_bytes == 0
@@ -1379,9 +1379,9 @@ def test_update_plans_catalog_versions_and_applies_exact_graph(
     lakefile = (project / "lakefile.toml").read_text()
     manifest = json.loads((project / "lake-manifest.json").read_text())
     mathlib = next(item for item in manifest["packages"] if item["name"] == "mathlib")
-    assert 'rev = "v4.33.0"' in lakefile
-    assert mathlib["rev"] == "db584cd6d46c92f209a44c0f1c829460d327499d"
-    assert (project / "lean-toolchain").read_text().strip() == "leanprover/lean4:v4.33.0"
+    assert 'rev = "v4.33.1"' in lakefile
+    assert mathlib["rev"] == "0df444a360eaa60ab8c11dca51a86af692955474"
+    assert (project / "lean-toolchain").read_text().strip() == "leanprover/lean4:v4.33.1"
 
 
 def test_update_is_a_successful_noop_without_mathlib(

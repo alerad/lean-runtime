@@ -234,3 +234,44 @@ created_at = "2026-08-01T00:00:00Z"
     )
     catalog = build_catalog_file(manifest, tmp_path / "catalog.json", runtime=runtime)
     assert catalog.entries[0].modules == {"Init", "Lean", "Std"}
+
+
+def test_previous_catalog_lets_unchanged_entries_skip_reinventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, lock = _lock(tmp_path)
+    lock_path = tmp_path / "locks/fixture.lock.json"
+    lock_path.parent.mkdir()
+    lock.write(lock_path)
+    manifest = tmp_path / "environments.toml"
+    entry = """schema = "lean-runtime.discovery.catalog-source/v1"
+generated_at = "2026-08-08T00:00:00Z"
+
+[[environment]]
+id = "fixture"
+channel = "stable"
+lock = "locks/fixture.lock.json"
+inventory_packages = ["fixture"]
+created_at = "2026-08-01T00:00:00Z"
+"""
+    manifest.write_text(entry, encoding="utf-8")
+    output = tmp_path / "catalog.json"
+    first = build_catalog_file(manifest, output, runtime=runtime)
+
+    inventoried: list[object] = []
+
+    def fake_modules_for_lock(*_args: object) -> set[str]:
+        inventoried.append(_args)
+        return {"Fixture.Fresh"}
+
+    monkeypatch.setattr(
+        "lean_runtime.discovery.catalog_build.modules_for_lock", fake_modules_for_lock
+    )
+    second = build_catalog_file(manifest, output, runtime=runtime, previous_path=output)
+    assert inventoried == []
+    assert second.digest == first.digest
+
+    manifest.write_text(entry + 'modules = ["Fixture.Changed"]\n', encoding="utf-8")
+    changed = build_catalog_file(manifest, output, runtime=runtime, previous_path=output)
+    assert inventoried != []
+    assert changed.entries[0].modules == {"Fixture.Changed", "Fixture.Fresh"}
