@@ -110,6 +110,23 @@ def test_storage_status_counts_scratch_workspaces(tmp_path: Path) -> None:
     assert status.bytes_used >= status.scratch_bytes
 
 
+def test_storage_allocated_bytes_deduplicate_hard_links(tmp_path: Path) -> None:
+    store = EnvironmentStore(tmp_path / "runtime")
+    environment = store.environment_path(RETAINED)
+    environment.mkdir()
+    artifact = store.cas_artifacts / ("1" * 64)
+    artifact.write_bytes(b"x" * (1024 * 1024))
+    try:
+        os.link(artifact, environment / "artifact.olean")
+    except OSError:
+        pytest.skip("hard links are not available on this test filesystem")
+
+    status = store.status(verify=True)
+
+    assert status.bytes_used >= 2 * 1024 * 1024
+    assert status.allocated_bytes < status.bytes_used
+
+
 def test_alias_update_does_not_mutate_environment(tmp_path: Path) -> None:
     store = EnvironmentStore(tmp_path)
     first = store.environment_path(FIRST)

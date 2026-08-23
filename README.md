@@ -17,16 +17,15 @@ example : 2 + 2 = 4 := by norm_num
 
 ```console
 $ lean-runtime check Main.lean
-✓ Main.lean accepted in 2.60s
 ```
 
 No Lake project, dependency checkout, or toolchain setup required. Lean Runtime
 discovers and verifies the exact environment, then keeps it ready for offline
 reuse.
 
-[Get started](https://alerad.github.io/lean-runtime/getting-started/) ·
+[Get started](https://alerad.github.io/lean-runtime/tutorial/) ·
 [Read the documentation](https://alerad.github.io/lean-runtime/) ·
-[Explore the CLI](https://alerad.github.io/lean-runtime/cli/)
+[Explore the CLI](https://alerad.github.io/lean-runtime/reference/commands/)
 
 ## Start where you are
 
@@ -64,8 +63,15 @@ lean-runtime check Main.lean
 The same command uses the nearest pinned Lake project when one exists and
 otherwise performs bounded exact-environment discovery. Automatic discovery
 uses retained or verified downloadable environments; building a missing
-candidate from source requires `--allow-source-build`. A file can carry its
-context in strict comment frontmatter:
+candidate from source requires `--allow-source-build`.
+
+Record the environment only when the result must be reproduced elsewhere:
+
+```bash
+lean-runtime check Main.lean --write-lock environment.lock.json
+```
+
+A file can instead carry an explicit context in strict comment frontmatter:
 
 ```lean
 -- /// lean-runtime

@@ -18,6 +18,7 @@ from .store import EnvironmentStore
 from .toolchains import ToolchainManager
 
 CheckStatus = Literal["pass", "warning", "fail"]
+LEGACY_SCRATCH_MINIMUM_AGE_SECONDS = 24 * 3600
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,14 +87,19 @@ def diagnose(toolchains: ToolchainManager, store: EnvironmentStore) -> DoctorRep
     status = "warning" if staging else "pass"
     message = f"{len(staging)} incomplete staging directories" if staging else "No stale builds"
     checks.append(DoctorCheck("staging", status, message))
-    scratch = store.clean_scratch(dry_run=True, minimum_age_seconds=3600)
+    scratch = store.clean_scratch(
+        dry_run=True,
+        minimum_age_seconds=3600,
+        legacy_minimum_age_seconds=LEGACY_SCRATCH_MINIMUM_AGE_SECONDS,
+    )
     if scratch.candidates:
         checks.append(
             DoctorCheck(
                 "scratch",
                 "warning",
                 f"{len(scratch.candidates)} abandoned workspaces use "
-                f"{scratch.candidate_bytes // (1024**2)} MiB",
+                f"up to {scratch.candidate_bytes // (1024**2)} MiB; "
+                "preview cleanup with `lean-runtime clean --dry-run`",
             )
         )
     else:
@@ -126,7 +132,14 @@ def repair(toolchains: ToolchainManager, store: EnvironmentStore) -> DoctorRepor
     """Apply the safe remedies represented by doctor checks, then diagnose again."""
     for staging in store.environments.glob(".staging-*"):
         remove_tree(staging)
-    store.clean_scratch(dry_run=False, minimum_age_seconds=3600, include_legacy=False)
+    # Old releases did not write ownership markers, so retain those workspaces
+    # for a full day before treating them as safely abandoned.
+    store.clean_scratch(
+        dry_run=False,
+        minimum_age_seconds=3600,
+        include_legacy=True,
+        legacy_minimum_age_seconds=LEGACY_SCRATCH_MINIMUM_AGE_SECONDS,
+    )
     with suppress(ToolchainError):
         toolchains.elan_path(bootstrap=True)
     return diagnose(toolchains, store)

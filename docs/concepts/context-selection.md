@@ -2,6 +2,10 @@
 
 Every check runs inside one selected context. Context selection and compiler acceptance are separate decisions.
 
+For ordinary standalone checks, let Lean Runtime discover the context. Explicit
+context is an override for reproducibility, compatibility testing, or a request
+that specifically names a release.
+
 ## Precedence
 
 For a Lean file, Lean Runtime considers context sources in this order:
