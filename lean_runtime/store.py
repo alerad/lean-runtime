@@ -878,9 +878,7 @@ class EnvironmentStore:
                 1 for path in self.cas_artifacts.glob("[0-9a-f]" * 64) if path.is_file()
             ),
             declaration_indexes=sum(
-                1
-                for path in self.declaration_index_objects.glob("[0-9a-f]" * 64)
-                if path.is_file()
+                1 for path in self.declaration_index_objects.glob("[0-9a-f]" * 64) if path.is_file()
             ),
             executions=sum(1 for path in self.executions.glob("execution_*.json")),
             aliases=len(aliases),

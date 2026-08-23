@@ -353,9 +353,7 @@ class Runtime:
             if index is None and can_download:
                 for library in self.declaration_index_libraries:
                     try:
-                        index = library.acquire(
-                            lock.lock_id, requested_names, cancel=cancel
-                        )
+                        index = library.acquire(lock.lock_id, requested_names, cancel=cancel)
                         break
                     except (LeanRuntimeError, OSError, ValueError) as exc:
                         self.events.emit(

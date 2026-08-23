@@ -30,9 +30,7 @@ from .store import EnvironmentStore
 DECLARATION_INDEX_CONFIG_MEDIA_TYPE = (
     "application/vnd.lean-runtime.declaration-index.config.v2+json"
 )
-DECLARATION_INDEX_LAYER_MEDIA_TYPE = (
-    "application/vnd.lean-runtime.declaration-shard.sqlite.v1+zstd"
-)
+DECLARATION_INDEX_LAYER_MEDIA_TYPE = "application/vnd.lean-runtime.declaration-shard.sqlite.v1+zstd"
 MAX_DECLARATION_SHARD_BYTES = 256 * 1024 * 1024
 MAX_DECLARATION_INDEX_CONFIG_BYTES = 4 * 1024 * 1024
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -86,9 +84,7 @@ def _selected_shards(
     if not requested_names or any("." not in name for name in requested_names):
         return tuple(shards)
     roots = {name.split(".", 1)[0] for name in requested_names}
-    selected = tuple(
-        shard for shard in shards if roots.intersection(shard.namespace_roots)
-    )
+    selected = tuple(shard for shard in shards if roots.intersection(shard.namespace_roots))
     # A conservative fallback keeps hints correct for unusual generated names.
     return selected or tuple(shards)
 
@@ -104,9 +100,7 @@ def retained_declaration_index_set(
     if not records:
         return None
     available_shards = tuple(item for item, _path in records)
-    wanted_ids = {
-        item.shard_id for item in _selected_shards(available_shards, requested_names)
-    }
+    wanted_ids = {item.shard_id for item in _selected_shards(available_shards, requested_names)}
     indexes: list[tuple[DeclarationShard, DeclarationIndex]] = []
     for shard, path in records:
         if shard.shard_id not in wanted_ids:
@@ -193,9 +187,7 @@ class OCIDeclarationIndexPublisher:
                     }
                 )
             )
-            config_descriptor = blob_descriptor_path(
-                config, DECLARATION_INDEX_CONFIG_MEDIA_TYPE
-            )
+            config_descriptor = blob_descriptor_path(config, DECLARATION_INDEX_CONFIG_MEDIA_TYPE)
             for path, descriptor in zip(
                 (config, *compressed_paths), (config_descriptor, *layers), strict=True
             ):
@@ -363,9 +355,10 @@ class OCIDeclarationIndexLibrary:
                     digest = hashlib.sha256()
                     written = 0
                     try:
-                        with compressed.open(
-                            "rb"
-                        ) as raw, zstandard.ZstdDecompressor().stream_reader(raw) as decoded:
+                        with (
+                            compressed.open("rb") as raw,
+                            zstandard.ZstdDecompressor().stream_reader(raw) as decoded,
+                        ):
                             while chunk := decoded.read(1024 * 1024):
                                 if cancel is not None and cancel.is_set():
                                     raise EnvironmentError(

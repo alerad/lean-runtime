@@ -175,9 +175,7 @@ def _write_shard(
             "subdir": subdir or "",
             "toolchain": toolchain,
         }
-        connection.executemany(
-            "INSERT INTO meta VALUES (?, ?)", sorted(metadata.items())
-        )
+        connection.executemany("INSERT INTO meta VALUES (?, ?)", sorted(metadata.items()))
         rows = [
             (name, declarations[name], "declaration", int(weights.get(name, 0)))
             for name in sorted(declarations)

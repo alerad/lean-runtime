@@ -184,8 +184,7 @@ class DeclarationIndex:
                 version = int(connection.execute("PRAGMA user_version").fetchone()[0])
                 metadata = dict(connection.execute("SELECT key, value FROM meta"))
                 columns = {
-                    str(row[1])
-                    for row in connection.execute("PRAGMA table_info(decl)").fetchall()
+                    str(row[1]) for row in connection.execute("PRAGMA table_info(decl)").fetchall()
                 }
                 suffix_columns = {
                     str(row[1])
@@ -336,9 +335,7 @@ class DeclarationResolver:
                     f"`{match.name}` is defined in `{match.module}` ({environment_label})."
                 )
             elif matches:
-                rendered = ", ".join(
-                    f"`{match.name}` in `{match.module}`" for match in matches
-                )
+                rendered = ", ".join(f"`{match.name}` in `{match.module}`" for match in matches)
                 hints.append(f"Possible definitions for `{requested}`: {rendered}.")
         return tuple(dict.fromkeys(hints))
 

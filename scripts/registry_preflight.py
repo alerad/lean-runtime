@@ -230,13 +230,9 @@ def check_declaration_index(
     ):
         return [f"{label} shard descriptors do not match the config"]
     for shard in shards:
-        status, _, headers = _get(
-            f"{base}/blobs/{shard.layer_digest}", token, method="HEAD"
-        )
+        status, _, headers = _get(f"{base}/blobs/{shard.layer_digest}", token, method="HEAD")
         if status != 200:
-            failures.append(
-                f"{label} shard {shard.package} -> {_failure(status, headers)}"
-            )
+            failures.append(f"{label} shard {shard.package} -> {_failure(status, headers)}")
     if failures:
         return failures
     sample = min(shards, key=lambda item: item.layer_size)

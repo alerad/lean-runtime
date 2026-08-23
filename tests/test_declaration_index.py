@@ -36,9 +36,7 @@ TOOLCHAIN = "leanprover/lean4:v4.33.0"
 
 
 def shard_id(source_id: str) -> str:
-    return declaration_shard_identity(
-        source_id=source_id, toolchain=TOOLCHAIN, subdir=None
-    )
+    return declaration_shard_identity(source_id=source_id, toolchain=TOOLCHAIN, subdir=None)
 
 
 def write_index(
@@ -209,8 +207,7 @@ def test_public_ilean_export_assigns_names_to_their_package_module(tmp_path: Pat
     index = root / "Example" / "Basic.ilean"
     index.parent.mkdir(parents=True)
     index.write_text(
-        '{"module":"Example.Basic","decls":'
-        '{"Example.answer":{},"Example._auxLemma.1":{}}}',
+        '{"module":"Example.Basic","decls":{"Example.answer":{},"Example._auxLemma.1":{}}}',
         encoding="utf-8",
     )
 

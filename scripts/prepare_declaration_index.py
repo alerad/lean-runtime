@@ -50,9 +50,7 @@ def main() -> int:
         with sqlite3.connect(shard_path) as connection:
             tables = {
                 str(row[0])
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_schema WHERE type = 'table'"
-                )
+                for row in connection.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")
             }
             if not {"decl", "suffix"}.issubset(tables):
                 raise SystemExit("prototype must contain decl and suffix tables")

@@ -529,9 +529,9 @@ def test_discovery_enriches_only_the_terminal_best_rejection(
 ) -> None:  # type: ignore[no-untyped-def]
     import lean_runtime.discovery.api as api_module
 
-    static = Discovery(
-        catalog=sample_catalog, policy=DiscoveryPolicy(max_candidates=1)
-    ).plan("import Mathlib\n")
+    static = Discovery(catalog=sample_catalog, policy=DiscoveryPolicy(max_candidates=1)).plan(
+        "import Mathlib\n"
+    )
     rejected = engine.discover(
         "import Mathlib\n",
         static,
@@ -569,9 +569,9 @@ def test_discovery_cross_version_hints_use_retained_indexes_only(
 ) -> None:  # type: ignore[no-untyped-def]
     import lean_runtime.discovery.api as api_module
 
-    static = Discovery(
-        catalog=sample_catalog, policy=DiscoveryPolicy(max_candidates=1)
-    ).plan("import Mathlib\n")
+    static = Discovery(catalog=sample_catalog, policy=DiscoveryPolicy(max_candidates=1)).plan(
+        "import Mathlib\n"
+    )
     rejected = engine.discover(
         "import Mathlib\n",
         static,

@@ -1256,9 +1256,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "declaration-index-publish":
             lock = EnvironmentLock.load(args.lock)
-            built = load_declaration_index_build(
-                args.build, expected_lock_id=lock.lock_id
-            )
+            built = load_declaration_index_build(args.build, expected_lock_id=lock.lock_id)
             di_repository = OCIRepository.parse(args.library)
             di_publication = OCIDeclarationIndexPublisher(di_repository).publish(
                 tuple(di_item.source for di_item in built.shards), lock_id=lock.lock_id
@@ -1290,9 +1288,7 @@ def main(argv: list[str] | None = None) -> int:
                 indexes.append(
                     (
                         shard,
-                        DeclarationIndex(
-                            di_source.path, expected_shard_id=di_source.shard_id
-                        ),
+                        DeclarationIndex(di_source.path, expected_shard_id=di_source.shard_id),
                     )
                 )
             index_set = DeclarationIndexSet(built.lock_id, tuple(indexes))
