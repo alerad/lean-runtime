@@ -863,6 +863,7 @@ Advanced namespaces:
     env_acquire.add_argument("lock", type=Path)
     env_acquire.add_argument("--name")
     env_acquire.add_argument("--download-only", action="store_true")
+    env_acquire.add_argument("--timeout", type=float, default=1800)
     env_acquire.set_defaults(command="acquire")
     env_diff = env_commands.add_parser("diff", help="compare exact environments")
     env_diff.add_argument("left")
@@ -1650,7 +1651,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command in {"open", "acquire"}:
             if args.command == "acquire" and args.download_only:
                 runtime.availability = "required"
-            environment = runtime.open_exact(EnvironmentLock.load(args.lock), name=args.name)
+            environment = runtime.open_exact(
+                EnvironmentLock.load(args.lock),
+                name=args.name,
+                build_timeout=args.timeout,
+            )
             _json(environment.inspect().to_dict())
             if args.timings:
                 print(
