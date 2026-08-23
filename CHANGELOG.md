@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.21.0 - 2026-08-23
+
 ## 4.2.0 - 2026-08-23
 
 - Add a scheduled catalog-update workflow that detects a new stable Mathlib
