@@ -5,6 +5,7 @@ from pathlib import Path
 
 from lean_runtime import Runtime
 from lean_runtime.events import EventEmitter
+from lean_runtime.health import repair
 
 
 def test_event_emitter_is_structured() -> None:
@@ -37,3 +38,21 @@ def test_doctor_and_empty_store_status_do_not_install_tools(tmp_path: Path) -> N
     status = runtime.store_status()
     assert status.environments == 0
     assert status.sources == 0
+
+
+def test_doctor_repair_removes_legacy_abandoned_scratch(
+    monkeypatch, tmp_path: Path
+) -> None:
+    runtime = Runtime(home=tmp_path)
+    abandoned = runtime.store.home / "resolution" / "resolve-legacy"
+    abandoned.mkdir(parents=True)
+    (abandoned / "payload").write_text("old")
+    os.utime(abandoned, (1_000_000_000, 1_000_000_000))
+    recent = runtime.store.home / "resolution" / "resolve-recent-legacy"
+    recent.mkdir(parents=True)
+    monkeypatch.setattr(runtime.toolchains, "elan_path", lambda *, bootstrap: tmp_path / "elan")
+
+    repair(runtime.toolchains, runtime.store)
+
+    assert not abandoned.exists()
+    assert recent.exists()

@@ -324,7 +324,7 @@ def _plan_lock(
     if context.requires or context.toolchain is not None:
         raise SpecificationError(
             "--plan supports an exact lock or automatic discovery; explicit dependencies "
-            "need Lake resolution first (run once with --lock-out, then plan the lock)"
+            "need Lake resolution first (run once with --write-lock, then plan the lock)"
         )
     if context.lock is not None:
         path = _lock_path(context.lock, source_path, embedded=arguments.lock is None)
@@ -519,7 +519,7 @@ def run(
         rejected_discovery: DiscoveryResult | None = None
         if context_resolution.kind == "lock":
             if arguments.lock_out is not None:
-                raise SpecificationError("--lock-out cannot be combined with an exact lock")
+                raise SpecificationError("--write-lock cannot be combined with an exact lock")
             assert context.lock is not None
             lock_path = _lock_path(
                 context.lock,
@@ -556,7 +556,7 @@ def run(
         elif context_resolution.kind == "project":
             if arguments.lock_out is not None:
                 raise SpecificationError(
-                    "--lock-out is only available for explicit dependencies or discovery"
+                    "--write-lock is only available for explicit dependencies or discovery"
                 )
             preparation = PhaseTiming(
                 "environment_open", round((time.monotonic() - preparation_started) * 1000)

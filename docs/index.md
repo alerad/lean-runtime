@@ -93,7 +93,7 @@ hide:
       <p class="lr-card-label">Standalone file</p>
       <h3>Bring a Lean source file</h3>
       <pre><code>lean-runtime check Main.lean</code></pre>
-      <p>Use automatic discovery, a package reference, frontmatter, or an exact lock.</p>
+      <p>Lean Runtime discovers a plausible exact environment and accepts it only when Lean accepts the file.</p>
       <a href="workflows/check-files/">Check Lean files</a>
     </article>
     <article>
@@ -108,11 +108,10 @@ lean-runtime build</code></pre>
       <p class="lr-card-label">Exact and offline</p>
       <h3>Record the environment</h3>
       <pre><code>lean-runtime check Main.lean \
-  --lock-out environment.lock.json</code></pre>
+  --write-lock environment.lock.json</code></pre>
       <p>Reuse the resulting lock explicitly, including with network access disabled.</p>
       <a href="workflows/check-files/#record-and-reuse-an-exact-lock">Use an exact lock</a>
     </article>
   </div>
 </section>
-
 

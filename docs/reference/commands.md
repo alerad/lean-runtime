@@ -32,22 +32,27 @@ This page summarizes the command surface. Run `lean-runtime COMMAND --help` for 
 | `env` | Exact immutable environments and locks. |
 | `project` | Mutable project inspection, sharing, locks, and exports. |
 | `toolchain` | Toolchain installation, inspection, optimization, and publication. |
-| `storage` | Storage usage and verification. |
+| `storage` | Storage usage and verification; see [Storage](storage.md). |
 | `program` | Ready-to-run program artifacts. |
 | `catalog` | Discovery catalog maintenance. |
 
 ## Common check options
 
 ```console
-lean-runtime check Main.lean --using CONTEXT
-lean-runtime check Main.lean --offline
+lean-runtime check Main.lean
 lean-runtime check Main.lean --json
 lean-runtime check Main.lean --timings
 lean-runtime check Main.lean --repeat 10
+lean-runtime check Main.lean --write-lock environment.lock.json
 lean-runtime check - --using leanprover/lean4:v4.33.0
 ```
 
 `-` reads Lean source from standard input and requires an explicit context.
+
+Automatic discovery is the normal standalone workflow. `--using CONTEXT`
+overrides it when a package release, lock, toolchain, environment, or project is
+specifically required. `--offline` prevents acquisition and therefore needs the
+selected content to be retained locally.
 
 `--allow-source-build` permits standalone discovery to build an environment from source when no suitable acquired form is available.
 

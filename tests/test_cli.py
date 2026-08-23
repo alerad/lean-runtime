@@ -131,6 +131,107 @@ def test_using_classifies_existing_paths(tmp_path: Path) -> None:
     assert lock_args._using_lock == lock
 
 
+def test_check_help_exposes_write_lock_and_keeps_legacy_alias(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    check_parser = parser().parse_args
+    assert check_parser(["check", "Main.lean", "--write-lock", "exact.json"]).lock_out == Path(
+        "exact.json"
+    )
+    assert check_parser(["check", "Main.lean", "--lock-out", "exact.json"]).lock_out == Path(
+        "exact.json"
+    )
+    with pytest.raises(SystemExit):
+        check_parser(["check", "--help"])
+    help_text = capsys.readouterr().out
+    assert "--write-lock PATH" in help_text
+    assert "--lock-out" not in help_text
+
+
+def test_write_lock_routes_to_standalone_discovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := trivial\n")
+    output = tmp_path / "environment.lock.json"
+    observed: list[Path] = []
+
+    def run_front_door(arguments, *, command_name: str) -> int:
+        assert command_name == "lean-runtime check"
+        observed.append(arguments.lock_out)
+        return 0
+
+    monkeypatch.setattr("lean_runtime.cli._run_front_door", run_front_door)
+
+    assert main(["check", str(source), "--write-lock", str(output)]) == 0
+    assert observed == [output]
+
+
+def test_write_lock_rejects_a_toolchain_override(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := trivial\n")
+
+    assert (
+        main(
+            [
+                "check",
+                str(source),
+                "--using",
+                "v4.33.0",
+                "--write-lock",
+                str(tmp_path / "environment.lock.json"),
+            ]
+        )
+        == 2
+    )
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_repeat_preserves_explicit_toolchain(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := trivial\n")
+    result = ExecutionResult(
+        ok=True,
+        exit_code=0,
+        toolchain="leanprover/lean4:v4.33.0",
+        command=("lean", "Main.lean"),
+        cwd=str(tmp_path),
+        stdout="",
+        stderr="",
+        elapsed_seconds=0.01,
+    )
+    observed: list[str | None] = []
+
+    def check_file(_runtime: object, _path: Path, **kwargs: object) -> ExecutionResult:
+        toolchain = kwargs.get("toolchain")
+        assert toolchain is None or isinstance(toolchain, str)
+        observed.append(toolchain)
+        return result
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.check_file", check_file)
+    assert (
+        main(
+            [
+                "--home",
+                str(tmp_path / "home"),
+                "check",
+                str(source),
+                "--using",
+                "v4.33.0",
+                "--repeat",
+                "2",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert observed == ["v4.33.0", "v4.33.0", "v4.33.0"]
+
+
 def test_new_rejects_an_existing_project(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     plan = SimpleNamespace(
         action="adopt",

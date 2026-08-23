@@ -26,13 +26,14 @@ Create `Basic.lean`:
 example : 1 + 1 = 2 := by decide
 ```
 
-Choose a toolchain explicitly for this first check:
+Check it directly:
 
 ```console
-lean-runtime check Basic.lean --using leanprover/lean4:v4.33.0
+lean-runtime check Basic.lean
 ```
 
-Exit code `0` means Lean accepted the file.
+Lean Runtime selects a plausible catalog context and runs Lean. Exit code `0`
+means Lean accepted the file in the reported context.
 
 ## Check a file that imports Mathlib
 
@@ -51,48 +52,18 @@ Run the check without specifying a context:
 lean-runtime check Primes.lean
 ```
 
-When no explicit context, frontmatter, or pinned Lake project applies, Lean Runtime uses the imports as evidence for automatic discovery. It tries exact catalog environments within a bounded policy. A candidate succeeds only when Lean accepts the source in that environment.
+For a standalone file, Lean Runtime uses imports as evidence for automatic
+discovery. It tries exact catalog environments within a bounded policy. A
+candidate succeeds only when Lean accepts the source in that environment.
 
 The first run may install a toolchain and acquire environment content. Later checks reuse retained content.
-
-## Inspect context selection
-
-`status` reports routing information without running Lean:
-
-```console
-lean-runtime status Primes.lean
-```
-
-The report includes the subject, declared imports, matching candidates, and the candidate currently planned first. It does not establish compiler acceptance.
-
-## Specify a package release
-
-Use `--using` when the context is part of the request:
-
-```console
-lean-runtime check Primes.lean --using mathlib@v4.33.0
-```
-
-The same requirement can be stored in the file:
-
-```lean
--- /// lean-runtime
--- requires = ["mathlib@v4.33.0"]
--- ///
-import Mathlib.Data.Nat.Prime.Infinite
-
-example : ∀ n : ℕ, ∃ p, n ≤ p ∧ p.Prime :=
-  Nat.exists_infinite_primes
-```
-
-Command-line context and frontmatter are explicit alternatives. Conflicting explicit context is rejected before acquisition.
 
 ## Record an exact lock
 
 Write the environment used by a successful check:
 
 ```console
-lean-runtime check Primes.lean --lock-out primes.lock.json
+lean-runtime check Primes.lean --write-lock primes.lock.json
 ```
 
 Use the lock on a later run:
@@ -108,6 +79,24 @@ lean-runtime check Primes.lean --using primes.lock.json --offline
 ```
 
 Offline mode does not acquire missing remote content. Missing requirements produce an infrastructure failure rather than a Lean rejection.
+
+## Troubleshoot or override selection
+
+`status` previews routing without running Lean:
+
+```console
+lean-runtime status Primes.lean
+```
+
+Most checks should rely on discovery. Use `--using` only when a particular
+release or context is part of the request:
+
+```console
+lean-runtime check Primes.lean --using mathlib@v4.33.0
+```
+
+See [Context selection](concepts/context-selection.md) for frontmatter, project
+precedence, and other explicit context forms.
 
 ## Interpret the result
 

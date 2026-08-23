@@ -16,44 +16,10 @@ Preview the routing decision without running Lean:
 lean-runtime status Main.lean
 ```
 
-## Select a context explicitly
-
-`--using` accepts several kinds of context:
-
-```console
-lean-runtime check Main.lean --using mathlib@v4.33.0
-lean-runtime check Main.lean --using environment.lock.json
-lean-runtime check Main.lean --using leanprover/lean4:v4.33.0
-lean-runtime check Main.lean --using ./some-project
-```
-
-Package references resolve a published package release. Lock files identify an exact dependency graph. Toolchain references provide a core Lean context. Project paths use the project toolchain and manifest; the file must live inside that project's root.
-
-## Check standard input
-
-Pass `-` as the input. Standard input carries no filename evidence, so an explicit context is required:
-
-```console
-echo 'example : True := trivial' | lean-runtime check - --using leanprover/lean4:v4.33.0
-```
-
-## Put context in the file
-
-Frontmatter must appear before Lean source and each line remains a Lean comment:
-
-```lean
--- /// lean-runtime
--- requires = ["mathlib@v4.33.0"]
--- ///
-import Mathlib
-```
-
-Supported fields are `requires`, `toolchain`, and `lock`. A lock already identifies the complete environment, so `lock` cannot be combined with `requires` or `toolchain`.
-
 ## Record and reuse an exact lock
 
 ```console
-lean-runtime check Main.lean --lock-out environment.lock.json
+lean-runtime check Main.lean --write-lock environment.lock.json
 lean-runtime check Main.lean --using environment.lock.json
 ```
 
@@ -90,6 +56,41 @@ lean-runtime check Main.lean --json
 ```
 
 The structured result distinguishes compiler rejection from context or acquisition failure and includes execution metadata.
+
+## Override discovery
+
+Use `--using` only when a particular context is part of the request:
+
+```console
+lean-runtime check Main.lean --using mathlib@v4.33.0
+lean-runtime check Main.lean --using environment.lock.json
+lean-runtime check Main.lean --using leanprover/lean4:v4.33.0
+lean-runtime check some-project/MyProject/Main.lean --using ./some-project
+```
+
+Package references resolve a published release. Lock files identify an exact
+dependency graph. Toolchain references provide a core Lean context. A file
+checked in a project context must live inside that project.
+
+Frontmatter can carry the same requirement with the source:
+
+```lean
+-- /// lean-runtime
+-- requires = ["mathlib@v4.33.0"]
+-- ///
+import Mathlib
+```
+
+Supported fields are `requires`, `toolchain`, and `lock`. A lock cannot be
+combined with `requires` or `toolchain`.
+
+## Check standard input
+
+Standard input has no filename evidence, so it requires an explicit context:
+
+```console
+echo 'example : True := trivial' | lean-runtime check - --using leanprover/lean4:v4.33.0
+```
 
 ## Watch a project file
 

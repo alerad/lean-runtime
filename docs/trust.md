@@ -27,10 +27,13 @@ Lake packages and build scripts can execute code during acquisition or compilati
 ```console
 lean-runtime verify environment.lock.json
 lean-runtime verify ENVIRONMENT
-lean-runtime storage verify
 ```
 
 Use `--offline` when verification must not contact remote services. Use `verify --rebuild` when independent reconstruction is required and permitted.
+
+`lean-runtime storage verify` performs a deeper scan of the entire local store.
+It is a maintenance operation and can take significant time on a large cache;
+see [Storage](reference/storage.md).
 
 ## Diagnose the local runtime
 

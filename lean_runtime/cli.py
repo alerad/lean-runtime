@@ -123,10 +123,19 @@ def _render_storage(status: StoreStatus) -> None:
         counted = f"{count:>5}" if count is not None else "     "
         size_column = style.cyan(f"{format_byte_size(bytes_used):>10}")
         print(f"  {label:<15}{counted}  {size_column}")
-    total_label = style.bold(f"{'Total':<15}")
+    total_label = style.bold(f"{'Materialized':<15}")
     total_size = style.bold(f"{format_byte_size(status.bytes_used):>10}")
     free_note = style.dim(f"({format_byte_size(status.bytes_free)} free on disk)")
     print(f"  {total_label}       {total_size}  {free_note}")
+    if status.allocated_bytes:
+        allocated_label = style.bold(f"{'Allocated*':<15}")
+        allocated_size = style.bold(f"{format_byte_size(status.allocated_bytes):>10}")
+        print(f"  {allocated_label}       {allocated_size}")
+        print(
+            style.dim(
+                "  * hard links counted once; copy-on-write blocks may still be shared"
+            )
+        )
     if status.environment_usage:
         print()
         print(style.bold("Largest environments"))
@@ -208,7 +217,7 @@ def _render_cleanup(
                 print(
                     style.bold(
                         f"Would remove {len(scratch.candidates)} abandoned workspace(s) · "
-                        f"{format_byte_size(scratch.candidate_bytes)}"
+                        f"up to {format_byte_size(scratch.candidate_bytes)} materialized"
                     )
                 )
             else:
@@ -590,7 +599,17 @@ def _add_check_v4(parser: argparse.ArgumentParser, *, watch: bool = False) -> No
     parser.add_argument("--include", action="append", default=[], type=Path)
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--plan", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--lock-out", type=Path, help=argparse.SUPPRESS)
+    lock_options = parser.add_mutually_exclusive_group()
+    lock_options.add_argument(
+        "--write-lock",
+        dest="lock_out",
+        type=Path,
+        metavar="PATH",
+        help="write the exact environment selected by a successful standalone check",
+    )
+    lock_options.add_argument(
+        "--lock-out", dest="lock_out", type=Path, metavar="PATH", help=argparse.SUPPRESS
+    )
     parser.add_argument("--no-source-build", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--allow-source-build",
@@ -1175,6 +1194,30 @@ def main(argv: list[str] | None = None) -> int:
         _apply_using(args)
         if args.matrix is not None:
             args.across = args.matrix
+        if args.lock_out is not None:
+            lock_error: str | None = None
+            if (
+                args.watch
+                or args.repeat is not None
+                or args.across is not None
+                or args.include
+                or len(args.inputs) != 1
+                or args.inputs[0] == "-"
+            ):
+                lock_error = "--write-lock requires exactly one standalone file check"
+            elif (
+                args.environment is not None
+                or args.project is not None
+                or args.toolchain is not None
+                or getattr(args, "_using_lock", None) is not None
+            ):
+                lock_error = (
+                    "--write-lock records discovery or package selection; it cannot be combined "
+                    "with an exact, project, environment, or toolchain context"
+                )
+            if lock_error is not None:
+                print(f"lean-runtime: {lock_error}", file=sys.stderr)
+                return 2
         if (
             not args.watch
             and args.repeat is None
@@ -1193,6 +1236,13 @@ def main(argv: list[str] | None = None) -> int:
                     project_available = True
                 except ProjectNotFoundError:
                     pass
+            if args.lock_out is not None and project_available and not args.package_refs:
+                print(
+                    "lean-runtime: --write-lock records a standalone environment, "
+                    "not a mutable Lake project",
+                    file=sys.stderr,
+                )
+                return 2
             explicit_discovery = bool(
                 args.package_refs or args.toolchain or getattr(args, "_using_lock", None)
             )
@@ -2173,45 +2223,55 @@ def main(argv: list[str] | None = None) -> int:
                 if (
                     len(args.inputs) != 1
                     or args.inputs[0] == "-"
-                    or args.package_refs
                     or args.include
                 ):
                     raise ValueError("check --repeat requires exactly one FILE")
+                if args.lock_out is not None:
+                    raise ValueError(
+                        "check --repeat cannot write a lock; run one successful check first"
+                    )
                 if args.repeat < 1 or args.warmup < 0:
                     raise ValueError(
                         "check --repeat requires positive samples and nonnegative warmups"
                     )
                 repeated_file = Path(args.inputs[0])
+                repeated_source = repeated_file.read_text(encoding="utf-8")
+                selected_environment = None
+                using_lock = getattr(args, "_using_lock", None)
                 if args.environment is not None:
-                    environment_report = runtime.profile(
-                        args.environment,
-                        repeated_file,
-                        warmup=args.warmup,
-                        repeat=args.repeat,
+                    selected_environment = runtime.subject_environment(args.environment)
+                elif using_lock is not None:
+                    selected_environment = runtime.open_exact(
+                        EnvironmentLock.load(Path(using_lock).expanduser().resolve())
                     )
-                    if args.json:
-                        _json(serialize_profile_v1(environment_report))
-                    else:
-                        print(f"Profile: {repeated_file.name}")
-                        print(f"Samples: {len(environment_report.results)}")
-                        for name, value in environment_report.statistics().items():
-                            if value is not None:
-                                print(f"  {name:<6} {value:g} ms")
-                    return 0 if environment_report.ok else 1
+                elif args.package_refs:
+                    selected_environment = runtime.open_references(
+                        args.package_refs, toolchain=args.toolchain
+                    )
+
+                def check_repeated_file() -> ExecutionResult:
+                    if selected_environment is not None:
+                        return selected_environment.check(
+                            repeated_source,
+                            filename=repeated_file.name,
+                            policy=_policy(args),
+                        )
+                    return runtime.check_file(
+                        repeated_file,
+                        project=args.project,
+                        toolchain=args.toolchain,
+                        policy=_policy(args),
+                    )
+
                 if os.environ.get(_HEADER_SNAPSHOTS_VARIABLE) is None:
                     runtime.header_cache.enabled = True
                 for _ in range(args.warmup):
-                    warm = runtime.check_file(
-                        repeated_file, project=args.project, policy=_policy(args)
-                    )
+                    warm = check_repeated_file()
                     if not warm.ok:
                         _emit_result(warm, args.json)
                         return 2 if warm.timed_out else 1
                 repeated_started = time.monotonic()
-                samples = tuple(
-                    runtime.check_file(repeated_file, project=args.project, policy=_policy(args))
-                    for _ in range(args.repeat)
-                )
+                samples = tuple(check_repeated_file() for _ in range(args.repeat))
                 profile_report = ProfileReport(
                     str(repeated_file), args.warmup, samples, time.monotonic() - repeated_started
                 )

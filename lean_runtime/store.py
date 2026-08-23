@@ -161,6 +161,44 @@ def _tree_bytes(root: Path) -> int:
     return total
 
 
+def _tree_metrics(root: Path, seen: set[tuple[int, int]]) -> tuple[int, int]:
+    """Return materialized bytes and allocated bytes, deduplicating hard links.
+
+    The allocated figure is an estimate: filesystems may share blocks through
+    copy-on-write clones without exposing that relationship through ``stat``.
+    """
+    if not root.is_dir():
+        return 0, 0
+    materialized = 0
+    allocated = 0
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_file(follow_symlinks=False):
+                            record = entry.stat(follow_symlinks=False)
+                            materialized += record.st_size
+                            if record.st_nlink > 1 and record.st_ino:
+                                identity = (record.st_dev, record.st_ino)
+                                if identity in seen:
+                                    continue
+                                seen.add(identity)
+                            blocks = getattr(record, "st_blocks", None)
+                            allocated += record.st_size if blocks is None else blocks * 512
+                        elif entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return materialized, allocated
+
+
 class WorkspaceLease:
     """Process-held ownership for disposable store workspaces."""
 
@@ -277,6 +315,7 @@ class StoreStatus:
     executions_bytes: int = 0
     scratch_workspaces: int = 0
     scratch_bytes: int = 0
+    allocated_bytes: int = 0
     environment_usage: tuple[EnvironmentUsage, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -303,6 +342,7 @@ class StoreStatus:
             "executions_bytes": self.executions_bytes,
             "scratch_workspaces": self.scratch_workspaces,
             "scratch_bytes": self.scratch_bytes,
+            "allocated_bytes": self.allocated_bytes,
             "environment_usage": [usage.to_dict() for usage in self.environment_usage],
         }
 
@@ -810,10 +850,12 @@ class EnvironmentStore:
         if not verify:
             with suppress(OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
                 value = json.loads(ledger.read_text(encoding="utf-8"))
-                if value["fingerprint"] == fingerprint:
+                if value.get("accounting") == 2 and value["fingerprint"] == fingerprint:
                     cached = StoreStatus.from_dict(value["status"])
                     return replace(cached, bytes_free=shutil.disk_usage(self.home).free)
         aliases = self.aliases()
+        allocated_seen: set[tuple[int, int]] = set()
+        allocated_bytes = 0
         names_by_environment: dict[str, list[str]] = {}
         for name, environment_id in aliases.items():
             names_by_environment.setdefault(environment_id, []).append(name)
@@ -826,10 +868,12 @@ class EnvironmentStore:
                 record = json.loads((path / "metadata.json").read_text(encoding="utf-8"))
                 value = record.get("toolchain")
                 toolchain = value if isinstance(value, str) else None
+            environment_bytes, environment_allocated = _tree_metrics(path, allocated_seen)
+            allocated_bytes += environment_allocated
             usage.append(
                 EnvironmentUsage(
                     environment_id=path.name,
-                    bytes_used=_tree_bytes(path),
+                    bytes_used=environment_bytes,
                     aliases=tuple(sorted(names_by_environment.get(path.name, ()))),
                     toolchain=toolchain,
                     last_used_at=self._last_used_at(path),
@@ -840,19 +884,27 @@ class EnvironmentStore:
         project_sources = self.home / "project-sources"
         project_workspaces = self.home / "project-workspaces"
         environments_bytes = sum(item.bytes_used for item in usage)
-        sources_bytes = _tree_bytes(self.sources)
-        oci_blobs_bytes = _tree_bytes(self.oci_blobs)
-        cas_artifacts_bytes = _tree_bytes(self.cas_artifacts)
-        declaration_indexes_bytes = _tree_bytes(self.declaration_indexes)
-        project_packages_bytes = (
-            _tree_bytes(project_packages)
-            + _tree_bytes(project_sources)
-            + _tree_bytes(project_workspaces)
-        )
-        toolchains_bytes = _tree_bytes(self.home / "elan") + _tree_bytes(self.home / "toolchains")
-        executions_bytes = _tree_bytes(self.executions)
+
+        def measure(*roots: Path) -> int:
+            nonlocal allocated_bytes
+            materialized = 0
+            for root in roots:
+                root_bytes, root_allocated = _tree_metrics(root, allocated_seen)
+                materialized += root_bytes
+                allocated_bytes += root_allocated
+            return materialized
+
+        sources_bytes = measure(self.sources)
+        oci_blobs_bytes = measure(self.oci_blobs)
+        cas_artifacts_bytes = measure(self.cas_artifacts)
+        declaration_indexes_bytes = measure(self.declaration_indexes)
+        project_packages_bytes = measure(project_packages, project_sources, project_workspaces)
+        toolchains_bytes = measure(self.home / "elan", self.home / "toolchains")
+        executions_bytes = measure(self.executions)
         scratch_paths = self._scratch_paths()
-        scratch_bytes = sum(_tree_bytes(path) for path in scratch_paths)
+        scratch_bytes = measure(*scratch_paths)
+        locks_bytes = measure(self.locks)
+        names_bytes = measure(self.names)
         bytes_used = sum(
             (
                 environments_bytes,
@@ -864,8 +916,8 @@ class EnvironmentStore:
                 toolchains_bytes,
                 executions_bytes,
                 scratch_bytes,
-                _tree_bytes(self.locks),
-                _tree_bytes(self.names),
+                locks_bytes,
+                names_bytes,
             )
         )
         status = StoreStatus(
@@ -897,9 +949,13 @@ class EnvironmentStore:
             executions_bytes=executions_bytes,
             scratch_workspaces=len(scratch_paths),
             scratch_bytes=scratch_bytes,
+            allocated_bytes=allocated_bytes,
             environment_usage=tuple(usage),
         )
-        write_json_atomic(ledger, {"fingerprint": fingerprint, "status": status.to_dict()})
+        write_json_atomic(
+            ledger,
+            {"accounting": 2, "fingerprint": fingerprint, "status": status.to_dict()},
+        )
         return status
 
     def _last_used_at(self, environment_path: Path) -> str | None:
@@ -998,6 +1054,7 @@ class EnvironmentStore:
         dry_run: bool = True,
         minimum_age_seconds: float = 3600,
         include_legacy: bool = True,
+        legacy_minimum_age_seconds: float | None = None,
     ) -> CleanupReport:
         """Remove disposable workspaces whose process ownership lease is no longer held."""
         now = time.time()
@@ -1014,8 +1071,13 @@ class EnvironmentStore:
                     continue
                 label = f"{path.parent.name}/{path.name}"
                 marker = path / ".lean-runtime-workspace.json"
+                required_age = (
+                    legacy_minimum_age_seconds
+                    if legacy_minimum_age_seconds is not None and not marker.is_file()
+                    else minimum_age_seconds
+                )
                 if (
-                    age < minimum_age_seconds
+                    age < required_age
                     or (not include_legacy and not marker.is_file())
                     or self._workspace_active(path)
                 ):
