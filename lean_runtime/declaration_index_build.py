@@ -245,6 +245,17 @@ def build_declaration_index(
     )
     built: list[BuiltDeclarationShard] = []
     for package, source_id, subdir, root in roots:
+        # Some locked packages are build tools or otherwise contribute no
+        # compiled Lean declarations to this environment. They have no shard.
+        # Existing `.ilean` trees remain fail-closed in `_declarations` below.
+        if package != "core" and (not root.is_dir() or next(root.rglob("*.ilean"), None) is None):
+            runtime.events.emit(
+                "declaration_index.package_skipped",
+                "Skipping package with no compiled declarations",
+                package=package,
+                source_id=source_id,
+            )
+            continue
         shard_id = declaration_shard_identity(
             source_id=source_id,
             toolchain=lock.toolchain,
