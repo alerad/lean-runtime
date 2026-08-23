@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..events import RuntimeEvent
 from ..runtime import Runtime
@@ -161,6 +161,48 @@ class Discovery:
             else (static_plan, None)
         )
         result = discover(source, selected_plan, selected_probe, cancel=cancel)
+        if runtime_for_order is not None and result.status == "not_found":
+            rejection = result.best_rejection
+            if rejection is not None and rejection.execution_result is not None:
+                candidate = next(
+                    (
+                        item
+                        for item in selected_plan.candidates
+                        if item.entry.lock.lock_id == rejection.lock_id
+                    ),
+                    None,
+                )
+                if candidate is not None:
+                    enriched = runtime_for_order.with_declaration_hints(
+                        candidate.entry.lock,
+                        rejection.execution_result,
+                        environment_label=candidate.entry.id,
+                        allow_download=self.policy.allow_download,
+                        cancel=cancel,
+                    )
+                    if enriched.hints == rejection.execution_result.hints:
+                        for alternative in selected_plan.candidates:
+                            if alternative.entry.lock.lock_id == rejection.lock_id:
+                                continue
+                            retained = runtime_for_order.with_declaration_hints(
+                                alternative.entry.lock,
+                                enriched,
+                                environment_label=alternative.entry.id,
+                                allow_download=False,
+                                cancel=cancel,
+                            )
+                            if retained.hints != enriched.hints:
+                                enriched = retained
+                                break
+                    result = replace(
+                        result,
+                        attempts=tuple(
+                            replace(attempt, execution_result=enriched)
+                            if attempt is rejection
+                            else attempt
+                            for attempt in result.attempts
+                        ),
+                    )
         if history is not None:
             history.remember_rejections(
                 source,

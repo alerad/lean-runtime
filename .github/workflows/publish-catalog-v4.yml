@@ -69,7 +69,7 @@ jobs:
           cache: pip
       - run: python -m pip install .
       - uses: sigstore/cosign-installer@v4.1.2
-      - name: Reuse the public full environment, then publish its sparse successor
+      - name: Reuse or build the full environment, then publish its sparse successor
         env:
           LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
           LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ github.token }}
@@ -85,24 +85,34 @@ jobs:
           # Publication needs the full toolchain both to inventory/probe the
           # capsule and to derive its independently verified slim successor.
           lean-runtime --home "$runtime_home" toolchain install "$toolchain"
-          if [[ "$ENTRY_ID" == core-* ]]; then
-            lean-runtime --home "$runtime_home" --availability auto \
-              --library "$LIBRARY" env acquire "$LOCK_PATH" --name publisher
-          else
-            lean-runtime --home "$runtime_home" --availability required \
-              --library "$LIBRARY" env acquire "$LOCK_PATH" --name publisher --download-only
-          fi
+          # Existing entries reuse their downloadable full environment. A new
+          # catalog entry has no remote artifact yet, so auto falls back to its
+          # exact source lock and creates the publication input in this run.
+          lean-runtime --home "$runtime_home" --availability auto \
+            --library "$LIBRARY" env acquire "$LOCK_PATH" --name publisher --timeout 7200
           lean-runtime --home "$runtime_home" --availability local \
             env publish "$LOCK_PATH" --to "$LIBRARY" \
             --platform-only --attest > "environment-$RESULT_SUFFIX.json"
           lean-runtime --home "$runtime_home" toolchain publish "$toolchain" \
             --library "$LIBRARY" > "toolchain-$RESULT_SUFFIX.json"
+          # Declaration data is platform-neutral. Generate it on the Linux leg,
+          # reusing the full environment already acquired above. Deterministic
+          # package shards deduplicate by digest across catalog environments.
+          if [[ "$RESULT_SUFFIX" == "linux-amd64" ]]; then
+            lean-runtime --home "$runtime_home" --availability local \
+              declaration-index build "$LOCK_PATH" --output declaration-shards
+            lean-runtime --home "$runtime_home" --availability local \
+              declaration-index publish "$LOCK_PATH" \
+              declaration-shards/declaration-index-build.json \
+              --library "$LIBRARY" --sign > declaration-index.json
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: catalog-${{ matrix.entry.id }}-${{ matrix.platform.name }}
           path: |
             environment-${{ matrix.platform.name }}.json
             toolchain-${{ matrix.platform.name }}.json
+            declaration-index.json
           if-no-files-found: error
 
   finalize:

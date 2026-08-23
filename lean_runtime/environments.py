@@ -542,6 +542,7 @@ class Environment:
         policy: ExecutionPolicy | None = None,
         cancel: threading.Event | None = None,
         _allow_sparse_acquisition: bool = True,
+        _declaration_hints: bool = True,
     ) -> ExecutionResult:
         safe_filename = Path(filename).name
         if not safe_filename.endswith(".lean"):
@@ -552,6 +553,7 @@ class Environment:
             policy=policy,
             cancel=cancel,
             _allow_sparse_acquisition=_allow_sparse_acquisition,
+            _declaration_hints=_declaration_hints,
         )
 
     def check_files(
@@ -562,6 +564,7 @@ class Environment:
         policy: ExecutionPolicy | None = None,
         cancel: threading.Event | None = None,
         _allow_sparse_acquisition: bool = True,
+        _declaration_hints: bool = True,
     ) -> ExecutionResult:
         """Check a safe relative tree of Lean files through one entrypoint."""
         normalized = _source_files(files)
@@ -579,7 +582,7 @@ class Environment:
             frozenset({"check"}),
             allow_acquisition=_allow_sparse_acquisition,
         )
-        return self._execute_in_instance(
+        result = self._execute_in_instance(
             operation="check",
             files=normalized,
             entrypoint=selected_entrypoint,
@@ -588,6 +591,13 @@ class Environment:
             policy=policy or ExecutionPolicy(),
             cancel=cancel,
         )
+        if (
+            _declaration_hints
+            and not result.ok
+            and self.manager.declaration_hint_resolver is not None
+        ):
+            return self.manager.declaration_hint_resolver(self.lock, result, cancel)
+        return result
 
     def start_check(
         self,
@@ -1124,6 +1134,10 @@ class EnvironmentManager:
         self.events = events or EventEmitter()
         self.sparse_acquirer: (
             Callable[[EnvironmentLock, tuple[str, ...], frozenset[str]], None] | None
+        ) = None
+        self.declaration_hint_resolver: (
+            Callable[[EnvironmentLock, ExecutionResult, threading.Event | None], ExecutionResult]
+            | None
         ) = None
 
     def ensure_sparse_modules(

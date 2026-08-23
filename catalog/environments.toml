@@ -1,5 +1,5 @@
 schema = "lean-runtime.discovery.catalog-source/v1"
-generated_at = "2026-08-13T13:49:46Z"
+generated_at = "2026-08-21T16:51:41Z"
 
 [[environment]]
 id = "core-v4.32.2"
@@ -84,3 +84,11 @@ references = [
 ]
 inventory_packages = ["LeanCert", "mathlib"]
 created_at = "2026-08-10T22:05:27Z"
+
+[[environment]]
+id = "mathlib-v4.33.1"
+channel = "stable"
+lock = "locks/mathlib-v4.33.1.lock.json"
+references = ["github:leanprover-community/mathlib4@v4.33.1"]
+inventory_packages = ["mathlib"]
+created_at = "2026-08-21T16:51:41Z"

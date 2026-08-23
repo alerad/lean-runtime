@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Add a scheduled catalog-update workflow that detects a new stable Mathlib
+  release, freezes its exact lock, rebuilds the bundled catalog, and opens a
+  pull request.
+- Add `catalog build --previous`, which reuses module inventories from a
+  prior catalog for entries whose locks are unchanged, so incremental
+  rebuilds only materialize new or changed sources.
+- Add digest-pinned, per-package declaration-index shards generated from
+  public `.ilean` files during catalog publication. Rejected standalone
+  checks can lazily fetch only the relevant shard and report the module that
+  defines an unknown name; retained shards remain available offline and are
+  reused across environments with the same source and toolchain.
+
 ## 4.1.1 - 2026-08-21
 
 - Escape source stems that are not plain Lean identifiers when rendering

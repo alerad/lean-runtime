@@ -4,7 +4,7 @@ import asyncio
 import json
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -507,8 +507,8 @@ def test_lean_runtime_probe_preserves_the_user_filename(monkeypatch, sample_cata
         id = "env_fixture"
         sparse = False
 
-        def check(self, _source, *, filename, policy, cancel):
-            del policy, cancel
+        def check(self, _source, *, filename, policy, cancel, _declaration_hints=True):
+            del policy, cancel, _declaration_hints
             captured["filename"] = filename
             return execution(True)
 
@@ -522,3 +522,89 @@ def test_lean_runtime_probe_preserves_the_user_filename(monkeypatch, sample_cata
         cancel=threading.Event(),
     )
     assert captured["filename"] == "Tight.lean"
+
+
+def test_discovery_enriches_only_the_terminal_best_rejection(
+    monkeypatch, sample_catalog, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    import lean_runtime.discovery.api as api_module
+
+    static = Discovery(catalog=sample_catalog, policy=DiscoveryPolicy(max_candidates=1)).plan(
+        "import Mathlib\n"
+    )
+    rejected = engine.discover(
+        "import Mathlib\n",
+        static,
+        FakeProbe({"mathlib-new": execution(False, stderr="unknown identifier `missing`")}),
+    )
+
+    class HintRuntime:
+        home = tmp_path / "runtime"
+        availability = "required"
+        libraries = ()
+        calls = 0
+
+        def exact_ready_locally(self, *_args, **_kwargs) -> bool:
+            return False
+
+        def with_declaration_hints(self, _lock, result, **_kwargs):
+            self.calls += 1
+            return replace(result, hints=("resolved after discovery",))
+
+    runtime = HintRuntime()
+    monkeypatch.setattr(api_module, "discover", lambda *_args, **_kwargs: rejected)
+
+    result = Discovery(catalog=sample_catalog, runtime=runtime).discover_and_check(
+        "import Mathlib\n"
+    )
+
+    assert runtime.calls == 1
+    assert result.best_rejection is not None
+    assert result.best_rejection.execution_result is not None
+    assert result.best_rejection.execution_result.hints == ("resolved after discovery",)
+
+
+def test_discovery_cross_version_hints_use_retained_indexes_only(
+    monkeypatch, sample_catalog, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    import lean_runtime.discovery.api as api_module
+
+    static = Discovery(catalog=sample_catalog, policy=DiscoveryPolicy(max_candidates=1)).plan(
+        "import Mathlib\n"
+    )
+    rejected = engine.discover(
+        "import Mathlib\n",
+        static,
+        FakeProbe({"mathlib-new": execution(False, stderr="unknown identifier `missing`")}),
+    )
+
+    class HintRuntime:
+        home = tmp_path / "runtime"
+        availability = "required"
+        libraries = ()
+        calls: list[tuple[str, bool]] = []
+
+        def exact_ready_locally(self, *_args, **_kwargs) -> bool:
+            return False
+
+        def with_declaration_hints(self, _lock, result, **kwargs):
+            label = str(kwargs["environment_label"])
+            allow_download = bool(kwargs["allow_download"])
+            self.calls.append((label, allow_download))
+            if label == "mathlib-old":
+                return replace(result, hints=("available in the retained older index",))
+            return result
+
+    runtime = HintRuntime()
+    monkeypatch.setattr(api_module, "discover", lambda *_args, **_kwargs: rejected)
+
+    result = Discovery(catalog=sample_catalog, runtime=runtime).discover_and_check(
+        "import Mathlib\n"
+    )
+
+    assert runtime.calls[:2] == [("mathlib-new", True), ("mathlib-old", False)]
+    assert result.best_rejection is not None
+    assert result.best_rejection.execution_result is not None
+    assert result.best_rejection.execution_result.hints == (
+        "available in the retained older index",
+    )

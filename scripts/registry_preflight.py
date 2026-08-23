@@ -8,12 +8,15 @@ types, blob availability, and byte-range support for sparse capsule packs.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 ACCEPT = "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json"
 DEFAULT_PLATFORMS = "linux/amd64,darwin/arm64,darwin/amd64"
@@ -70,7 +73,8 @@ def check_entry(
     platforms: list[tuple[str, str]],
 ) -> list[str]:
     """Return failures for one capsule and its exact check-only toolchain."""
-    from lean_runtime.oci import CAPSULE_CONFIG_MEDIA_TYPE, capsule_reference
+    from lean_runtime.bundles import CAPSULE_CONFIG_MEDIA_TYPE
+    from lean_runtime.oci import capsule_reference
     from lean_runtime.packs import PACK_MEDIA_TYPE
     from lean_runtime.toolchain_oci import (
         TOOLCHAIN_CONFIG_MEDIA_TYPE,
@@ -149,6 +153,117 @@ def check_entry(
     return failures
 
 
+def check_declaration_index(
+    registry: str,
+    repository: str,
+    token: str,
+    entry_id: str,
+    lock_id: str,
+) -> list[str]:
+    """Verify public shard metadata and materialize the smallest shard anonymously."""
+
+    import zstandard
+
+    from lean_runtime.declaration_index import (
+        DECLARATION_INDEX_SCHEMA,
+        DeclarationIndex,
+        DeclarationShard,
+    )
+    from lean_runtime.declaration_index_oci import (
+        DECLARATION_INDEX_CONFIG_MEDIA_TYPE,
+        DECLARATION_INDEX_LAYER_MEDIA_TYPE,
+        declaration_index_reference,
+    )
+
+    failures: list[str] = []
+    base = f"https://{registry}/v2/{repository}"
+    reference = declaration_index_reference(lock_id)
+    status, manifest_data, headers = _get(f"{base}/manifests/{reference}", token)
+    label = f"{entry_id}: declaration index"
+    if status != 200:
+        return [f"{label} {reference} -> {_failure(status, headers)}"]
+    try:
+        manifest = json.loads(manifest_data)
+        config_descriptor = manifest["config"]
+        layer_descriptors = manifest["layers"]
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return [f"{label} manifest is malformed"]
+    if (
+        not isinstance(config_descriptor, dict)
+        or config_descriptor.get("mediaType") != DECLARATION_INDEX_CONFIG_MEDIA_TYPE
+        or not isinstance(layer_descriptors, list)
+        or not layer_descriptors
+        or any(
+            not isinstance(item, dict)
+            or item.get("mediaType") != DECLARATION_INDEX_LAYER_MEDIA_TYPE
+            for item in layer_descriptors
+        )
+    ):
+        return [f"{label} manifest media types are invalid"]
+    config_digest = config_descriptor.get("digest")
+    if not isinstance(config_digest, str):
+        return [f"{label} config descriptor has no digest"]
+    status, config_data, headers = _get(f"{base}/blobs/{config_digest}", token)
+    if status != 200:
+        return [f"{label} config -> {_failure(status, headers)}"]
+    if "sha256:" + hashlib.sha256(config_data).hexdigest() != config_digest:
+        return [f"{label} config digest mismatch"]
+    try:
+        config = json.loads(config_data)
+        raw_shards = config["shards"]
+        if not isinstance(raw_shards, list) or not all(
+            isinstance(item, dict) for item in raw_shards
+        ):
+            raise TypeError
+        shards = tuple(DeclarationShard.from_dict(item) for item in raw_shards)
+    except (KeyError, TypeError, json.JSONDecodeError, ValueError):
+        return [f"{label} config is malformed"]
+    if config.get("schema") != DECLARATION_INDEX_SCHEMA or config.get("lock_id") != lock_id:
+        return [f"{label} config identity mismatch"]
+    descriptors = {
+        str(item.get("digest")): item for item in layer_descriptors if isinstance(item, dict)
+    }
+    if len(shards) != len(descriptors) or any(
+        item.layer_digest not in descriptors
+        or descriptors[item.layer_digest].get("size") != item.layer_size
+        for item in shards
+    ):
+        return [f"{label} shard descriptors do not match the config"]
+    for shard in shards:
+        status, _, headers = _get(f"{base}/blobs/{shard.layer_digest}", token, method="HEAD")
+        if status != 200:
+            failures.append(f"{label} shard {shard.package} -> {_failure(status, headers)}")
+    if failures:
+        return failures
+    sample = min(shards, key=lambda item: item.layer_size)
+    status, compressed, headers = _get(f"{base}/blobs/{sample.layer_digest}", token)
+    if status != 200:
+        return [f"{label} sample shard -> {_failure(status, headers)}"]
+    if "sha256:" + hashlib.sha256(compressed).hexdigest() != sample.layer_digest:
+        return [f"{label} sample layer digest mismatch"]
+    try:
+        sqlite_data = zstandard.ZstdDecompressor().decompress(
+            compressed, max_output_size=sample.sqlite_size
+        )
+    except zstandard.ZstdError:
+        return [f"{label} sample layer is not valid zstd"]
+    if (
+        len(sqlite_data) != sample.sqlite_size
+        or "sha256:" + hashlib.sha256(sqlite_data).hexdigest() != sample.sqlite_digest
+    ):
+        return [f"{label} sample SQLite digest mismatch"]
+    with tempfile.TemporaryDirectory(prefix="lean-runtime-index-preflight-") as temporary:
+        path = Path(temporary) / "sample.sqlite"
+        path.write_bytes(sqlite_data)
+        try:
+            index = DeclarationIndex(path, expected_shard_id=sample.shard_id)
+            if index.declaration_count < 1:
+                return [f"{label} sample shard contains no declarations"]
+        except Exception as error:  # defensive public-artifact boundary
+            return [f"{label} sample SQLite is invalid: {error}"]
+    return []
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platforms", default=DEFAULT_PLATFORMS)
@@ -161,7 +276,12 @@ def main() -> int:
 
     reference = (arguments.library or DEFAULT_ENVIRONMENT_LIBRARIES[0]).removeprefix("oci://")
     registry, _, repository = reference.partition("/")
-    platforms = [tuple(item.split("/", 1)) for item in arguments.platforms.split(",") if item]
+    platforms: list[tuple[str, str]] = []
+    for item in arguments.platforms.split(","):
+        operating_system, separator, architecture = item.partition("/")
+        if not separator or not operating_system or not architecture:
+            parser.error(f"invalid platform: {item!r}")
+        platforms.append((operating_system, architecture))
     try:
         token = anonymous_token(registry, repository)
     except (urllib.error.URLError, KeyError, json.JSONDecodeError) as error:
@@ -181,7 +301,16 @@ def main() -> int:
             entry.id,
             entry.lock.lock_id,
             entry.toolchain,
-            platforms,  # type: ignore[arg-type]
+            platforms,
+        )
+        entry_failures.extend(
+            check_declaration_index(
+                registry,
+                repository,
+                token,
+                entry.id,
+                entry.lock.lock_id,
+            )
         )
         failures.extend(entry_failures)
         checked += 1
@@ -191,7 +320,10 @@ def main() -> int:
         for failure in failures:
             print(f"  - {failure}")
         return 1
-    print(f"\nall {checked} catalog entries have public sparse capsules and slim runtimes")
+    print(
+        f"\nall {checked} catalog entries have public sparse capsules, slim runtimes, "
+        "and declaration shards"
+    )
     return 0
 
 

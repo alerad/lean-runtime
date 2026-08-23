@@ -20,6 +20,7 @@ from typing import Any
 
 from ._git import git_command
 from ._paths import remove_tree
+from .declaration_index import DeclarationShard
 from .errors import EnvironmentError
 from .lockfiles import EnvironmentLock
 from .locking import FileLock
@@ -264,10 +265,12 @@ class StoreStatus:
     aliases: int
     bytes_used: int
     bytes_free: int
+    declaration_indexes: int = 0
     environments_bytes: int = 0
     sources_bytes: int = 0
     oci_blobs_bytes: int = 0
     cas_artifacts_bytes: int = 0
+    declaration_indexes_bytes: int = 0
     project_packages: int = 0
     project_packages_bytes: int = 0
     toolchains_bytes: int = 0
@@ -284,6 +287,7 @@ class StoreStatus:
             "sources": self.sources,
             "oci_blobs": self.oci_blobs,
             "cas_artifacts": self.cas_artifacts,
+            "declaration_indexes": self.declaration_indexes,
             "executions": self.executions,
             "aliases": self.aliases,
             "bytes_used": self.bytes_used,
@@ -292,6 +296,7 @@ class StoreStatus:
             "sources_bytes": self.sources_bytes,
             "oci_blobs_bytes": self.oci_blobs_bytes,
             "cas_artifacts_bytes": self.cas_artifacts_bytes,
+            "declaration_indexes_bytes": self.declaration_indexes_bytes,
             "project_packages": self.project_packages,
             "project_packages_bytes": self.project_packages_bytes,
             "toolchains_bytes": self.toolchains_bytes,
@@ -335,6 +340,9 @@ class EnvironmentStore:
         self.leases = home / "leases"
         self.oci_blobs = home / "oci" / "blobs" / "sha256"
         self.cas_artifacts = home / "cas" / "artifacts" / "sha256"
+        self.declaration_indexes = home / "declaration-indexes"
+        self.declaration_index_objects = self.declaration_indexes / "objects" / "sha256"
+        self.declaration_index_locks = self.declaration_indexes / "locks"
         self.lock_dir = home / ".locks"
         for path in (
             self.sources,
@@ -348,9 +356,90 @@ class EnvironmentStore:
             self.leases,
             self.oci_blobs,
             self.cas_artifacts,
+            self.declaration_indexes,
+            self.declaration_index_objects,
+            self.declaration_index_locks,
             self.lock_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
+
+    def declaration_index_record(self, lock_id: str) -> dict[str, Any] | None:
+        """Return the retained shard manifest for an exact lock, if present."""
+        if re.fullmatch(r"lock_[0-9a-f]{64}", lock_id) is None:
+            raise EnvironmentError(f"invalid lock identity: {lock_id!r}")
+        record_path = self.declaration_index_locks / f"{lock_id}.json"
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return None
+        if (
+            not isinstance(record, dict)
+            or record.get("schema") != "lean-runtime.declaration-index-retention/v2"
+            or record.get("lock_id") != lock_id
+            or not isinstance(record.get("shards"), list)
+        ):
+            return None
+        return record
+
+    def declaration_index_shards(
+        self, lock_id: str
+    ) -> tuple[tuple[DeclarationShard, Path | None], ...]:
+        record = self.declaration_index_record(lock_id)
+        if record is None:
+            return ()
+        result: list[tuple[DeclarationShard, Path | None]] = []
+        for raw in record["shards"]:
+            if not isinstance(raw, dict):
+                return ()
+            try:
+                shard = DeclarationShard.from_dict(raw)
+            except EnvironmentError:
+                return ()
+            name = shard.sqlite_digest.removeprefix("sha256:")
+            path = self.declaration_index_objects / name
+            result.append((shard, path if path.is_file() else None))
+        return tuple(result)
+
+    def publish_declaration_index_shards(
+        self,
+        lock_id: str,
+        shards: tuple[DeclarationShard, ...],
+        sources: dict[str, Path],
+        *,
+        manifest_digest: str,
+        library: str,
+    ) -> tuple[Path, ...]:
+        """Atomically retain selected shard objects and their complete lock manifest."""
+        if re.fullmatch(r"lock_[0-9a-f]{64}", lock_id) is None:
+            raise EnvironmentError(f"invalid lock identity: {lock_id!r}")
+        if not shards or len({item.shard_id for item in shards}) != len(shards):
+            raise EnvironmentError("declaration index shard manifest is empty or duplicated")
+        destinations: list[Path] = []
+        with FileLock(self.lock_dir / f"declaration-index-{lock_id}.lock", timeout=1800):
+            for shard_id, source in sources.items():
+                shard = next((item for item in shards if item.shard_id == shard_id), None)
+                if shard is None:
+                    raise EnvironmentError("retained declaration shard is not in its manifest")
+                name = shard.sqlite_digest.removeprefix("sha256:")
+                if _OCI_BLOB.fullmatch(name) is None:
+                    raise EnvironmentError("declaration shard has an invalid content digest")
+                destination = self.declaration_index_objects / name
+                if not destination.is_file():
+                    source.replace(destination)
+                else:
+                    source.unlink(missing_ok=True)
+                destinations.append(destination)
+            write_json_atomic(
+                self.declaration_index_locks / f"{lock_id}.json",
+                {
+                    "schema": "lean-runtime.declaration-index-retention/v2",
+                    "lock_id": lock_id,
+                    "manifest_digest": manifest_digest,
+                    "library": library,
+                    "shards": [item.to_dict() for item in shards],
+                },
+            )
+        return tuple(destinations)
 
     def lock_path(self, lock_id: str) -> Path:
         return self.locks / lock_id / "environment.lock.json"
@@ -754,6 +843,7 @@ class EnvironmentStore:
         sources_bytes = _tree_bytes(self.sources)
         oci_blobs_bytes = _tree_bytes(self.oci_blobs)
         cas_artifacts_bytes = _tree_bytes(self.cas_artifacts)
+        declaration_indexes_bytes = _tree_bytes(self.declaration_indexes)
         project_packages_bytes = (
             _tree_bytes(project_packages)
             + _tree_bytes(project_sources)
@@ -769,6 +859,7 @@ class EnvironmentStore:
                 sources_bytes,
                 oci_blobs_bytes,
                 cas_artifacts_bytes,
+                declaration_indexes_bytes,
                 project_packages_bytes,
                 toolchains_bytes,
                 executions_bytes,
@@ -786,6 +877,9 @@ class EnvironmentStore:
             cas_artifacts=sum(
                 1 for path in self.cas_artifacts.glob("[0-9a-f]" * 64) if path.is_file()
             ),
+            declaration_indexes=sum(
+                1 for path in self.declaration_index_objects.glob("[0-9a-f]" * 64) if path.is_file()
+            ),
             executions=sum(1 for path in self.executions.glob("execution_*.json")),
             aliases=len(aliases),
             bytes_used=bytes_used,
@@ -794,6 +888,7 @@ class EnvironmentStore:
             sources_bytes=sources_bytes,
             oci_blobs_bytes=oci_blobs_bytes,
             cas_artifacts_bytes=cas_artifacts_bytes,
+            declaration_indexes_bytes=declaration_indexes_bytes,
             project_packages=sum(
                 1 for path in project_packages.glob("project_package_*") if path.is_dir()
             ),
