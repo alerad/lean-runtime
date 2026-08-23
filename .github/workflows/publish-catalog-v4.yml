@@ -89,7 +89,8 @@ jobs:
           # catalog entry has no remote artifact yet, so auto falls back to its
           # exact source lock and creates the publication input in this run.
           lean-runtime --home "$runtime_home" --availability auto \
-            --library "$LIBRARY" env acquire "$LOCK_PATH" --name publisher --timeout 7200
+            --library "$LIBRARY" env acquire "$LOCK_PATH" --name publisher \
+            --timeout 7200 --accelerate
           lean-runtime --home "$runtime_home" --availability local \
             env publish "$LOCK_PATH" --to "$LIBRARY" \
             --platform-only --attest > "environment-$RESULT_SUFFIX.json"
