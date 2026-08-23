@@ -40,9 +40,7 @@ def test_doctor_and_empty_store_status_do_not_install_tools(tmp_path: Path) -> N
     assert status.sources == 0
 
 
-def test_doctor_repair_removes_legacy_abandoned_scratch(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_doctor_repair_removes_legacy_abandoned_scratch(monkeypatch, tmp_path: Path) -> None:
     runtime = Runtime(home=tmp_path)
     abandoned = runtime.store.home / "resolution" / "resolve-legacy"
     abandoned.mkdir(parents=True)

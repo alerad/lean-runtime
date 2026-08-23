@@ -131,11 +131,7 @@ def _render_storage(status: StoreStatus) -> None:
         allocated_label = style.bold(f"{'Allocated*':<15}")
         allocated_size = style.bold(f"{format_byte_size(status.allocated_bytes):>10}")
         print(f"  {allocated_label}       {allocated_size}")
-        print(
-            style.dim(
-                "  * hard links counted once; copy-on-write blocks may still be shared"
-            )
-        )
+        print(style.dim("  * hard links counted once; copy-on-write blocks may still be shared"))
     if status.environment_usage:
         print()
         print(style.bold("Largest environments"))
@@ -2220,11 +2216,7 @@ def main(argv: list[str] | None = None) -> int:
                         )
                 return 0 if matrix_result.ok else 1
             if args.repeat is not None:
-                if (
-                    len(args.inputs) != 1
-                    or args.inputs[0] == "-"
-                    or args.include
-                ):
+                if len(args.inputs) != 1 or args.inputs[0] == "-" or args.include:
                     raise ValueError("check --repeat requires exactly one FILE")
                 if args.lock_out is not None:
                     raise ValueError(
