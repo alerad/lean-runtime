@@ -218,6 +218,29 @@ def test_public_ilean_export_assigns_names_to_their_package_module(tmp_path: Pat
     assert namespace_roots == ("Example",)
 
 
+def test_public_ilean_export_omits_names_with_ambiguous_modules(tmp_path: Path) -> None:
+    root = tmp_path / "lib" / "lean"
+    first = root / "LakeMain.ilean"
+    second = root / "LeanChecker.ilean"
+    root.mkdir(parents=True)
+    first.write_text(
+        '{"module":"LakeMain","decls":{"main":{},"Lake.unique":{}}}',
+        encoding="utf-8",
+    )
+    second.write_text(
+        '{"module":"LeanChecker","decls":{"main":{},"Checker.unique":{}}}',
+        encoding="utf-8",
+    )
+
+    declarations, _module_roots, _namespace_roots = _declarations(root)
+
+    assert "main" not in declarations
+    assert declarations == {
+        "Checker.unique": "LeanChecker",
+        "Lake.unique": "LakeMain",
+    }
+
+
 def test_shard_identity_is_toolchain_conservative() -> None:
     source_id = "source_" + "a" * 64
     first = declaration_shard_identity(

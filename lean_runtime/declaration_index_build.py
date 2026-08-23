@@ -99,8 +99,8 @@ def _declarations(root: Path) -> tuple[dict[str, str], tuple[str, ...], tuple[st
     if not root.is_dir():
         raise EnvironmentError(f"compiled declaration root is unavailable: {root}")
     declarations: dict[str, str] = {}
+    ambiguous: set[str] = set()
     modules: set[str] = set()
-    namespace_roots: set[str] = set()
     ileans = tuple(sorted(root.rglob("*.ilean"), key=lambda item: item.as_posix()))
     if not ileans:
         raise EnvironmentError(f"compiled declaration root contains no .ilean files: {root}")
@@ -121,14 +121,17 @@ def _declarations(root: Path) -> tuple[dict[str, str], tuple[str, ...], tuple[st
                 component.startswith("_aux") for component in name.split(".")
             ):
                 continue
-            previous = declarations.setdefault(name, module)
-            if previous != module:
-                raise EnvironmentError(
-                    f"declaration {name!r} is attributed to both {previous!r} and {module!r}"
-                )
-            namespace_roots.add(name.split(".", 1)[0])
+            if name in ambiguous:
+                continue
+            previous = declarations.get(name)
+            if previous is not None and previous != module:
+                declarations.pop(name)
+                ambiguous.add(name)
+                continue
+            declarations[name] = module
     if not declarations:
         raise EnvironmentError(f"compiled declaration root produced no public names: {root}")
+    namespace_roots = {name.split(".", 1)[0] for name in declarations}
     return declarations, tuple(sorted(modules)), tuple(sorted(namespace_roots))
 
 
@@ -242,6 +245,17 @@ def build_declaration_index(
     )
     built: list[BuiltDeclarationShard] = []
     for package, source_id, subdir, root in roots:
+        # Some locked packages are build tools or otherwise contribute no
+        # compiled Lean declarations to this environment. They have no shard.
+        # Existing `.ilean` trees remain fail-closed in `_declarations` below.
+        if package != "core" and (not root.is_dir() or next(root.rglob("*.ilean"), None) is None):
+            runtime.events.emit(
+                "declaration_index.package_skipped",
+                "Skipping package with no compiled declarations",
+                package=package,
+                source_id=source_id,
+            )
+            continue
         shard_id = declaration_shard_identity(
             source_id=source_id,
             toolchain=lock.toolchain,
