@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.2.0 - 2026-08-23
+
 - Add a scheduled catalog-update workflow that detects a new stable Mathlib
   release, freezes its exact lock, rebuilds the bundled catalog, and opens a
   pull request.
