@@ -150,6 +150,27 @@ def test_proof_level_rejection_never_downloads_another_candidate(sample_catalog)
     assert any(item.code == "DISCOVERY_VERDICT_BOUNDED" for item in result.diagnostics)
 
 
+def test_proof_level_rejection_still_marches_through_offline_source_builds(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    # An offline plan acquires candidates by deliberate local source builds,
+    # not downloads, so a proof-level rejection keeps the full march: a newer
+    # candidate may reject what an older candidate legitimately compiles.
+    probe = FakeProbe(
+        {
+            "mathlib-new": execution(False, stderr="type mismatch"),
+            "mathlib-old": execution(True),
+        }
+    )
+    result = Discovery(
+        catalog=sample_catalog,
+        policy=DiscoveryPolicy(allow_download=False, allow_source_build=True),
+        probe=probe,
+    ).discover_and_check("import Mathlib\n")
+    assert result.status == "found"
+    assert result.selected_candidate is not None
+    assert result.selected_candidate.entry.id == "mathlib-old"
+    assert probe.opened == ["mathlib-new", "mathlib-old"]
+
+
 def test_identifier_rejection_keeps_marching_to_remote_candidates(sample_catalog) -> None:  # type: ignore[no-untyped-def]
     probe = FakeProbe(
         {

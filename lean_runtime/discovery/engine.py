@@ -176,8 +176,8 @@ def _rejection_verdict(
     - ``("module_unavailable", names)``: the source imports module roots that no
       planned candidate provides; every further attempt must fail identically.
     - ``("source_verdict", ())``: a proof-level failure (type mismatch,
-      unsolved goals, syntax); a second opinion is only worth already-local
-      environments, never a fresh download.
+      unsolved goals, syntax); a second opinion never justifies a fresh
+      download — only local environments or an offline plan's source builds.
     - ``("march", ())``: everything else — identifier-level failures, modules
       another candidate does provide, and unclassifiable output all keep the
       ordinary bounded march.
@@ -252,7 +252,8 @@ def discover(
     attempts: list[CandidateAttempt] = []
     remote_acquisitions = 0
     # Set once a proof-level rejection shows the source itself is the problem:
-    # remaining candidates are only worth a look when they are already local.
+    # remaining candidates are only worth a look when reaching them costs no
+    # download (already local, or an offline plan's deliberate source builds).
     local_candidates_only = False
     verdict_bounded_skips = 0
     for candidate in plan.planned_candidates:
@@ -283,7 +284,10 @@ def discover(
         candidate_is_local = any(
             reason.code == "RANK_LOCAL_AVAILABLE" for reason in candidate.reasons
         )
-        if local_candidates_only and not candidate_is_local:
+        # A proof-level rejection never justifies a *download*. Offline plans
+        # (allow_download=False) acquire candidates by deliberate local source
+        # builds, so their march is preserved in full.
+        if local_candidates_only and not candidate_is_local and plan.policy.allow_download:
             verdict_bounded_skips += 1
             continue
         if not candidate_is_local and remote_acquisitions >= plan.policy.max_remote_acquisitions:
