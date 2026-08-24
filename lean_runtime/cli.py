@@ -555,17 +555,31 @@ def _add_policy(
     parser: argparse.ArgumentParser, *, timeout: float = 120, hidden: bool = False
 ) -> None:
     option_help = argparse.SUPPRESS if hidden else None
-    parser.add_argument("--timeout", type=float, default=timeout, help=option_help)
-    parser.add_argument("--max-output", type=int, default=1_000_000, help=option_help)
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=timeout,
+        help=option_help or "wall-clock limit in seconds (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--max-output",
+        type=int,
+        default=1_000_000,
+        help=option_help or "captured output limit in bytes (default: %(default)s)",
+    )
     parser.add_argument("--memory", type=int, help=option_help or "memory limit in MiB")
     parser.add_argument("--cpu", type=int, help=option_help or "CPU time limit in seconds")
     parser.add_argument(
-        "--network", choices=("inherit", "disabled"), default="inherit", help=option_help
+        "--network",
+        choices=("inherit", "disabled"),
+        default="inherit",
+        help=option_help or "network access during execution (default: %(default)s)",
     )
 
 
-def _add_common_output(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--json", action="store_true")
+def _add_common_output(parser: argparse.ArgumentParser, *, json_flag: bool = True) -> None:
+    if json_flag:
+        parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument("--home", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     parser.add_argument(
         "--library",
@@ -580,49 +594,101 @@ def _add_common_output(parser: argparse.ArgumentParser) -> None:
         default=argparse.SUPPRESS,
         help=argparse.SUPPRESS,
     )
-    parser.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS)
-    parser.add_argument("--verbose", action="store_true", default=argparse.SUPPRESS)
-    parser.add_argument("--timings", action="store_true", default=argparse.SUPPRESS)
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="suppress progress messages",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="show detailed progress and failure output",
+    )
+    parser.add_argument(
+        "--timings",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print a phase timing breakdown to stderr",
+    )
 
 
 def _add_check_v4(parser: argparse.ArgumentParser, *, watch: bool = False) -> None:
-    parser.add_argument("inputs", nargs="*", metavar="PATH")
+    if watch:
+        parser.add_argument(
+            "inputs", nargs=1, metavar="FILE", help="the Lean file to re-check on change"
+        )
+    else:
+        parser.add_argument(
+            "inputs",
+            nargs="*",
+            metavar="PATH",
+            help="Lean files or directories; '-' reads stdin (default: the current project)",
+        )
     parser.add_argument(
         "--using",
         metavar="CONTEXT",
         help="override context inference with a project, lock, environment, toolchain, or package",
     )
-    parser.add_argument("--include", action="append", default=[], type=Path)
-    parser.add_argument("--offline", action="store_true")
-    parser.add_argument("--plan", action="store_true", help=argparse.SUPPRESS)
-    lock_options = parser.add_mutually_exclusive_group()
-    lock_options.add_argument(
-        "--write-lock",
-        dest="lock_out",
-        type=Path,
-        metavar="PATH",
-        help="write the exact environment selected by a successful standalone check",
-    )
-    lock_options.add_argument(
-        "--lock-out", dest="lock_out", type=Path, metavar="PATH", help=argparse.SUPPRESS
-    )
-    parser.add_argument("--no-source-build", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--allow-source-build",
-        action="store_true",
-        help="allow standalone discovery to build an environment from source",
-    )
-    parser.add_argument("--max-download", type=parse_byte_size, help=argparse.SUPPRESS)
-    _add_common_output(parser)
-    parser.add_argument("--repeat", type=int)
-    parser.add_argument("--warmup", type=int, default=1, help=argparse.SUPPRESS)
-    parser.add_argument("--matrix", nargs="?", const=Path("lean-runtime.matrix.toml"), type=Path)
-    parser.add_argument(
-        "--concurrency",
-        type=int,
-        default=max(1, os.cpu_count() or 1),
-        help=argparse.SUPPRESS,
-    )
+    if not watch:
+        parser.add_argument(
+            "--include",
+            action="append",
+            default=[],
+            type=Path,
+            metavar="FILE",
+            help="stage an extra file alongside the entrypoint "
+            "(repeatable; environment context only)",
+        )
+        parser.add_argument(
+            "--offline",
+            action="store_true",
+            help="use only locally available environments; never download",
+        )
+        parser.add_argument("--plan", action="store_true", help=argparse.SUPPRESS)
+        lock_options = parser.add_mutually_exclusive_group()
+        lock_options.add_argument(
+            "--write-lock",
+            dest="lock_out",
+            type=Path,
+            metavar="PATH",
+            help="write the exact environment selected by a successful standalone check",
+        )
+        lock_options.add_argument(
+            "--lock-out", dest="lock_out", type=Path, metavar="PATH", help=argparse.SUPPRESS
+        )
+        parser.add_argument("--no-source-build", action="store_true", help=argparse.SUPPRESS)
+        parser.add_argument(
+            "--allow-source-build",
+            action="store_true",
+            help="allow standalone discovery to build an environment from source",
+        )
+        parser.add_argument("--max-download", type=parse_byte_size, help=argparse.SUPPRESS)
+    _add_common_output(parser, json_flag=not watch)
+    if not watch:
+        parser.add_argument(
+            "--repeat",
+            type=int,
+            metavar="N",
+            help="check one file N times and report timing statistics",
+        )
+        parser.add_argument("--warmup", type=int, default=1, help=argparse.SUPPRESS)
+        parser.add_argument(
+            "--matrix",
+            nargs="?",
+            const=Path("lean-runtime.matrix.toml"),
+            type=Path,
+            metavar="FILE",
+            help="check one file across the contexts in a matrix file "
+            "(default: lean-runtime.matrix.toml)",
+        )
+        parser.add_argument(
+            "--concurrency",
+            type=int,
+            default=max(1, os.cpu_count() or 1),
+            help=argparse.SUPPRESS,
+        )
     _add_policy(parser, hidden=True)
     parser.set_defaults(
         command="check",
@@ -634,6 +700,23 @@ def _add_check_v4(parser: argparse.ArgumentParser, *, watch: bool = False) -> No
         project=None,
         toolchain=None,
     )
+    if watch:
+        # Watch keeps check's internal contract but never exposes flags it
+        # rejects (or silently ignores) at runtime.
+        parser.set_defaults(
+            include=[],
+            offline=False,
+            plan=False,
+            lock_out=None,
+            no_source_build=False,
+            allow_source_build=False,
+            max_download=None,
+            json=False,
+            repeat=None,
+            warmup=1,
+            matrix=None,
+            concurrency=1,
+        )
 
 
 def _configuration_defaults() -> dict[str, Any]:
@@ -764,12 +847,22 @@ Advanced namespaces:
     commands = root.add_subparsers(dest="surface_command", required=True, metavar="COMMAND")
 
     new = commands.add_parser("new", help="create a new Lean project")
-    new.add_argument("path", type=Path)
-    new.add_argument("--core", action="store_true")
-    new.add_argument("--offline", action="store_true")
-    new.add_argument("--yes", action="store_true")
-    new.add_argument("--no-agents", dest="agents", action="store_false", default=True)
-    new.add_argument("--ci", action="store_true")
+    new.add_argument("path", type=Path, help="directory to create the project in")
+    new.add_argument(
+        "--core", action="store_true", help="create a core Lean project without Mathlib"
+    )
+    new.add_argument(
+        "--offline", action="store_true", help="use only local artifacts; never download"
+    )
+    new.add_argument("--yes", action="store_true", help="create without a confirmation prompt")
+    new.add_argument(
+        "--no-agents",
+        dest="agents",
+        action="store_false",
+        default=True,
+        help="skip generating AGENTS.md",
+    )
+    new.add_argument("--ci", action="store_true", help="generate a GitHub Actions check workflow")
     _add_common_output(new)
     new.set_defaults(
         command="init",
@@ -782,9 +875,17 @@ Advanced namespaces:
     )
 
     adopt = commands.add_parser("adopt", help="adopt existing Lake project(s)")
-    adopt.add_argument("path", type=Path, nargs="?", default=Path.cwd())
-    adopt.add_argument("--yes", action="store_true")
-    adopt.add_argument("--dry-run", action="store_true")
+    adopt.add_argument(
+        "path",
+        type=Path,
+        nargs="?",
+        default=Path.cwd(),
+        help="Lake project or directory to scan (default: current directory)",
+    )
+    adopt.add_argument("--yes", action="store_true", help="adopt without a confirmation prompt")
+    adopt.add_argument(
+        "--dry-run", action="store_true", help="show the adoption plan without changing anything"
+    )
     _add_common_output(adopt)
     adopt.set_defaults(command="attach", recursive=None, execute=False)
 
@@ -794,14 +895,16 @@ Advanced namespaces:
     _add_check_v4(watch, watch=True)
 
     build = commands.add_parser("build", help="build the current Lake project")
-    build.add_argument("targets", nargs="*")
+    build.add_argument(
+        "targets", nargs="*", help="Lake build targets (default: the project's default targets)"
+    )
     build.add_argument(
         "--no-cache",
         dest="artifact_cache",
         action="store_false",
         help="skip dependency artifact restoration and build directly with Lake",
     )
-    build.add_argument("--json", action="store_true")
+    build.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     build.set_defaults(
         command="build",
         project=Path.cwd(),
@@ -812,51 +915,108 @@ Advanced namespaces:
     )
 
     update = commands.add_parser("update", help="update the current project safely")
-    update.add_argument("path", type=Path, nargs="?", default=Path.cwd())
-    update.add_argument("--yes", action="store_true")
-    update.add_argument("--dry-run", action="store_true")
-    update.add_argument("--offline", action="store_true")
+    update.add_argument(
+        "path",
+        type=Path,
+        nargs="?",
+        default=Path.cwd(),
+        help="project root (default: current directory)",
+    )
+    update.add_argument("--yes", action="store_true", help="apply without a confirmation prompt")
+    update.add_argument(
+        "--dry-run", action="store_true", help="show the update plan without applying it"
+    )
+    update.add_argument(
+        "--offline", action="store_true", help="use only local artifacts; never download"
+    )
     _add_common_output(update)
     update.set_defaults(command="update", seed_from=None, plan=False, max_download=None)
 
     publish = commands.add_parser("publish", help="configure publication for the current project")
-    publish.add_argument("path", type=Path, nargs="?", default=Path.cwd())
-    publish.add_argument("--yes", action="store_true")
-    publish.add_argument("--json", action="store_true")
+    publish.add_argument(
+        "path",
+        type=Path,
+        nargs="?",
+        default=Path.cwd(),
+        help="project root (default: current directory)",
+    )
+    publish.add_argument(
+        "--yes", action="store_true", help="configure without a confirmation prompt"
+    )
+    publish.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     publish.set_defaults(command="publish-project")
 
     status = commands.add_parser("status", help="explain the current project or context")
-    status.add_argument("subject", nargs="?", default=str(Path.cwd()))
-    status.add_argument("--json", action="store_true")
+    status.add_argument(
+        "subject",
+        nargs="?",
+        default=str(Path.cwd()),
+        help="project path, Lean file, lock file, or environment (default: current directory)",
+    )
+    status.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     status.set_defaults(command="status")
 
     verify = commands.add_parser("verify", help="verify a lock, environment, or artifact")
-    verify.add_argument("subject", nargs="?", default=str(Path.cwd()))
-    verify.add_argument("--offline", action="store_true")
-    verify.add_argument("--rebuild", action="store_true")
+    verify.add_argument(
+        "subject",
+        nargs="?",
+        default=str(Path.cwd()),
+        help="project, lock file, or environment to verify (default: current directory)",
+    )
+    verify.add_argument(
+        "--offline", action="store_true", help="verify without contacting registries"
+    )
+    verify.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="rebuild a published environment and compare content",
+    )
     _add_common_output(verify)
     verify.set_defaults(command="verify")
     doctor = commands.add_parser("doctor", help="diagnose and offer safe repairs")
-    doctor.add_argument("--yes", action="store_true")
-    doctor.add_argument("--json", action="store_true")
+    doctor.add_argument(
+        "--yes", action="store_true", help="apply safe repairs without a confirmation prompt"
+    )
+    doctor.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     doctor.set_defaults(command="doctor", fix=False)
     clean = commands.add_parser("clean", help="preview and reclaim unused storage")
-    clean.add_argument("--yes", action="store_true")
-    clean.add_argument("--dry-run", action="store_true")
-    clean.add_argument("--all", dest="include_downloads", action="store_true")
-    clean.add_argument("--minimum-age-hours", type=float, default=24 * 30)
+    clean.add_argument("--yes", action="store_true", help="remove without a confirmation prompt")
     clean.add_argument(
-        "--keep-last", type=int, default=int(os.environ.get("LEAN_RUNTIME_CLEAN_KEEP_LAST", "0"))
+        "--dry-run", action="store_true", help="show what would be removed without removing it"
+    )
+    clean.add_argument(
+        "--all",
+        dest="include_downloads",
+        action="store_true",
+        help="also remove unreferenced cached downloads",
+    )
+    clean.add_argument(
+        "--minimum-age-hours",
+        type=float,
+        default=24 * 30,
+        metavar="HOURS",
+        help="only remove environments unused for this long (default: %(default)s)",
+    )
+    clean.add_argument(
+        "--keep-last",
+        type=int,
+        default=int(os.environ.get("LEAN_RUNTIME_CLEAN_KEEP_LAST", "0")),
+        metavar="N",
+        help="always keep the N most recently used environments (default: %(default)s)",
     )
     _add_common_output(clean)
     clean.set_defaults(command="clean", execute=False)
 
     replay = commands.add_parser("replay", help="replay an execution capture")
-    replay.add_argument("capture", type=Path)
+    replay.add_argument(
+        "capture", type=Path, help="execution capture file produced by the capture API"
+    )
     _add_common_output(replay)
     replay.set_defaults(command="replay")
     completion = commands.add_parser("completion", help="generate shell completion")
-    completion.add_argument("shell", choices=("bash", "zsh", "fish"))
+    completion.add_argument(
+        "shell", choices=("bash", "zsh", "fish"), help="shell to generate a completion script for"
+    )
     completion.set_defaults(command="completion")
 
     env = commands.add_parser("env", help="exact immutable environments")
@@ -865,128 +1025,212 @@ Advanced namespaces:
     _add_common_output(env_list)
     env_list.set_defaults(command="environments")
     env_info = env_commands.add_parser("info", help="inspect an environment")
-    env_info.add_argument("environment")
-    env_info.add_argument("--packages", action="store_true")
-    env_info.add_argument("--explain", action="store_true")
+    env_info.add_argument("environment", help="environment name, id, or lock file")
+    env_info.add_argument("--packages", action="store_true", help="include the exact package locks")
+    env_info.add_argument("--explain", action="store_true", help="include resolution decisions")
     env_info.set_defaults(command="inspect")
     env_lock = env_commands.add_parser("lock", help="resolve a specification to an exact lock")
-    env_lock.add_argument("spec", type=Path)
-    env_lock.add_argument("--output", type=Path)
-    env_lock.add_argument("--timeout", type=float, default=900)
+    env_lock.add_argument("spec", type=Path, help="environment specification file")
+    env_lock.add_argument(
+        "--output", type=Path, help="write the lock to PATH (default: print JSON)"
+    )
+    env_lock.add_argument(
+        "--timeout",
+        type=float,
+        default=900,
+        help="resolution timeout in seconds (default: %(default)s)",
+    )
     env_lock.set_defaults(command="prepare")
     env_acquire = env_commands.add_parser("acquire", help="make an exact environment available")
-    env_acquire.add_argument("lock", type=Path)
-    env_acquire.add_argument("--name")
-    env_acquire.add_argument("--download-only", action="store_true")
-    env_acquire.add_argument("--timeout", type=float, default=1800)
-    env_acquire.add_argument("--accelerate", action="store_true")
+    env_acquire.add_argument("lock", type=Path, help="environment lock file")
+    env_acquire.add_argument("--name", help="register the environment under this name")
+    env_acquire.add_argument(
+        "--download-only",
+        action="store_true",
+        help="require published artifacts; never build from source",
+    )
+    env_acquire.add_argument(
+        "--timeout",
+        type=float,
+        default=1800,
+        help="build timeout in seconds (default: %(default)s)",
+    )
+    env_acquire.add_argument(
+        "--accelerate",
+        action="store_true",
+        help="use upstream artifact caches (e.g. Mathlib's) when building from source",
+    )
     env_acquire.set_defaults(command="acquire")
     env_diff = env_commands.add_parser("diff", help="compare exact environments")
-    env_diff.add_argument("left")
-    env_diff.add_argument("right")
+    env_diff.add_argument("left", help="first environment name, id, or lock file")
+    env_diff.add_argument("right", help="second environment name, id, or lock file")
     _add_common_output(env_diff)
     env_diff.set_defaults(command="compare")
     env_export = env_commands.add_parser("export", help="export a portable environment")
-    env_export.add_argument("environment")
-    env_export.add_argument("--output", required=True, type=Path)
+    env_export.add_argument("environment", help="environment name or id")
+    env_export.add_argument("--output", required=True, type=Path, help="destination archive path")
     env_export.set_defaults(command="copy-save")
     env_import = env_commands.add_parser("import", help="import a portable environment")
-    env_import.add_argument("copy", type=Path)
-    env_import.add_argument("--name")
-    env_import.add_argument("--no-probe", action="store_true")
+    env_import.add_argument("copy", type=Path, help="portable environment archive")
+    env_import.add_argument("--name", help="register the environment under this name")
+    env_import.add_argument(
+        "--no-probe", action="store_true", help="skip the post-import probe check"
+    )
     env_import.set_defaults(command="copy-open")
     env_publish = env_commands.add_parser("publish", help="publish one platform environment")
-    env_publish.add_argument("lock", nargs="?", type=Path)
-    env_publish.add_argument("--to", dest="publish_to", required=True)
-    env_publish.add_argument("--tag", action="append", default=[])
-    env_publish.add_argument("--name")
-    env_publish.add_argument("--timeout", type=float)
-    env_publish.add_argument("--platform-only", action="store_true")
-    env_publish.add_argument("--accelerate", action="store_true")
-    env_publish.add_argument("--sign", action="store_true")
-    env_publish.add_argument("--attest", action="store_true")
-    env_publish.add_argument("--check-access", action="store_true")
+    env_publish.add_argument(
+        "lock", nargs="?", type=Path, help="environment lock file (omit with --check-access)"
+    )
+    env_publish.add_argument(
+        "--to", dest="publish_to", required=True, metavar="LIBRARY", help="target OCI repository"
+    )
+    env_publish.add_argument(
+        "--tag", action="append", default=[], help="additional tag (repeatable)"
+    )
+    env_publish.add_argument("--name", help="register the built environment under this name")
+    env_publish.add_argument("--timeout", type=float, help="build and registry timeout in seconds")
+    env_publish.add_argument(
+        "--platform-only",
+        action="store_true",
+        help="publish this platform's content without finalizing a release",
+    )
+    env_publish.add_argument(
+        "--accelerate",
+        action="store_true",
+        help="use upstream artifact caches (e.g. Mathlib's) when building from source",
+    )
+    env_publish.add_argument("--sign", action="store_true", help="sign the publication with cosign")
+    env_publish.add_argument("--attest", action="store_true", help="attach a build attestation")
+    env_publish.add_argument(
+        "--check-access", action="store_true", help="verify registry credentials and exit"
+    )
     _add_common_output(env_publish)
     env_publish.set_defaults(command="publish-environment")
     env_finalize = env_commands.add_parser("finalize", help="finalize a platform matrix")
-    env_finalize.add_argument("lock_id")
-    env_finalize.add_argument("platform_results", nargs="+", type=Path)
-    env_finalize.add_argument("--library", required=True)
-    env_finalize.add_argument("--tag", action="append", default=[])
-    env_finalize.add_argument("--sign", action="store_true")
+    env_finalize.add_argument("lock_id", help="lock id shared by the platform publications")
+    env_finalize.add_argument(
+        "platform_results",
+        nargs="+",
+        type=Path,
+        help="result JSON files from `env publish --platform-only`",
+    )
+    env_finalize.add_argument("--library", required=True, help="target OCI repository")
+    env_finalize.add_argument(
+        "--tag", action="append", default=[], help="additional tag (repeatable)"
+    )
+    env_finalize.add_argument(
+        "--sign", action="store_true", help="sign the publication with cosign"
+    )
     env_finalize.set_defaults(command="finalize-environment")
 
     project = commands.add_parser("project", help="advanced mutable-project operations")
     pc = project.add_subparsers(dest="project_command", required=True)
-    pi = pc.add_parser("info")
-    pi.add_argument("path", type=Path, nargs="?", default=Path.cwd())
-    pi.add_argument("--module")
-    pi.add_argument("--check-remote", action="store_true")
+    project_path_help = "project root (default: current directory)"
+    pi = pc.add_parser("info", help="inspect a project and its publication readiness")
+    pi.add_argument("path", type=Path, nargs="?", default=Path.cwd(), help=project_path_help)
+    pi.add_argument("--module", help="select one import root")
+    pi.add_argument(
+        "--check-remote", action="store_true", help="probe the registry for published artifacts"
+    )
     _add_common_output(pi)
     pi.set_defaults(command="project", project_command="inspect")
-    ps = pc.add_parser("scan")
-    ps.add_argument("path", type=Path, nargs="?", default=Path.cwd())
+    ps = pc.add_parser("scan", help="register Lake projects under a directory")
+    ps.add_argument(
+        "path",
+        type=Path,
+        nargs="?",
+        default=Path.cwd(),
+        help="directory to scan (default: current directory)",
+    )
     _add_common_output(ps)
     ps.set_defaults(command="scan", recursive=True)
-    pshare = pc.add_parser("share")
-    pshare.add_argument("path", type=Path, nargs="?", default=Path.cwd())
-    pshare.add_argument("--yes", action="store_true")
-    pshare.add_argument("--dry-run", action="store_true")
+    pshare = pc.add_parser("share", help="share a project's dependencies through the store")
+    pshare.add_argument("path", type=Path, nargs="?", default=Path.cwd(), help=project_path_help)
+    pshare.add_argument("--yes", action="store_true", help="share without a confirmation prompt")
+    pshare.add_argument(
+        "--dry-run", action="store_true", help="show the sharing plan without changing anything"
+    )
     _add_common_output(pshare)
     pshare.set_defaults(command="attach", recursive=None, execute=False)
-    punshare = pc.add_parser("unshare")
-    punshare.add_argument("path", type=Path, nargs="?", default=Path.cwd())
-    punshare.add_argument("--yes", action="store_true")
-    punshare.add_argument("--dry-run", action="store_true")
+    punshare = pc.add_parser("unshare", help="materialize independent dependency copies")
+    punshare.add_argument("path", type=Path, nargs="?", default=Path.cwd(), help=project_path_help)
+    punshare.add_argument(
+        "--yes", action="store_true", help="unshare without a confirmation prompt"
+    )
+    punshare.add_argument(
+        "--dry-run", action="store_true", help="show the plan without changing anything"
+    )
     _add_common_output(punshare)
     punshare.set_defaults(command="detach", execute=False)
-    pl = pc.add_parser("lock")
-    pl.add_argument("path", type=Path, nargs="?", default=Path.cwd())
-    pl.add_argument("--module")
-    pl.add_argument("--output", type=Path)
-    pl.add_argument("--timeout", type=float, default=900)
+    pl = pc.add_parser("lock", help="resolve the project to an exact environment lock")
+    pl.add_argument("path", type=Path, nargs="?", default=Path.cwd(), help=project_path_help)
+    pl.add_argument("--module", help="select one import root")
+    pl.add_argument(
+        "--output", type=Path, help="lock destination (default: environment.lock.json in the root)"
+    )
+    pl.add_argument(
+        "--timeout",
+        type=float,
+        default=900,
+        help="resolution timeout in seconds (default: %(default)s)",
+    )
     pl.set_defaults(command="project")
-    pe = pc.add_parser("export")
-    pe.add_argument("path", type=Path, nargs="?", default=Path.cwd())
-    pe.add_argument("--module")
-    pe.add_argument("--output", type=Path, required=True)
-    pe.add_argument("--timeout", type=float, default=1800)
-    pe.add_argument("--no-accelerate", action="store_true")
+    pe = pc.add_parser("export", help="export the project as a portable environment")
+    pe.add_argument("path", type=Path, nargs="?", default=Path.cwd(), help=project_path_help)
+    pe.add_argument("--module", help="select one import root")
+    pe.add_argument("--output", type=Path, required=True, help="destination archive path")
+    pe.add_argument(
+        "--timeout",
+        type=float,
+        default=1800,
+        help="build timeout in seconds (default: %(default)s)",
+    )
+    pe.add_argument(
+        "--no-accelerate", action="store_true", help="build without upstream artifact caches"
+    )
     pe.set_defaults(command="project")
 
     toolchain = commands.add_parser("toolchain", help="advanced toolchain management")
     tc = toolchain.add_subparsers(dest="toolchain_operation", required=True)
-    tl = tc.add_parser("list")
+    toolchain_help = "toolchain name, e.g. leanprover/lean4:v4.33.0"
+    tl = tc.add_parser("list", help="list available toolchains")
     _add_common_output(tl)
     tl.set_defaults(command="toolchain-list")
-    tinfo = tc.add_parser("info")
-    tinfo.add_argument("toolchain")
+    tinfo = tc.add_parser("info", help="show one toolchain's capabilities")
+    tinfo.add_argument("toolchain", help=toolchain_help)
     _add_common_output(tinfo)
     tinfo.set_defaults(command="toolchain-info")
-    ti = tc.add_parser("install")
-    ti.add_argument("toolchain")
+    ti = tc.add_parser("install", help="install a full toolchain")
+    ti.add_argument("toolchain", help=toolchain_help)
     ti.set_defaults(command="toolchain-install")
-    to = tc.add_parser("optimize")
-    to.add_argument("toolchain")
-    to.add_argument("--prune-original", action="store_true")
+    to = tc.add_parser("optimize", help="materialize a slim check-only toolchain")
+    to.add_argument("toolchain", help=toolchain_help)
+    to.add_argument(
+        "--prune-original", action="store_true", help="remove the full toolchain after slimming"
+    )
     to.set_defaults(command="toolchain-slim")
-    tp = tc.add_parser("publish")
-    tp.add_argument("toolchain")
-    tp.add_argument("--library", required=True)
+    tp = tc.add_parser("publish", help="publish this platform's toolchain to a library")
+    tp.add_argument("toolchain", help=toolchain_help)
+    tp.add_argument("--library", required=True, help="target OCI repository")
     tp.set_defaults(command="publish-toolchain")
-    tf = tc.add_parser("finalize")
-    tf.add_argument("toolchain")
-    tf.add_argument("platform_results", nargs="+", type=Path)
-    tf.add_argument("--library", required=True)
-    tf.add_argument("--sign", action="store_true")
+    tf = tc.add_parser("finalize", help="finalize a toolchain across platforms")
+    tf.add_argument("toolchain", help=toolchain_help)
+    tf.add_argument(
+        "platform_results",
+        nargs="+",
+        type=Path,
+        help="result JSON files from `toolchain publish`",
+    )
+    tf.add_argument("--library", required=True, help="target OCI repository")
+    tf.add_argument("--sign", action="store_true", help="sign the publication with cosign")
     tf.set_defaults(command="finalize-toolchain")
 
     storage = commands.add_parser("storage", help="storage inspection and maintenance")
     sc = storage.add_subparsers(dest="storage_command", required=True)
-    su = sc.add_parser("usage")
+    su = sc.add_parser("usage", help="report store contents and sizes")
     _add_common_output(su)
     su.set_defaults(command="storage", verify=False)
-    sv = sc.add_parser("verify")
+    sv = sc.add_parser("verify", help="verify the storage ledger against disk")
     _add_common_output(sv)
     sv.set_defaults(command="storage", verify=True)
 
@@ -994,72 +1238,87 @@ Advanced namespaces:
     # under their object namespaces instead of polluting the daily surface.
     program = commands.add_parser("program", help="ready-to-run programs")
     pr = program.add_subparsers(dest="program_operation", required=True)
-    pcreate = pr.add_parser("create")
-    pcreate.add_argument("payload", type=Path)
-    pcreate.add_argument("--command", dest="program_command", nargs="+", required=True)
-    pcreate.add_argument("--source-revision", required=True)
-    pcreate.add_argument("--source-environment-id")
-    pcreate.add_argument("--source-lock-id")
-    pcreate.add_argument("--toolchain", default="unknown")
-    pcreate.add_argument("--capability-id")
-    pcreate.add_argument("--provenance-file", type=Path)
+    pcreate = pr.add_parser("create", help="package a payload as a ready-to-run program")
+    pcreate.add_argument("payload", type=Path, help="program payload directory or archive")
+    pcreate.add_argument(
+        "--command",
+        dest="program_command",
+        nargs="+",
+        required=True,
+        help="command line to run inside the program",
+    )
+    pcreate.add_argument("--source-revision", required=True, help="source revision to record")
+    pcreate.add_argument("--source-environment-id", help="environment id to record as provenance")
+    pcreate.add_argument("--source-lock-id", help="lock id to record as provenance")
+    pcreate.add_argument(
+        "--toolchain", default="unknown", help="toolchain to record (default: %(default)s)"
+    )
+    pcreate.add_argument("--capability-id", help="capability id to record")
+    pcreate.add_argument(
+        "--provenance-file", type=Path, help="JSON string object of extra provenance"
+    )
     pcreate.set_defaults(command="program-create")
-    pinfo = pr.add_parser("info")
-    pinfo.add_argument("program_id")
+    pinfo = pr.add_parser("info", help="describe a program")
+    pinfo.add_argument("program_id", help="program id")
     pinfo.set_defaults(command="program-info")
-    prun = pr.add_parser("run")
-    prun.add_argument("program_id")
-    prun.add_argument("arguments", nargs="*")
+    prun = pr.add_parser("run", help="run a program interactively over stdin")
+    prun.add_argument("program_id", help="program id")
+    prun.add_argument("arguments", nargs="*", help="extra arguments appended to its command")
     prun.set_defaults(command="program-run")
-    pexport = pr.add_parser("export")
-    pexport.add_argument("program_id")
-    pexport.add_argument("--output", required=True, type=Path)
+    pexport = pr.add_parser("export", help="export a portable program copy")
+    pexport.add_argument("program_id", help="program id")
+    pexport.add_argument("--output", required=True, type=Path, help="destination archive path")
     pexport.set_defaults(command="program-save")
-    pimport = pr.add_parser("import")
-    pimport.add_argument("copy", type=Path)
+    pimport = pr.add_parser("import", help="import a portable program copy")
+    pimport.add_argument("copy", type=Path, help="portable program archive")
     pimport.set_defaults(command="program-open")
-    pacquire = pr.add_parser("acquire")
-    pacquire.add_argument("library")
-    pacquire.add_argument("reference")
-    pacquire.add_argument("--source-revision")
+    pacquire = pr.add_parser("acquire", help="download a published program")
+    pacquire.add_argument("library", help="source OCI repository")
+    pacquire.add_argument("reference", help="published tag or digest")
+    pacquire.add_argument("--source-revision", help="require this recorded source revision")
     pacquire.set_defaults(command="program-download")
-    ppub = pr.add_parser("publish")
-    ppub.add_argument("program_id")
-    ppub.add_argument("--library", required=True)
-    ppub.add_argument("--tag", action="append", default=[])
-    ppub.add_argument("--sign", action="store_true")
+    ppub = pr.add_parser("publish", help="publish a program to a library")
+    ppub.add_argument("program_id", help="program id")
+    ppub.add_argument("--library", required=True, help="target OCI repository")
+    ppub.add_argument("--tag", action="append", default=[], help="additional tag (repeatable)")
+    ppub.add_argument("--sign", action="store_true", help="sign the publication with cosign")
     ppub.set_defaults(command="publish-program")
-    pfinal = pr.add_parser("finalize")
-    pfinal.add_argument("source_revision")
-    pfinal.add_argument("computer_results", nargs="+", type=Path)
-    pfinal.add_argument("--library", required=True)
-    pfinal.add_argument("--tag", action="append", default=[])
-    pfinal.add_argument("--sign", action="store_true")
+    pfinal = pr.add_parser("finalize", help="finalize a program across computers")
+    pfinal.add_argument("source_revision", help="source revision shared by the publications")
+    pfinal.add_argument(
+        "computer_results",
+        nargs="+",
+        type=Path,
+        help="result JSON files from `program publish`",
+    )
+    pfinal.add_argument("--library", required=True, help="target OCI repository")
+    pfinal.add_argument("--tag", action="append", default=[], help="additional tag (repeatable)")
+    pfinal.add_argument("--sign", action="store_true", help="sign the publication with cosign")
     pfinal.set_defaults(command="finalize-program")
     declaration_index = commands.add_parser(
         "declaration-index", help="build and publish composable declaration shards"
     )
     di = declaration_index.add_subparsers(dest="declaration_index_operation", required=True)
-    dib = di.add_parser("build")
-    dib.add_argument("lock", type=Path)
-    dib.add_argument("--output", required=True, type=Path)
-    dib.add_argument("--weights", type=Path)
+    dib = di.add_parser("build", help="build declaration shards for a lock")
+    dib.add_argument("lock", type=Path, help="environment lock file")
+    dib.add_argument("--output", required=True, type=Path, help="destination build directory")
+    dib.add_argument("--weights", type=Path, help="declaration weights file")
     dib.set_defaults(command="declaration-index-build")
-    dip = di.add_parser("publish")
-    dip.add_argument("lock", type=Path)
-    dip.add_argument("build", type=Path)
-    dip.add_argument("--library", required=True)
-    dip.add_argument("--sign", action="store_true")
+    dip = di.add_parser("publish", help="publish built shards to a library")
+    dip.add_argument("lock", type=Path, help="environment lock file")
+    dip.add_argument("build", type=Path, help="build directory from `declaration-index build`")
+    dip.add_argument("--library", required=True, help="target OCI repository")
+    dip.add_argument("--sign", action="store_true", help="sign the publication with cosign")
     dip.set_defaults(command="declaration-index-publish")
-    dii = di.add_parser("inspect")
-    dii.add_argument("build", type=Path)
-    dii.add_argument("--resolve")
+    dii = di.add_parser("inspect", help="summarize a build and resolve names")
+    dii.add_argument("build", type=Path, help="build directory from `declaration-index build`")
+    dii.add_argument("--resolve", metavar="NAME", help="look up one declaration name")
     dii.set_defaults(command="declaration-index-inspect")
     catalog = commands.add_parser("catalog", help="catalog maintenance")
     cc = catalog.add_subparsers(dest="catalog_operation", required=True)
-    cb = cc.add_parser("build")
-    cb.add_argument("manifest", type=Path)
-    cb.add_argument("--output", required=True, type=Path)
+    cb = cc.add_parser("build", help="build a discovery catalog from a manifest")
+    cb.add_argument("manifest", type=Path, help="catalog manifest file")
+    cb.add_argument("--output", required=True, type=Path, help="destination catalog file")
     cb.add_argument(
         "--previous",
         type=Path,

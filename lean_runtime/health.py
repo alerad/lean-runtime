@@ -19,6 +19,9 @@ from .toolchains import ToolchainManager
 
 CheckStatus = Literal["pass", "warning", "fail"]
 LEGACY_SCRATCH_MINIMUM_AGE_SECONDS = 24 * 3600
+# Doctor flags environments sooner than `clean` acts by default (30 days), so
+# the referral must carry the matching --minimum-age-hours to stay consistent.
+STALE_ENVIRONMENT_AGE_HOURS = 7 * 24
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +108,7 @@ def diagnose(toolchains: ToolchainManager, store: EnvironmentStore) -> DoctorRep
     else:
         checks.append(DoctorCheck("scratch", "pass", "No abandoned workspaces"))
     store_status = store.status()
-    cutoff = datetime.now(timezone.utc).timestamp() - 7 * 24 * 3600
+    cutoff = datetime.now(timezone.utc).timestamp() - STALE_ENVIRONMENT_AGE_HOURS * 3600
     stale = tuple(
         usage
         for usage in store_status.environment_usage
@@ -120,7 +123,9 @@ def diagnose(toolchains: ToolchainManager, store: EnvironmentStore) -> DoctorRep
                 "cleanup",
                 "warning",
                 f"{reclaimable // (1024**2)} MiB reclaimable from "
-                f"{len(stale)} environment(s) unused for 7d",
+                f"{len(stale)} environment(s) unused for 7d; preview with "
+                "`lean-runtime clean --dry-run "
+                f"--minimum-age-hours {STALE_ENVIRONMENT_AGE_HOURS}`",
             )
         )
     else:
