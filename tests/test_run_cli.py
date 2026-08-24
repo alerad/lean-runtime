@@ -234,6 +234,7 @@ def test_lean_run_preserves_discovered_compiler_rejection(
 
     class Rejected:
         status = "not_found"
+        outcome = "inconclusive"
         completion = "candidate_limit"
         execution_result = None
         rejection_attempt = Attempt()
@@ -570,3 +571,30 @@ def test_lean_run_reports_a_hit_timeout_as_policy_failure(
     monkeypatch.setattr("lean_runtime.run_cli.Runtime", TimedOutRuntime)
     assert main([str(source), "--toolchain", "leanprover/lean4:v4.32.0"]) == 2
     assert "timed out" in capsys.readouterr().out
+
+
+def test_discovery_summary_is_suppressed_for_a_settled_rejection() -> None:
+    from types import SimpleNamespace
+
+    from lean_runtime.run_cli import _discovery_summary
+
+    plan = SimpleNamespace(planned_candidates=(1, 2), candidates=(1, 2))
+    settled = SimpleNamespace(
+        outcome="source_rejected",
+        completion="complete",
+        attempts=(1,),
+        plan=plan,
+        duration_seconds=1.5,
+    )
+    assert _discovery_summary(settled) is None
+    bounded = SimpleNamespace(
+        outcome="source_rejected",
+        completion="candidate_limit",
+        attempts=(1,),
+        plan=plan,
+        duration_seconds=1.5,
+    )
+    summary = _discovery_summary(bounded)
+    assert summary is not None
+    assert "candidate limit reached" in summary
+    assert "1 planned candidate(s) untried" in summary

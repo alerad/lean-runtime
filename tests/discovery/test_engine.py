@@ -89,14 +89,39 @@ class FakeProbe:
         return ProbeOutcome(environment_id=acquired.environment_id, execution_result=outcome)
 
 
+def _with_local(plan, *entry_ids: str):  # type: ignore[no-untyped-def]
+    """Mark selected candidates as locally materialized without reordering."""
+    from lean_runtime.discovery.candidate import CandidateReason
+
+    return replace(
+        plan,
+        candidates=tuple(
+            replace(
+                candidate,
+                reasons=(
+                    *candidate.reasons,
+                    CandidateReason("RANK_LOCAL_AVAILABLE", "environment is local"),
+                ),
+            )
+            if candidate.entry.id in entry_ids
+            else candidate
+            for candidate in plan.candidates
+        ),
+    )
+
+
 def test_first_rejection_second_compilation_is_authoritative(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    # A proof-level rejection bounds the march to already-local candidates;
+    # a local second compilation remains the authoritative rescue.
     probe = FakeProbe(
         {
             "mathlib-new": execution(False, stderr="type mismatch"),
             "mathlib-old": execution(True),
         }
     )
-    result = Discovery(catalog=sample_catalog, probe=probe).discover_and_check("import Mathlib\n")
+    discovery = Discovery(catalog=sample_catalog, probe=probe)
+    plan = _with_local(discovery.plan("import Mathlib\n"), "mathlib-old")
+    result = engine.discover("import Mathlib\n", plan, probe)
     assert result.status == "found"
     assert result.confidence == "compiled"
     assert result.selected_candidate is not None
@@ -108,6 +133,65 @@ def test_first_rejection_second_compilation_is_authoritative(sample_catalog) -> 
     Draft202012Validator(json.loads(schema_path("result-v1.schema.json").read_text())).validate(
         result.to_dict()
     )
+
+
+def test_proof_level_rejection_never_downloads_another_candidate(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    probe = FakeProbe(
+        {
+            "mathlib-new": execution(False, stderr="unsolved goals\n⊢ False"),
+            "mathlib-old": execution(True),
+        }
+    )
+    result = Discovery(catalog=sample_catalog, probe=probe).discover_and_check("import Mathlib\n")
+    assert result.status == "not_found"
+    assert result.outcome == "source_rejected"
+    assert result.completion == "complete"
+    assert probe.opened == ["mathlib-new"]
+    assert any(item.code == "DISCOVERY_VERDICT_BOUNDED" for item in result.diagnostics)
+
+
+def test_identifier_rejection_keeps_marching_to_remote_candidates(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    probe = FakeProbe(
+        {
+            "mathlib-new": execution(False, stderr="unknown constant 'List.nthLe'"),
+            "mathlib-old": execution(True),
+        }
+    )
+    result = Discovery(catalog=sample_catalog, probe=probe).discover_and_check("import Mathlib\n")
+    assert result.status == "found"
+    assert result.selected_candidate is not None
+    assert result.selected_candidate.entry.id == "mathlib-old"
+    assert probe.opened == ["mathlib-new", "mathlib-old"]
+
+
+def test_module_missing_everywhere_stops_after_one_candidate(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    probe = FakeProbe(
+        {
+            "mathlib-new": execution(False, stderr="unknown module prefix 'ConstantsEmbedding'"),
+            "mathlib-old": execution(True),
+        }
+    )
+    result = Discovery(catalog=sample_catalog, probe=probe).discover_and_check("import Mathlib\n")
+    assert result.status == "not_found"
+    assert result.outcome == "source_rejected"
+    assert result.completion == "complete"
+    assert probe.opened == ["mathlib-new"]
+    assert result.diagnostics[0].code == "DISCOVERY_MODULE_UNAVAILABLE"
+    assert "ConstantsEmbedding" in result.diagnostics[0].detail
+
+
+def test_module_provided_by_another_candidate_keeps_marching(sample_catalog) -> None:  # type: ignore[no-untyped-def]
+    probe = FakeProbe(
+        {
+            "mathlib-new": execution(False, stderr="unknown module 'Mathlib.Legacy'"),
+            "mathlib-old": execution(True),
+        }
+    )
+    result = Discovery(catalog=sample_catalog, probe=probe).discover_and_check("import Mathlib\n")
+    assert result.status == "found"
+    assert result.selected_candidate is not None
+    assert result.selected_candidate.entry.id == "mathlib-old"
+    assert probe.opened == ["mathlib-new", "mathlib-old"]
 
 
 def test_candidate_budget_never_opens_bounded_candidate(sample_catalog) -> None:  # type: ignore[no-untyped-def]
