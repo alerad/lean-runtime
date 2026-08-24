@@ -214,6 +214,7 @@ class ProjectExecutor:
                 project=provenance,
                 packages=context.package_provenance(),
                 logical_command=("lake", "env", "lean", relative),
+                environment=self.runtime.toolchains.environment_for(context.toolchain),
                 cancel=cancel,
             )
 
@@ -260,6 +261,7 @@ class ProjectExecutor:
                     packages=context.package_provenance(),
                     logical_command=("lake", "env", "lean", safe_filename),
                     path_map={relative: safe_filename, str(source_path): safe_filename},
+                    environment=self.runtime.toolchains.environment_for(context.toolchain),
                     cancel=cancel,
                 )
 
@@ -349,6 +351,10 @@ class ProjectExecutor:
         shared: bool | None = None,
         restore_artifacts: bool = False,
     ) -> ExecutionResult:
+        # Shared preparation may select compiled donors before Lake is invoked.
+        # Establish the exact full build toolchain first so the entire operation,
+        # including nested Lake/Lean subprocesses, has one toolchain boundary.
+        self.runtime.toolchains.ensure_full(context.toolchain, cancel=cancel)
         selected_shared = project_sharing_enabled(context.root) if shared is None else shared
         workspace = (
             self.runtime.shared_projects.prepare(context, cancel=cancel)
@@ -501,7 +507,7 @@ class ProjectExecutor:
             process = subprocess.run(
                 command,
                 cwd=context.root,
-                env=self.runtime.toolchains.environment,
+                env=self.runtime.toolchains.environment_for(context.toolchain),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

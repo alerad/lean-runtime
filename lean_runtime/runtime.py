@@ -1531,7 +1531,7 @@ class Runtime:
             process = subprocess.run(
                 command,
                 cwd=context.root,
-                env=self.toolchains.environment,
+                env=self.toolchains.environment_for(context.toolchain),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -2210,12 +2210,7 @@ class Runtime:
                 plan.project_name or target.name,
                 "lib",
             )
-            environment_for = getattr(self.toolchains, "environment_for", None)
-            command_environment = (
-                environment_for(plan.toolchain)
-                if callable(environment_for)
-                else self.toolchains.environment
-            )
+            command_environment = self.toolchains.environment_for(plan.toolchain)
             process = subprocess.run(
                 command,
                 cwd=staging,
@@ -2576,6 +2571,9 @@ class Runtime:
                 source_digest=sha256_text(source),
                 policy=policy,
                 path_map={str(source_path): safe_filename},
+                environment=(
+                    self.toolchains.environment_for(selected) if project_root is not None else None
+                ),
                 cancel=cancel,
             )
 

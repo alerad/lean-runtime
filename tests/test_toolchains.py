@@ -120,6 +120,41 @@ def test_existing_user_elan_toolchain_is_reused_read_only(
         manager.prune_original(toolchain)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="uses POSIX executable test fixtures")
+def test_selected_full_toolchain_controls_nested_lake_and_lean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = ToolchainManager(tmp_path / "runtime")
+    toolchain = "leanprover/lean4:v4.33.0"
+    selected = manager._elan_toolchain_dir(toolchain) / "bin"
+    selected.mkdir(parents=True)
+    lean = selected / "lean"
+    lean.write_text("#!/bin/sh\nprintf 'selected lean\\n'\n")
+    lean.chmod(0o755)
+    lake = selected / "lake"
+    lake.write_text('#!/bin/sh\nprintf \'%s\\n\' "$(command -v lake)" "$(command -v lean)"\nlean\n')
+    lake.chmod(0o755)
+
+    wrong = tmp_path / "wrong" / "bin"
+    wrong.mkdir(parents=True)
+    for name in ("lake", "lean"):
+        executable = wrong / name
+        executable.write_text(f"#!/bin/sh\nprintf 'wrong {name}\\n'\n")
+        executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(wrong))
+
+    process = subprocess.run(
+        manager.command(toolchain, "lake"),
+        env=manager.environment_for(toolchain),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert process.returncode == 0
+    assert process.stdout.splitlines() == [str(lake), str(lean), "selected lean"]
+
+
 def test_package_manager_elan_uses_the_default_user_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

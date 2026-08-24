@@ -160,7 +160,7 @@ class LakeArtifactCache:
         try:
             process = subprocess.run(
                 self.toolchains.command(toolchain, "lake", *arguments),
-                env=self.toolchains.environment,
+                env=self.toolchains.environment_for(toolchain),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -183,7 +183,7 @@ class LakeArtifactCache:
 
     def environment(self, context: ProjectContext) -> dict[str, str]:
         """Return root-only cache settings without caching dependency packages."""
-        environment = self.toolchains.environment
+        environment = self.toolchains.environment_for(context.toolchain)
         if not self.project_opted_in(context):
             return environment
         self.capabilities(context.toolchain)

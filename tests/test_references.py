@@ -78,6 +78,9 @@ def _commit_lean_dsl_package(path: Path) -> str:
 class _TranslatingToolchains:
     environment: dict[str, str] = {}
 
+    def environment_for(self, _toolchain: str) -> dict[str, str]:
+        return self.environment
+
     def command(self, toolchain: str, executable: str, *args: str) -> list[str]:
         assert toolchain == "leanprover/lean4:v4.32.2"
         assert executable == "lake"

@@ -101,7 +101,7 @@ def _lake_metadata(path: Path, toolchain: str, runtime: Runtime) -> tuple[str, t
             process = subprocess.run(
                 command,
                 cwd=path,
-                env=runtime.toolchains.environment,
+                env=runtime.toolchains.environment_for(toolchain),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
