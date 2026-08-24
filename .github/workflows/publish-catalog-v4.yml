@@ -8,6 +8,11 @@ on:
         required: true
         default: all
         type: string
+      rebuild:
+        description: Build from source even when a remote artifact exists
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -88,7 +93,16 @@ jobs:
           # Existing entries reuse their downloadable full environment. A new
           # catalog entry has no remote artifact yet, so auto falls back to its
           # exact source lock and creates the publication input in this run.
-          lean-runtime --home "$runtime_home" --availability auto \
+          # `rebuild` skips remote reuse entirely: an environment restored from
+          # check-capsule frames lacks the authoritative import inventories a
+          # publication input needs, so repairing a capsule-only lock must
+          # build from source.
+          if [[ "${{ inputs.rebuild }}" == "true" ]]; then
+            availability=local
+          else
+            availability=auto
+          fi
+          lean-runtime --home "$runtime_home" --availability "$availability" \
             --library "$LIBRARY" env acquire "$LOCK_PATH" --name publisher \
             --timeout 7200 --accelerate
           lean-runtime --home "$runtime_home" --availability local \
