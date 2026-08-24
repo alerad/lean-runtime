@@ -2002,6 +2002,10 @@ def main(argv: list[str] | None = None) -> int:
                 name=args.name,
                 build_timeout=args.timeout,
                 accelerate=args.accelerate,
+                # Acquire means the whole environment: demanding the root
+                # module keeps a sparse capsule from satisfying it with an
+                # empty closure that only looks ready.
+                import_roots=(ROOT_MODULE,),
             )
             _json(environment.inspect().to_dict())
             if args.timings:

@@ -17,6 +17,7 @@ import pytest
 
 from lean_runtime import (
     DownloadLimitExceeded,
+    DownloadUnavailable,
     EnvironmentError,
     EnvironmentLock,
     LockedPackage,
@@ -522,6 +523,8 @@ def test_sparse_oci_pull_downloads_only_the_import_closure(tmp_path: Path) -> No
         plan = cache.plan_capsule(lock, ("B",))
         assert set(consumer.store.cas_artifacts.iterdir()) == before
         assert plan.modules == ("A", "B")
+        with pytest.raises(DownloadUnavailable, match="does not provide module"):
+            cache.plan_capsule(lock, ("LeanRuntimeEnvironment",))
         cache.pull_capsule(lock, ("B",))
         progress = [event for event in events if event.kind == "library.layer_progress"]
         assert [(event.data["frame_current"], event.data["frame_total"]) for event in progress] == [
