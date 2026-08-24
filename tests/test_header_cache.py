@@ -302,7 +302,10 @@ def test_shared_builds_record_workspace_lock_timing(tmp_path: Path) -> None:
         yield
 
     runtime = SimpleNamespace(
-        toolchains=SimpleNamespace(command=lambda _toolchain, *args: list(args)),
+        toolchains=SimpleNamespace(
+            command=lambda _toolchain, *args: list(args),
+            ensure_full=lambda _toolchain, cancel=None: None,
+        ),
         lake_cache=SimpleNamespace(environment=lambda _context: None),
         shared_projects=SimpleNamespace(
             prepare=lambda _context, cancel=None: SimpleNamespace(

@@ -14,10 +14,17 @@ class ProbeToolchains:
     def __init__(self, home: Path) -> None:
         self.home = home
         self.calls: list[tuple[str, ...]] = []
+        self.environment_calls: list[str] = []
 
     @property
     def environment(self) -> dict[str, str]:
         return os.environ.copy()
+
+    def environment_for(self, toolchain: str) -> dict[str, str]:
+        self.environment_calls.append(toolchain)
+        environment = self.environment
+        environment["LEAN_RUNTIME_SELECTED_TOOLCHAIN"] = toolchain
+        return environment
 
     def command(self, _toolchain: str, executable: str, *args: str) -> list[str]:
         self.calls.append((executable, *args))
@@ -46,6 +53,7 @@ def test_capability_probe_is_persistent_and_warm_load_is_silent(tmp_path: Path) 
 
     assert observed.supported
     assert len(toolchains.calls) == 2
+    assert toolchains.environment_calls == ["4.33.0", "4.33.0"]
     assert [event.kind for event in events] == [
         "lake_cache.capability_probe_started",
         "lake_cache.capability_probe_finished",
@@ -65,6 +73,7 @@ def test_root_only_environment_is_opt_in_and_abi_keyed(tmp_path: Path, monkeypat
 
     environment = cache.environment(context)
 
+    assert environment["LEAN_RUNTIME_SELECTED_TOOLCHAIN"] == context.toolchain
     assert environment["LAKE_ARTIFACT_CACHE"] == "false"
     assert environment["LAKE_RESTORE_ARTIFACTS"] == "true"
     assert environment["LAKE_CACHE_DIR"] == str(cache.cache_root(context.toolchain))

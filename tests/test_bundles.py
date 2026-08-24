@@ -649,6 +649,9 @@ class _FakeToolchains:
     def environment(self) -> dict[str, str]:
         return os.environ.copy()
 
+    def environment_for(self, _toolchain: str) -> dict[str, str]:
+        return self.environment
+
     def command(self, _toolchain: str, _executable: str, *_args: str) -> list[str]:
         return [sys.executable, "-c", "raise SystemExit(0)"]
 

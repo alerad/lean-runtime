@@ -102,8 +102,12 @@ class ToolchainManager:
         env = self.environment
         name = normalize_toolchain(toolchain)
         full = self._full_toolchain_dir(name)
-        if (full / "bin" / "lean").is_file():
-            env["PATH"] = os.pathsep.join((str(full / "bin"), env.get("PATH", "")))
+        lean = full / "bin" / "lean"
+        if os.name == "nt":
+            lean = lean.with_suffix(".exe")
+        if not lean.is_file():
+            raise ToolchainError(f"full toolchain is unavailable: {name}")
+        env["PATH"] = os.pathsep.join((str(full / "bin"), env.get("PATH", "")))
         return env
 
     def elan_path(self, *, bootstrap: bool = True) -> Path:
@@ -407,7 +411,7 @@ class ToolchainManager:
         A full Elan installation is preferred; when only a verified slim copy
         remains, its executables are invoked directly.
         """
-        name = self.ensure(toolchain)
+        name = self.ensure_full(toolchain) if executable == "lake" else self.ensure(toolchain)
         full = self._full_toolchain_dir(name)
         full_lean = full / "bin" / "lean"
         if os.name == "nt":
@@ -422,15 +426,12 @@ class ToolchainManager:
                     "reinstall the full toolchain for this operation"
                 )
             return [str(binary), *args]
-        external = self._user_toolchain_dir(name)
-        if external is not None and full == external:
-            binary = external / "bin" / executable
-            if os.name == "nt":
-                binary = binary.with_suffix(".exe")
-            if not binary.is_file():
-                raise ToolchainError(f"toolchain {name!r} does not provide {executable!r}")
-            return [str(binary), *args]
-        return [str(self.elan_path()), "run", name, executable, *args]
+        binary = full / "bin" / executable
+        if os.name == "nt":
+            binary = binary.with_suffix(".exe")
+        if not binary.is_file():
+            raise ToolchainError(f"toolchain {name!r} does not provide {executable!r}")
+        return [str(binary), *args]
 
     def executable_digest(self, toolchain: str, executable: str) -> str:
         """Hash the exact resolved executable for compatibility-cache identities."""

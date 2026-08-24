@@ -32,6 +32,9 @@ class FakeToolchains:
     def environment(self) -> dict[str, str]:
         return os.environ.copy()
 
+    def environment_for(self, _toolchain: str) -> dict[str, str]:
+        return self.environment
+
     def ensure(self, toolchain: str, **_kwargs: object) -> str:
         return toolchain
 

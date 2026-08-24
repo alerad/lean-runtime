@@ -127,7 +127,7 @@ class EnvironmentResolver:
             process = self.backend.execute(
                 command,
                 cwd=workspace,
-                environment=self.toolchains.environment,
+                environment=self.toolchains.environment_for(toolchain),
                 policy=ExecutionPolicy(timeout_seconds=timeout, max_output_bytes=10_000_000),
                 cancel=cancel,
             )

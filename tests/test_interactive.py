@@ -19,6 +19,9 @@ class PassthroughToolchains:
     def environment(self) -> dict[str, str]:
         return os.environ.copy()
 
+    def environment_for(self, _toolchain: str) -> dict[str, str]:
+        return self.environment
+
     def command(self, _toolchain: str, executable: str, *args: str) -> list[str]:
         return [executable, *args]
 

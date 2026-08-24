@@ -152,21 +152,14 @@ def test_command_ignores_an_incomplete_elan_toolchain_directory(tmp_path: Path) 
     assert command == [str(manager.slim_path(TOOLCHAIN) / "bin" / "lean"), "Main.lean"]
 
 
-def test_command_prefers_a_usable_full_toolchain(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_command_prefers_a_usable_full_toolchain(tmp_path: Path) -> None:
     manager = _manager_with_slim(tmp_path)
     full_lean = manager._elan_toolchain_dir(TOOLCHAIN) / "bin" / "lean"
     full_lean.parent.mkdir(parents=True)
     full_lean.write_text("full lean")
-    elan = tmp_path / "elan-executable"
-    elan.write_text("elan")
-    monkeypatch.setenv("LEAN_RUNTIME_ELAN", str(elan))
-
     command = manager.command(TOOLCHAIN, "lean", "Main.lean")
 
-    assert command == [str(elan.absolute()), "run", TOOLCHAIN, "lean", "Main.lean"]
+    assert command == [str(full_lean), "Main.lean"]
 
 
 def test_executable_digest_uses_a_slim_copy_acquired_during_the_first_call(

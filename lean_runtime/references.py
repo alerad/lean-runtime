@@ -218,7 +218,7 @@ def _lake_metadata(
         process = subprocess.run(
             command,
             cwd=checkout,
-            env=toolchains.environment,
+            env=toolchains.environment_for(toolchain),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

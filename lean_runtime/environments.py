@@ -766,7 +766,11 @@ class Environment:
                 spawn(
                     resolved_command,
                     cwd=instance,
-                    environment=self.manager.toolchains.environment,
+                    environment=(
+                        self.manager.toolchains.environment_for(self.lock.toolchain)
+                        if requested_command[0] == "lake"
+                        else self.manager.toolchains.environment
+                    ),
                     policy=selected_policy,
                 ),
             )
@@ -905,7 +909,12 @@ class Environment:
                 preliminary: list[BackendResult] = []
                 path_map = {str(instance / name): name for name in files}
                 staging_started = time.monotonic()
-                execution_environment = self.manager.toolchains.environment
+                execution_environment = (
+                    self.manager.toolchains.environment_for(self.lock.toolchain)
+                    if operation == "build"
+                    or (requested_command and requested_command[0] == "lake")
+                    else self.manager.toolchains.environment
+                )
                 if operation == "check":
                     assert entrypoint is not None
                     for name, source in files.items():
@@ -1301,7 +1310,11 @@ class EnvironmentManager:
                 result = self.backend.execute(
                     command,
                     cwd=workspace,
-                    environment=self.toolchains.environment,
+                    environment=(
+                        self.toolchains.environment_for(lock.toolchain)
+                        if requested_command[0] == "lake"
+                        else self.toolchains.environment
+                    ),
                     policy=build_policy,
                     cancel=cancel,
                 )
@@ -1327,7 +1340,7 @@ class EnvironmentManager:
                 result = self.backend.execute(
                     command,
                     cwd=workspace,
-                    environment=self.toolchains.environment,
+                    environment=self.toolchains.environment_for(lock.toolchain),
                     policy=build_policy,
                     cancel=cancel,
                 )
