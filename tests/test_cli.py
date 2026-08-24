@@ -552,3 +552,21 @@ def test_status_reports_agent_guide_presence(
     (root / "AGENTS.md").write_text("# guide\n")
     assert main(["--home", str(tmp_path / "home"), "status", str(root), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["agents_guide"] == str(root / "AGENTS.md")
+
+
+def test_env_acquire_demands_the_full_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lock_file = tmp_path / "environment.lock.json"
+    lock_file.write_text("{}")
+    observed: dict[str, object] = {}
+    monkeypatch.setattr("lean_runtime.cli.EnvironmentLock.load", lambda _path: "LOCK")
+
+    def open_exact(_runtime, lock, **kwargs):  # type: ignore[no-untyped-def]
+        observed.update(kwargs, lock=lock)
+        return SimpleNamespace(inspect=lambda: SimpleNamespace(to_dict=lambda: {"ok": True}))
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.open_exact", open_exact)
+    assert main(["--home", str(tmp_path / "home"), "env", "acquire", str(lock_file)]) == 0
+    assert observed["import_roots"] == ("LeanRuntimeEnvironment",)
+    assert json.loads(capsys.readouterr().out) == {"ok": True}

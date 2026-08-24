@@ -887,6 +887,17 @@ class OCIEnvironmentCache:
         capsule = CapsuleManifest.from_dict(config["capsule"])
         if capsule.lock_id != lock.lock_id or capsule.toolchain != lock.toolchain:
             raise EnvironmentError("downloadable capsule does not match its lock")
+        # A capsule that lacks a requested root cannot satisfy this acquisition;
+        # silently projecting a partial closure would yield an environment that
+        # claims readiness while missing the modules the caller asked for.
+        available = {module.name for module in capsule.modules}
+        unavailable = tuple(root for root in roots if root not in available)
+        if unavailable:
+            raise DownloadUnavailable(
+                "downloadable capsule does not provide module(s): " + ", ".join(unavailable),
+                reason_code="capsule_roots_unavailable",
+                retryable=False,
+            )
         closure = capsule.closure(roots)
         module_names = tuple(module.name for module in closure)
         descriptors = {
