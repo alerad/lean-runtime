@@ -888,6 +888,13 @@ Advanced namespaces:
     adopt.add_argument(
         "--dry-run", action="store_true", help="show the adoption plan without changing anything"
     )
+    adopt.add_argument(
+        "--no-agents",
+        dest="agents",
+        action="store_false",
+        default=True,
+        help="skip generating AGENTS.md",
+    )
     _add_common_output(adopt)
     adopt.set_defaults(command="attach", recursive=None, execute=False)
 
@@ -1151,6 +1158,13 @@ Advanced namespaces:
     pshare.add_argument("--yes", action="store_true", help="share without a confirmation prompt")
     pshare.add_argument(
         "--dry-run", action="store_true", help="show the sharing plan without changing anything"
+    )
+    pshare.add_argument(
+        "--no-agents",
+        dest="agents",
+        action="store_false",
+        default=True,
+        help="skip generating AGENTS.md",
     )
     _add_common_output(pshare)
     pshare.set_defaults(command="attach", recursive=None, execute=False)
@@ -1805,8 +1819,24 @@ def main(argv: list[str] | None = None) -> int:
                 recursive=args.recursive,
                 plan=adoption_plan,
             )
+            # Adoption is the canonical moment a repository becomes agent-ready,
+            # including re-runs against already-attached projects.
+            agent_guides = (
+                [
+                    guide
+                    for attached in adoption_result.results
+                    if (guide := runtime.write_agents_guide(attached.root)) is not None
+                ]
+                if args.agents
+                else []
+            )
             if args.json:
-                _json(adoption_result.to_dict())
+                _json(
+                    {
+                        **adoption_result.to_dict(),
+                        "agent_guides": [str(guide) for guide in agent_guides],
+                    }
+                )
             else:
                 _render_adoption_plan(adoption_result.plan)
                 for attached in adoption_result.results:
@@ -1814,6 +1844,8 @@ def main(argv: list[str] | None = None) -> int:
                         f"{attached.action}: {attached.root} · "
                         f"{format_byte_size(attached.reclaimed_bytes)} replaced"
                     )
+                for guide in agent_guides:
+                    print(f"Agent guide: {guide}")
                 for root, message in adoption_result.failures:
                     print(f"failed: {root}: {message}", file=sys.stderr)
             return 0 if adoption_result.ok else 1
@@ -2264,12 +2296,22 @@ def main(argv: list[str] | None = None) -> int:
                     "toolchain": project_status.toolchain,
                     "manifest": str(project_status.manifest) if project_status.manifest else None,
                     "attached": (project_status.root / "lean-runtime.toml").is_file(),
+                    "agents_guide": (
+                        str(project_status.root / "AGENTS.md")
+                        if (project_status.root / "AGENTS.md").is_file()
+                        else None
+                    ),
                 }
             if args.json:
                 _json(status_payload)
             else:
-                print(f"{status_payload['kind'].title()}")
-                for key, value in status_payload.items():
+                display_payload = dict(status_payload)
+                if display_payload.get("kind") == "project" and (
+                    display_payload.get("agents_guide") is None
+                ):
+                    display_payload["agents_guide"] = "missing (`lean-runtime adopt` writes one)"
+                print(f"{display_payload['kind'].title()}")
+                for key, value in display_payload.items():
                     if key == "kind":
                         continue
                     label = key.replace("_", " ").title()
