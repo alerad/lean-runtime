@@ -9,6 +9,7 @@ its artifact cache without changing the public ``Runtime`` API.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -17,6 +18,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,6 +30,7 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
 
 from .errors import ProjectError
 from .import_syntax import IMPORT_STATEMENT
+from .locking import FileLock
 from .models import ExecutionResult, PhaseTiming
 from .policies import ExecutionPolicy
 from .project_sharing import project_sharing_enabled
@@ -90,6 +93,63 @@ class ProjectExecutor:
 
     def __init__(self, runtime: Runtime) -> None:
         self.runtime = runtime
+
+    @staticmethod
+    def _declares_dependencies(context: ProjectContext) -> bool:
+        """Whether the lakefile requires packages Lake would have to fetch."""
+        try:
+            text = context.lakefile.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        if context.lakefile.name == "lakefile.toml":
+            try:
+                return bool(tomllib.loads(text).get("require"))
+            except tomllib.TOMLDecodeError:
+                return False
+        return any(line.lstrip().startswith("require ") for line in text.splitlines())
+
+    @staticmethod
+    def _packages_materialized(root: Path, manifest: Path) -> bool:
+        """Whether every manifest package already has a checkout on disk."""
+        try:
+            document = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return True  # let Lake report the manifest problem itself
+        packages = document.get("packages")
+        if not isinstance(packages, list):
+            return True
+        packages_dir = root / str(document.get("packagesDir", ".lake/packages"))
+        for package in packages:
+            name = package.get("name") if isinstance(package, dict) else None
+            if isinstance(name, str) and name and not (packages_dir / name).exists():
+                return False
+        return True
+
+    def _bootstrap_guard(self, context: ProjectContext) -> AbstractContextManager[object]:
+        """Never let a check implicitly resolve dependencies, and never in parallel.
+
+        A missing manifest with declared dependencies means ``lake env`` would
+        run an implicit ``lake update`` — cloning and compiling dependencies
+        from source, which is Lake's job to do once, deliberately. Concurrent
+        checks against a manifest whose packages are not yet materialized race
+        Lake's checkout of the same directories, so exactly one check may run
+        until the packages exist.
+        """
+        manifest = context.current_manifest()
+        if manifest is None:
+            if self._declares_dependencies(context):
+                raise ProjectError(
+                    f"{context.root} declares dependencies but has no lake-manifest.json; "
+                    "run `lake update` once to resolve versions, then `lean-runtime build` "
+                    "to restore shared dependency artifacts"
+                )
+        elif self._packages_materialized(context.root, manifest):
+            return nullcontext()
+        return FileLock(
+            context.root / ".lake" / "lean-runtime" / "bootstrap.lock",
+            timeout=3600,
+            owner={"operation": "project_bootstrap", "root": str(context.root)},
+        )
 
     def _checked_with_header_snapshots(
         self,
@@ -162,7 +222,8 @@ class ProjectExecutor:
                 context, provenance.workspace_digest, relative, text, command, execute, cancel
             )
 
-        result = self._build_missing_local_import(context, text, run(), run, policy, cancel)
+        with self._bootstrap_guard(context):
+            result = self._build_missing_local_import(context, text, run(), run, policy, cancel)
         return self._with_identifier_hints(context, result)
 
     def check_source(
@@ -213,7 +274,10 @@ class ProjectExecutor:
                     cancel,
                 )
 
-            result = self._build_missing_local_import(context, source, run(), run, policy, cancel)
+            with self._bootstrap_guard(context):
+                result = self._build_missing_local_import(
+                    context, source, run(), run, policy, cancel
+                )
             return self._with_identifier_hints(context, result)
 
     def _build_missing_local_import(
