@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import io
 import json
+import re
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from lean_runtime.cli import PUBLIC_COMMANDS, _apply_using, main, parser
+from lean_runtime.cli import PUBLIC_COMMANDS, _apply_using, _render_storage, main, parser
 from lean_runtime.models import ExecutionResult
+from lean_runtime.store import StoreStatus
 
 REMOVED = {
     "run",
@@ -269,6 +273,77 @@ def test_new_guided_creation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     assert main(["--home", str(tmp_path / "home"), "new", str(target), "--yes"]) == 0
 
 
+def test_new_hint_uses_the_module_directory_lake_created(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / "demoproj"
+    plan = SimpleNamespace(
+        action="create",
+        root=target,
+        project_name="demoproj",
+        mathlib_version="4.33.0",
+        toolchain="leanprover/lean4:v4.33.0",
+        toolchain_installed=True,
+        seed_root=None,
+        download_bytes=0,
+        blockers=(),
+        ready=True,
+    )
+    result = SimpleNamespace(root=target, packages=9)
+
+    def init_project(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        # Lake capitalizes the library module directory (`demoproj` → `Demoproj`).
+        (target / "Demoproj").mkdir(parents=True)
+        (target / "Demoproj" / "Basic.lean").write_text('def hello := "world"\n')
+        return result
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.plan_project_init", lambda *_a, **_k: plan)
+    monkeypatch.setattr("lean_runtime.cli.Runtime.init_project", init_project)
+    assert main(["--home", str(tmp_path / "home"), "new", str(target), "--yes"]) == 0
+    output = capsys.readouterr().out
+    assert "lean-runtime check Demoproj/Basic.lean" in output
+    assert "demoproj/Basic.lean" not in output
+
+
+def test_stdin_check_infers_the_enclosing_pinned_project(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    project = tmp_path / "proof"
+    project.mkdir()
+    (project / "lakefile.toml").write_text('name = "proof"\n')
+    (project / "lean-toolchain").write_text("leanprover/lean4:v4.33.0\n")
+    result = ExecutionResult(
+        ok=True,
+        exit_code=0,
+        toolchain="leanprover/lean4:v4.33.0",
+        command=("lean", "Main.lean"),
+        cwd=str(project),
+        stdout="",
+        stderr="",
+        elapsed_seconds=0.01,
+    )
+    observed: list[object] = []
+
+    def check(_runtime: object, _source: str, **kwargs: object) -> ExecutionResult:
+        observed.append(kwargs.get("project"))
+        return result
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime.check", check)
+    monkeypatch.setattr("sys.stdin", io.StringIO("example : True := trivial\n"))
+    monkeypatch.chdir(project)
+    assert main(["--home", str(tmp_path / "home"), "check", "-"]) == 0
+    assert observed == [project.resolve()]
+
+
+def test_stdin_check_outside_a_project_keeps_the_context_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO("example : True := trivial\n"))
+    monkeypatch.chdir(tmp_path)
+    assert main(["--home", str(tmp_path / "home"), "check", "-"]) == 2
+    assert "check requires an environment" in capsys.readouterr().err
+
+
 def test_watch_checks_immediately(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     source = tmp_path / "Main.lean"
     source.write_text("example : True := by trivial\n")
@@ -292,6 +367,71 @@ def test_watch_checks_immediately(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     )
     assert main(["watch", str(source), "--using", f"project:{tmp_path}"]) == 130
     assert checked == [source.resolve()]
+
+
+class _FlushRecorder:
+    def __init__(self, wrapped: object) -> None:
+        self._wrapped = wrapped
+        self.flushes = 0
+
+    def flush(self) -> None:
+        self.flushes += 1
+        self._wrapped.flush()  # type: ignore[attr-defined]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._wrapped, name)
+
+
+def test_watch_flushes_output_for_piped_consumers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := by trivial\n")
+    result = ExecutionResult(
+        ok=True,
+        exit_code=0,
+        toolchain="leanprover/lean4:v4.33.0",
+        command=("lean", "Main.lean"),
+        cwd=str(tmp_path),
+        stdout="",
+        stderr="",
+        elapsed_seconds=0.01,
+    )
+    monkeypatch.setattr(
+        "lean_runtime.cli.Runtime.check_file", lambda _runtime, _path, **_kwargs: result
+    )
+    monkeypatch.setattr(
+        "lean_runtime.cli.time.sleep", lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
+    recorder = _FlushRecorder(sys.stdout)
+    monkeypatch.setattr("sys.stdout", recorder)
+    assert main(["watch", str(source), "--using", f"project:{tmp_path}"]) == 130
+    # The banner and the first check result must both reach a piped consumer.
+    assert recorder.flushes >= 2
+
+
+def test_storage_rendering_separates_large_counts_from_labels(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    status = StoreStatus(
+        home="/tmp/lean-runtime-store",
+        environments=3,
+        locks=1,
+        sources=2,
+        oci_blobs=4,
+        cas_artifacts=149529,
+        executions=7,
+        aliases=1,
+        bytes_used=1024,
+        bytes_free=2048,
+        declaration_indexes=1234567,
+    )
+    _render_storage(status)
+    output = capsys.readouterr().out
+    assert "CAS149529" not in output
+    assert "indexes1234567" not in output
+    assert re.search(r"Shared module CAS\s+149529\s", output)
+    assert re.search(r"Declaration indexes\s+1234567\s", output)
 
 
 def test_lean_file_as_command_suggests_check(capsys: pytest.CaptureFixture[str]) -> None:

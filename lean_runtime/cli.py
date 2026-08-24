@@ -119,18 +119,20 @@ def _render_storage(status: StoreStatus) -> None:
         ("Executions", status.executions, status.executions_bytes),
         ("Scratch", status.scratch_workspaces, status.scratch_bytes),
     )
+    label_width = max(len(label) for label, _count, _bytes in rows)
+    count_width = max(8, *(len(str(count)) for _label, count, _bytes in rows if count is not None))
     for label, count, bytes_used in rows:
-        counted = f"{count:>5}" if count is not None else "     "
+        counted = f"{count:>{count_width}}" if count is not None else " " * count_width
         size_column = style.cyan(f"{format_byte_size(bytes_used):>10}")
-        print(f"  {label:<15}{counted}  {size_column}")
-    total_label = style.bold(f"{'Materialized':<15}")
+        print(f"  {label:<{label_width}} {counted}  {size_column}")
+    total_label = style.bold(f"{'Materialized':<{label_width}}")
     total_size = style.bold(f"{format_byte_size(status.bytes_used):>10}")
     free_note = style.dim(f"({format_byte_size(status.bytes_free)} free on disk)")
-    print(f"  {total_label}       {total_size}  {free_note}")
+    print(f"  {total_label} {' ' * count_width}  {total_size}  {free_note}")
     if status.allocated_bytes:
-        allocated_label = style.bold(f"{'Allocated*':<15}")
+        allocated_label = style.bold(f"{'Allocated*':<{label_width}}")
         allocated_size = style.bold(f"{format_byte_size(status.allocated_bytes):>10}")
-        print(f"  {allocated_label}       {allocated_size}")
+        print(f"  {allocated_label} {' ' * count_width}  {allocated_size}")
         print(style.dim("  * hard links counted once; copy-on-write blocks may still be shared"))
     if status.environment_usage:
         print()
@@ -1679,9 +1681,19 @@ def main(argv: list[str] | None = None) -> int:
                 if args.agents:
                     print(f"Agent guide: {init_result.root / 'AGENTS.md'}")
                 project_name = init_plan.project_name or init_result.root.name
-                print(
-                    f"Next: cd {init_result.root} && lean-runtime check {project_name}/Basic.lean"
+                # Lake capitalizes the module directory during `lake init`, so derive
+                # the hint from the file it actually created rather than the raw name.
+                created = sorted(
+                    path
+                    for path in init_result.root.glob("*/Basic.lean")
+                    if not path.parent.name.startswith(".")
                 )
+                module_file = (
+                    created[0].relative_to(init_result.root)
+                    if created
+                    else Path(project_name) / "Basic.lean"
+                )
+                print(f"Next: cd {init_result.root} && lean-runtime check {module_file}")
             return 0
         if args.command == "scan":
             scan_result = runtime.scan_projects(args.path, recursive=args.recursive)
@@ -2547,7 +2559,7 @@ def main(argv: list[str] | None = None) -> int:
                 watched = Path(args.inputs[0]).expanduser().resolve()
                 if not watched.is_file():
                     raise ValueError(f"watched Lean file does not exist: {watched}")
-                print(f"Watching {watched} · Ctrl-C to stop")
+                print(f"Watching {watched} · Ctrl-C to stop", flush=True)
                 if os.environ.get(_HEADER_SNAPSHOTS_VARIABLE) is None:
                     runtime.header_cache.enabled = True
                 previous: tuple[int, int] | None = None
@@ -2563,6 +2575,7 @@ def main(argv: list[str] | None = None) -> int:
                             policy=_policy(args),
                         )
                         _emit_result(watched_result, False)
+                        sys.stdout.flush()
                     time.sleep(args.watch_interval)
             check_subject = (
                 Path(args.inputs[-1]).name
@@ -2614,10 +2627,16 @@ def main(argv: list[str] | None = None) -> int:
                     if args.include:
                         raise ValueError("local project checks do not accept --include")
                     display_path = "<stdin>"
+                    stdin_project = args.project
+                    if stdin_project is None and args.toolchain is None:
+                        try:
+                            stdin_project = discover_project(Path.cwd()).root
+                        except ProjectNotFoundError:
+                            stdin_project = None
                     result = runtime.check(
                         sys.stdin.read(),
                         toolchain=args.toolchain,
-                        project=args.project,
+                        project=stdin_project,
                         policy=_policy(args),
                     )
                     source_file = None
