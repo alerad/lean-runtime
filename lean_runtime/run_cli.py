@@ -199,7 +199,12 @@ def _discovery_failure(result: DiscoveryResult) -> str:
     return (details[0] if details else "no compatible environment was found") + suffix
 
 
-def _discovery_summary(result: DiscoveryResult) -> str:
+def _discovery_summary(result: DiscoveryResult) -> str | None:
+    # A finished search that ends in a compiler rejection needs no epilogue:
+    # an environment was found and the verdict is the diagnostic above. Only
+    # an *incomplete* search (a limit stopped it) is worth a trailing line.
+    if result.outcome == "source_rejected" and result.completion == "complete":
+        return None
     tested = len(result.attempts)
     planned = len(getattr(result.plan, "planned_candidates", result.plan.candidates))
     untried = max(0, planned - tested)
@@ -592,10 +597,13 @@ def run(
             )
         if context_resolution.kind in {"lock", "toolchain", "project", "discovery"}:
             result = replace(result, timings=(preparation, *result.timings))
-        if rejected_discovery is not None:
+        discovery_summary = (
+            _discovery_summary(rejected_discovery) if rejected_discovery is not None else None
+        )
+        if discovery_summary is not None:
             result = replace(
                 result,
-                hints=(*result.hints, _discovery_summary(rejected_discovery)),
+                hints=(*result.hints, discovery_summary),
             )
         renderer.close()
         _emit(
@@ -607,9 +615,7 @@ def run(
             summary_elapsed_seconds=(
                 rejected_discovery.duration_seconds if rejected_discovery is not None else None
             ),
-            discovery_summary=(
-                _discovery_summary(rejected_discovery) if rejected_discovery is not None else None
-            ),
+            discovery_summary=discovery_summary,
         )
         if result.ok:
             return 0

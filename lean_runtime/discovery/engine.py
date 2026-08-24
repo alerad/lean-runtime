@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 
 from ..errors import LeanRuntimeError
-from .candidate import DiscoveryPlan
+from ..models import ExecutionResult
+from .candidate import Candidate, DiscoveryPlan
+from .catalog import CatalogEntry
 from .probe import CandidateProbe, ProbeIntegrityFailure, ProbeUnavailable
 from .result import (
     AttemptStatus,
@@ -27,6 +30,8 @@ DISCOVERY_EXHAUSTED = "DISCOVERY_EXHAUSTED"
 DISCOVERY_EXPLICIT_LOCK = "DISCOVERY_EXPLICIT_LOCK"
 DISCOVERY_CANCELLED = "DISCOVERY_CANCELLED"
 DISCOVERY_RUNTIME_ERROR = "DISCOVERY_RUNTIME_ERROR"
+DISCOVERY_MODULE_UNAVAILABLE = "DISCOVERY_MODULE_UNAVAILABLE"
+DISCOVERY_VERDICT_BOUNDED = "DISCOVERY_VERDICT_BOUNDED"
 CANDIDATE_LEAN_REJECTED = "CANDIDATE_LEAN_REJECTED"
 CANDIDATE_UNAVAILABLE = "CANDIDATE_UNAVAILABLE"
 CANDIDATE_INTEGRITY_FAILURE = "CANDIDATE_INTEGRITY_FAILURE"
@@ -145,6 +150,63 @@ def _rejection_detail(stderr: str, stdout: str) -> str:
     return stderr.strip() or stdout.strip() or "Lean rejected the source"
 
 
+# Lean reports a missing import as `unknown module prefix 'X'` (directory-shaped
+# roots) or `unknown module 'X'`; both are decidable against candidate
+# inventories without running another compiler.
+_UNKNOWN_MODULE = re.compile(r"unknown module(?: prefix)? '([^']+)'")
+# Identifier-level failures are the rejection class where an older environment
+# legitimately changes the verdict (renamed or deleted lemmas), so they always
+# justify continuing the candidate march.
+_IDENTIFIER_MARKERS = ("unknown identifier", "unknown constant")
+# Positive evidence that the source itself is the problem. Kept deliberately
+# narrow: anything unrecognized preserves the ordinary march.
+_PROOF_LEVEL_MARKERS = ("type mismatch", "unsolved goals", "unexpected token")
+
+
+def _provides_module(entry: CatalogEntry, name: str) -> bool:
+    return name in entry.modules or any(module.startswith(name + ".") for module in entry.modules)
+
+
+def _rejection_verdict(
+    result: ExecutionResult, candidates: tuple[Candidate, ...]
+) -> tuple[str, tuple[str, ...]]:
+    """Classify whether another candidate environment could change a rejection.
+
+    Returns one of:
+    - ``("module_unavailable", names)``: the source imports module roots that no
+      planned candidate provides; every further attempt must fail identically.
+    - ``("source_verdict", ())``: a proof-level failure (type mismatch,
+      unsolved goals, syntax); a second opinion never justifies a fresh
+      download — only local environments or an offline plan's source builds.
+    - ``("march", ())``: everything else — identifier-level failures, modules
+      another candidate does provide, and unclassifiable output all keep the
+      ordinary bounded march.
+    """
+    text = "\n".join(
+        (
+            *(item.message for item in result.diagnostics),
+            result.stderr,
+            result.stdout,
+        )
+    )
+    missing = tuple(dict.fromkeys(_UNKNOWN_MODULE.findall(text)))
+    if missing:
+        unavailable = tuple(
+            name
+            for name in missing
+            if not any(_provides_module(candidate.entry, name) for candidate in candidates)
+        )
+        if unavailable:
+            return "module_unavailable", unavailable
+        return "march", ()
+    lowered = text.lower()
+    if any(marker in lowered for marker in _IDENTIFIER_MARKERS):
+        return "march", ()
+    if any(marker in lowered for marker in _PROOF_LEVEL_MARKERS):
+        return "source_verdict", ()
+    return "march", ()
+
+
 def discover(
     source: str,
     plan: DiscoveryPlan,
@@ -189,6 +251,11 @@ def discover(
         raise ValueError("an authoritative candidate probe is required")
     attempts: list[CandidateAttempt] = []
     remote_acquisitions = 0
+    # Set once a proof-level rejection shows the source itself is the problem:
+    # remaining candidates are only worth a look when reaching them costs no
+    # download (already local, or an offline plan's deliberate source builds).
+    local_candidates_only = False
+    verdict_bounded_skips = 0
     for candidate in plan.planned_candidates:
         if cancel is not None and cancel.is_set():
             return DiscoveryResult(
@@ -217,6 +284,12 @@ def discover(
         candidate_is_local = any(
             reason.code == "RANK_LOCAL_AVAILABLE" for reason in candidate.reasons
         )
+        # A proof-level rejection never justifies a *download*. Offline plans
+        # (allow_download=False) acquire candidates by deliberate local source
+        # builds, so their march is preserved in full.
+        if local_candidates_only and not candidate_is_local and plan.policy.allow_download:
+            verdict_bounded_skips += 1
+            continue
         if not candidate_is_local and remote_acquisitions >= plan.policy.max_remote_acquisitions:
             return DiscoveryResult(
                 status="not_found",
@@ -427,6 +500,29 @@ def discover(
                 duration_seconds=time.monotonic() - started,
                 diagnostics=attempt.diagnostics,
             )
+        if outcome_status == "lean_rejected":
+            verdict, unavailable = _rejection_verdict(result, plan.planned_candidates)
+            if verdict == "module_unavailable":
+                # Statically decidable: no candidate can change this verdict.
+                return DiscoveryResult(
+                    status="not_found",
+                    confidence="exhausted",
+                    outcome="source_rejected",
+                    completion="complete",
+                    plan=plan,
+                    attempts=tuple(attempts),
+                    duration_seconds=time.monotonic() - started,
+                    diagnostics=(
+                        ResultDiagnostic(
+                            DISCOVERY_MODULE_UNAVAILABLE,
+                            "no cataloged environment provides module(s): "
+                            + ", ".join(unavailable),
+                        ),
+                        *attempt.diagnostics,
+                    ),
+                )
+            if verdict == "source_verdict":
+                local_candidates_only = True
 
     if time.monotonic() >= wall_deadline or probe_remaining <= 0:
         reason = ResultDiagnostic(DISCOVERY_TIME_LIMIT, "total wall-clock budget expired")
@@ -465,6 +561,17 @@ def discover(
         if attempt.status == "timeout"
         for diagnostic in attempt.diagnostics
     )
+    skip_diagnostics = (
+        (
+            ResultDiagnostic(
+                DISCOVERY_VERDICT_BOUNDED,
+                f"skipped {verdict_bounded_skips} non-local candidate(s): a proof-level "
+                "rejection does not justify downloading further environments",
+            ),
+        )
+        if verdict_bounded_skips
+        else ()
+    )
     return DiscoveryResult(
         status="not_found",
         confidence=confidence,
@@ -473,5 +580,5 @@ def discover(
         plan=plan,
         attempts=tuple(attempts),
         duration_seconds=time.monotonic() - started,
-        diagnostics=(*timeout_diagnostics, reason, *rejection_diagnostics),
+        diagnostics=(*timeout_diagnostics, reason, *skip_diagnostics, *rejection_diagnostics),
     )
