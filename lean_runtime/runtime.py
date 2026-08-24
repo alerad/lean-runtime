@@ -1605,6 +1605,19 @@ class Runtime:
                 failures.append((project.root, str(exc)))
         return AdoptionBatchResult(selected_plan, tuple(results), tuple(failures))
 
+    def write_agents_guide(self, root: str | os.PathLike[str]) -> Path | None:
+        """Write the default AGENTS.md into a project root.
+
+        Returns the created path, or ``None`` when a guide already exists —
+        an existing guide is the project's own voice and is never replaced.
+        """
+        target = Path(root).expanduser().resolve()
+        guide = target / "AGENTS.md"
+        if guide.exists():
+            return None
+        guide.write_text(_DEFAULT_AGENTS_GUIDE, encoding="utf-8")
+        return guide
+
     def scan_projects(
         self, path: str | os.PathLike[str], *, recursive: bool = True
     ) -> ProjectScanResult:

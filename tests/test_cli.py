@@ -345,3 +345,70 @@ def test_standalone_status_reports_plan_not_selection_and_availability(
     assert "selected" not in data
     assert data["planned_first"] == data["candidates"][0]
     assert data["availability"][data["planned_first"]]["remote"] == "not_probed"
+
+
+def _fake_adoption(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    plan = SimpleNamespace(ready=1, blocked=0, to_dict=lambda: {"ready": 1})
+    entry = SimpleNamespace(root=root, action="attached", packages=1, reclaimed_bytes=0)
+    batch = SimpleNamespace(
+        plan=plan, results=(entry,), failures=(), ok=True, to_dict=lambda: {"ok": True}
+    )
+    monkeypatch.setattr("lean_runtime.cli.Runtime.plan_project_adoption", lambda *_a, **_k: plan)
+    monkeypatch.setattr("lean_runtime.cli.Runtime.attach_projects", lambda *_a, **_k: batch)
+
+
+def test_adopt_writes_an_agent_guide_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "proj"
+    root.mkdir()
+    _fake_adoption(monkeypatch, root)
+    assert main(["--home", str(tmp_path / "home"), "adopt", str(root), "--yes", "--json"]) == 0
+    assert (root / "AGENTS.md").is_file()
+    assert "lean-runtime check" in (root / "AGENTS.md").read_text()
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["agent_guides"] == [str(root / "AGENTS.md")]
+
+
+def test_adopt_never_replaces_an_existing_agent_guide(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "AGENTS.md").write_text("# custom voice\n")
+    _fake_adoption(monkeypatch, root)
+    assert main(["--home", str(tmp_path / "home"), "adopt", str(root), "--yes", "--json"]) == 0
+    assert (root / "AGENTS.md").read_text() == "# custom voice\n"
+    assert json.loads(capsys.readouterr().out)["agent_guides"] == []
+
+
+def test_adopt_no_agents_skips_the_guide(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "proj"
+    root.mkdir()
+    _fake_adoption(monkeypatch, root)
+    assert (
+        main(
+            ["--home", str(tmp_path / "home"), "adopt", str(root), "--yes", "--no-agents", "--json"]
+        )
+        == 0
+    )
+    assert not (root / "AGENTS.md").exists()
+    assert json.loads(capsys.readouterr().out)["agent_guides"] == []
+
+
+def test_status_reports_agent_guide_presence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "lakefile.toml").write_text('name = "fixture"\n')
+    (root / "lean-toolchain").write_text("leanprover/lean4:v4.32.2\n")
+    assert main(["--home", str(tmp_path / "home"), "status", str(root), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["agents_guide"] is None
+    assert main(["--home", str(tmp_path / "home"), "status", str(root)]) == 0
+    assert "lean-runtime adopt" in capsys.readouterr().out
+    (root / "AGENTS.md").write_text("# guide\n")
+    assert main(["--home", str(tmp_path / "home"), "status", str(root), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["agents_guide"] == str(root / "AGENTS.md")
