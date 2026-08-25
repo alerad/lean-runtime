@@ -31,6 +31,10 @@ from lean_runtime.serialization import sha256_id
 class ProjectToolchains:
     def __init__(self, home: Path) -> None:
         self.home = home
+        self.executable_digests = {
+            "lean": "sha256:" + "1" * 64,
+            "lake": "sha256:" + "2" * 64,
+        }
 
     @property
     def environment(self) -> dict[str, str]:
@@ -44,6 +48,9 @@ class ProjectToolchains:
 
     def ensure_full(self, toolchain: str, **_kwargs: object) -> Path:
         return Path(toolchain)
+
+    def executable_digest(self, _toolchain: str, executable: str) -> str:
+        return self.executable_digests[executable]
 
     def is_available_locally(self, _toolchain: str) -> bool:
         return True
@@ -676,6 +683,31 @@ def test_attach_replaces_only_packages_and_detach_materializes_them(tmp_path: Pa
     )
 
 
+def test_reattach_repoints_packages_when_the_toolchain_binary_changes(tmp_path: Path) -> None:
+    source, _revision = _shared_project(tmp_path / "project", tmp_path / "dependency")
+    toolchains = ProjectToolchains(tmp_path / "runtime")
+    runtime = Runtime(toolchains=toolchains, libraries=[])  # type: ignore[arg-type]
+
+    first = runtime.attach_projects(source).results[0]
+    package_link = tmp_path / "project" / ".lake" / "packages" / "dep"
+    first_target = package_link.resolve()
+    old_artifact = first_target / ".lake" / "build" / "lib" / "lean" / "Dep.olean"
+    old_artifact.parent.mkdir(parents=True)
+    old_artifact.write_bytes(b"old toolchain")
+
+    toolchains.executable_digests["lean"] = "sha256:" + "3" * 64
+    second = runtime.attach_projects(source).results[0]
+    second_target = package_link.resolve()
+
+    assert first.action == "attached"
+    assert second.action == "attached"
+    assert second.workspace_id != first.workspace_id
+    assert second_target != first_target
+    assert not (second_target / ".lake" / "build").exists()
+    marker = json.loads((second_target / ".lean-runtime-package.json").read_text())
+    assert marker["artifact_key"]["lean_executable_digest"] == "sha256:" + "3" * 64
+
+
 def test_second_graph_reuses_compatible_managed_package_without_source_resolution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -707,10 +739,12 @@ def test_second_graph_reuses_compatible_managed_package_without_source_resolutio
     assert runtime.attach_projects(first).ok
     first_target = (tmp_path / "first" / ".lake" / "packages" / "dep").resolve()
     plan = runtime.plan_project_adoption(second_root)
-    assert plan.shared_bytes_reused == plan.current_dependency_bytes
-    assert plan.new_shared_bytes == 0
+    # Planning does not install or hash a toolchain, so artifact reuse remains
+    # conservative until attach computes the local build identity.
+    assert plan.shared_bytes_reused == 0
+    assert plan.new_shared_bytes == plan.current_dependency_bytes
     assert plan.checkout_bytes_removed == plan.current_dependency_bytes
-    assert plan.estimated_machine_reclaimable_bytes == plan.current_dependency_bytes
+    assert plan.estimated_machine_reclaimable_bytes == 0
 
     def source_resolution_is_not_needed(**_kwargs):
         raise AssertionError("compatible managed package should bypass source resolution")
@@ -863,7 +897,41 @@ def test_scan_registers_an_exact_local_graph_for_future_reuse(tmp_path: Path) ->
     assert seeds["dep"] == context.root / ".lake" / "packages" / "dep"
 
 
-def test_remembered_project_donates_exact_package_source_and_artifacts(tmp_path: Path) -> None:
+def test_registered_graph_donates_source_across_toolchains_without_artifacts(
+    tmp_path: Path,
+) -> None:
+    producer_source, _revision = _shared_project(tmp_path / "producer", tmp_path / "dependency")
+    producer = producer_source.parents[1]
+    donor_package = producer / ".lake" / "packages" / "dep"
+    donor_artifact = donor_package / ".lake" / "build" / "lib" / "lean" / "Dep.olean"
+    donor_artifact.parent.mkdir(parents=True)
+    donor_artifact.write_bytes(b"lean 4.32 artifact")
+    (donor_package / ".git" / "info" / "exclude").write_text("/.lake/\n")
+    consumer = tmp_path / "consumer"
+    shutil.copytree(producer, consumer, ignore=shutil.ignore_patterns(".lake"))
+    (consumer / "lean-toolchain").write_text("leanprover/lean4:v4.33.1\n")
+    events: list[RuntimeEvent] = []
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+        on_event=events.append,
+    )
+    runtime.scan_projects(producer)
+
+    workspace = runtime.prepare_shared_project(consumer)
+    package = Path(json.loads(workspace.overrides_file.read_text())["packages"][0]["dir"])
+    marker = json.loads((package / ".lean-runtime-package.json").read_text())
+
+    assert (package / "Dep.lean").read_text() == (donor_package / "Dep.lean").read_text()
+    assert not (package / ".lake" / "build").exists()
+    assert marker["artifact_key"]["toolchain"] == "leanprover/lean4:v4.33.1"
+    selected = [event for event in events if event.kind == "project.shared.project_seed_selected"]
+    assert selected
+    assert selected[0].data["donor"] == str(producer)
+    assert selected[0].data["artifacts"] is False
+
+
+def test_remembered_project_without_build_identity_donates_source_only(tmp_path: Path) -> None:
     producer, consumer_source, revision = _remembered_package_pair(tmp_path)
     (producer / "lean-runtime.toml").write_text(
         'schema = "lean-runtime-project/1"\ndependencies = "shared"\n'
@@ -892,14 +960,13 @@ def test_remembered_project_donates_exact_package_source_and_artifacts(tmp_path:
         == revision
     )
     managed_artifact = package / ".lake" / "build" / "lib" / "lean" / "Dep.olean"
-    assert managed_artifact.read_bytes() == b"producer artifact"
-    (producer / ".lake" / "build" / "lib" / "lean" / "Dep.olean").write_bytes(b"mutated producer")
-    assert managed_artifact.read_bytes() == b"producer artifact"
+    assert not managed_artifact.exists()
     selected = next(
         event for event in events if event.kind == "project.shared.project_seed_selected"
     )
     assert selected.data["revision"] == revision
-    assert selected.data["artifacts"] is True
+    assert selected.data["artifacts"] is False
+    assert selected.data["artifact_miss"] == "donor has no matching toolchain artifact identity"
 
 
 def test_remembered_package_identity_ignores_input_revision_display_tag(
@@ -1542,6 +1609,43 @@ def test_shared_packages_reuse_only_their_effective_dependency_closure(tmp_path:
     assert first_override == second_override
 
 
+def test_shared_package_artifacts_are_rekeyed_when_toolchain_binary_changes(
+    tmp_path: Path,
+) -> None:
+    first_source, _revision = _shared_project(tmp_path / "first", tmp_path / "dependency")
+    second_source = _project(tmp_path / "second")
+    second_local = tmp_path / "second" / ".lake" / "packages" / "dep"
+    second_local.parent.mkdir(parents=True)
+    subprocess.run(
+        git_command("clone", "--quiet", str(tmp_path / "dependency"), str(second_local)),
+        check=True,
+    )
+    (tmp_path / "second" / "lake-manifest.json").write_bytes(
+        (tmp_path / "first" / "lake-manifest.json").read_bytes()
+    )
+    toolchains = ProjectToolchains(tmp_path / "runtime")
+    runtime = Runtime(toolchains=toolchains, libraries=[])  # type: ignore[arg-type]
+
+    first = runtime.prepare_shared_project(first_source)
+    first_package = Path(json.loads(first.overrides_file.read_text())["packages"][0]["dir"])
+    artifact = first_package / ".lake" / "build" / "lib" / "lean" / "Dep.olean"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"old compiler artifact")
+    first_marker = json.loads((first_package / ".lean-runtime-package.json").read_text())
+    assert first_marker["artifact_key"]["schema"] == "lean-runtime-package-artifact-key/2"
+
+    toolchains.executable_digests["lean"] = "sha256:" + "3" * 64
+    second = runtime.prepare_shared_project(second_source)
+    second_package = Path(json.loads(second.overrides_file.read_text())["packages"][0]["dir"])
+    second_marker = json.loads((second_package / ".lean-runtime-package.json").read_text())
+
+    assert second.workspace_id != first.workspace_id
+    assert second_package != first_package
+    assert not (second_package / ".lake" / "build").exists()
+    assert second_marker["artifact_key"]["lean_executable_digest"] == "sha256:" + "3" * 64
+    assert "profile" not in second_marker["artifact_key"]
+
+
 def test_shared_package_adopts_a_compatible_legacy_managed_path(tmp_path: Path) -> None:
     first_source, _revision = _shared_project(tmp_path / "first", tmp_path / "dependency")
     runtime = Runtime(
@@ -1552,11 +1656,15 @@ def test_shared_package_adopts_a_compatible_legacy_managed_path(tmp_path: Path) 
     first_override = Path(json.loads(first.overrides_file.read_text())["packages"][0]["dir"])
     marker = json.loads((first_override / ".lean-runtime-package.json").read_text())
     marker["schema"] = "lean-runtime-shared-project/1"
+    marker["artifact_key"]["schema"] = "lean-runtime-package-artifact-key/1"
     marker["package"]["url"] = str(marker["package"]["url"]).removesuffix(".git")
     marker["package"]["scope"] = "legacy-cosmetic-scope"
     legacy_id = sha256_id("project_package", marker)
     legacy = runtime.home / "project-packages" / legacy_id
     shutil.copytree(first_override, legacy)
+    legacy_artifact = legacy / ".lake" / "build" / "lib" / "lean" / "Dep.olean"
+    legacy_artifact.parent.mkdir(parents=True)
+    legacy_artifact.write_bytes(b"legacy artifact")
     (legacy / ".lean-runtime-package.json").write_text(json.dumps(marker))
 
     second_source = _project(tmp_path / "second")
@@ -1575,11 +1683,12 @@ def test_shared_package_adopts_a_compatible_legacy_managed_path(tmp_path: Path) 
         discover_project(second_source), seed_package_paths={"dep": legacy}
     )
     second_override = Path(json.loads(second.overrides_file.read_text())["packages"][0]["dir"])
-    assert second_override == legacy
-    assert second.package_ids == (legacy_id,)
+    assert second_override != legacy
+    assert second.package_ids != (legacy_id,)
+    assert not (second_override / ".lake" / "build").exists()
 
 
-def test_sparse_environment_artifacts_are_grafted_onto_exact_project_sources(
+def test_sparse_environment_artifacts_without_build_identity_are_not_grafted(
     tmp_path: Path,
 ) -> None:
     first_source, _revision = _shared_project(tmp_path / "first", tmp_path / "dependency")
@@ -1603,9 +1712,7 @@ def test_sparse_environment_artifacts_are_grafted_onto_exact_project_sources(
     )
     package = Path(json.loads(workspace.overrides_file.read_text())["packages"][0]["dir"])
     assert (package / ".git").is_dir()
-    assert (package / ".lake" / "build" / "lib" / "lean" / "Dep.olean").read_bytes() == (
-        b"verified compiled artifact"
-    )
+    assert not (package / ".lake" / "build" / "lib" / "lean" / "Dep.olean").exists()
 
 
 def test_project_environment_checks_actual_relative_file_and_records_provenance(

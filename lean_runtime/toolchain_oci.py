@@ -48,7 +48,7 @@ from .policies import format_byte_size
 from .serialization import canonical_json_bytes
 from .store import EnvironmentStore, platform_compatibility
 from .toolchain_slim import SlimManifest, materialize, verify_capabilities
-from .toolchains import ToolchainManager, normalize_toolchain
+from .toolchains import ToolchainManager, immutable_toolchain_spelling, normalize_toolchain
 
 TOOLCHAIN_CONFIG_SCHEMA = "lean-runtime-check-toolchain/1"
 TOOLCHAIN_CONFIG_MEDIA_TYPE = "application/vnd.lean-runtime.toolchain.config.v1+json"
@@ -443,6 +443,11 @@ class OCIToolchainPublisher:
         self.client = OCIRegistryClient(repository)
 
     def publish(self, toolchain: str) -> ToolchainPublication:
+        if not immutable_toolchain_spelling(toolchain):
+            raise ToolchainError(
+                f"refusing to publish mutable toolchain spelling {toolchain!r}; "
+                "use an immutable release or dated nightly"
+            )
         name = self.toolchains.ensure(toolchain)
         source = self.toolchains._elan_toolchain_dir(name)
         with tempfile.TemporaryDirectory(prefix="lean-runtime-toolchain-") as raw:
@@ -514,6 +519,11 @@ class OCIToolchainPublisher:
 
     def publish_index(self, toolchain: str, descriptors: list[dict[str, Any]]) -> str:
         """Atomically publish a multi-platform check-toolchain index."""
+        if not immutable_toolchain_spelling(toolchain):
+            raise ToolchainError(
+                f"refusing to publish mutable toolchain spelling {toolchain!r}; "
+                "use an immutable release or dated nightly"
+            )
         if not descriptors:
             raise ValueError("a toolchain index requires platform manifests")
         platforms: set[tuple[str, str, str]] = set()

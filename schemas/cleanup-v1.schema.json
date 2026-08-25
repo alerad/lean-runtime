@@ -14,7 +14,8 @@
       "properties": {
         "environments": {"$ref": "#/$defs/cleanup"},
         "downloaded_files": {"anyOf": [{"$ref": "#/$defs/downloadCleanup"}, {"type": "null"}]},
-        "scratch": {"$ref": "#/$defs/cleanup"}
+        "scratch": {"$ref": "#/$defs/cleanup"},
+        "project_artifacts": {"$ref": "#/$defs/cleanup"}
       }
     },
     "warnings": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"},

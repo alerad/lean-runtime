@@ -107,6 +107,20 @@ def diagnose(toolchains: ToolchainManager, store: EnvironmentStore) -> DoctorRep
         )
     else:
         checks.append(DoctorCheck("scratch", "pass", "No abandoned workspaces"))
+    legacy_artifacts = store.clean_legacy_project_artifacts(dry_run=True)
+    if legacy_artifacts.candidates:
+        checks.append(
+            DoctorCheck(
+                "project-artifacts-v1",
+                "warning",
+                f"{len(legacy_artifacts.candidates)} package artifact tree(s) use the obsolete "
+                "toolchain-insensitive /1 key; reclaim them with `lean-runtime clean --yes`",
+            )
+        )
+    else:
+        checks.append(
+            DoctorCheck("project-artifacts-v1", "pass", "No obsolete /1 project artifacts")
+        )
     store_status = store.status()
     cutoff = datetime.now(timezone.utc).timestamp() - STALE_ENVIRONMENT_AGE_HOURS * 3600
     stale = tuple(
@@ -145,6 +159,7 @@ def repair(toolchains: ToolchainManager, store: EnvironmentStore) -> DoctorRepor
         include_legacy=True,
         legacy_minimum_age_seconds=LEGACY_SCRATCH_MINIMUM_AGE_SECONDS,
     )
+    store.clean_legacy_project_artifacts(dry_run=False)
     with suppress(ToolchainError):
         toolchains.elan_path(bootstrap=True)
     return diagnose(toolchains, store)

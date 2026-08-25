@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -12,6 +13,7 @@ import tempfile
 import threading
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +32,38 @@ from .toolchain_slim import (
 ELAN_VERSION = "4.2.3"
 ELAN_INIT_URL = f"https://raw.githubusercontent.com/leanprover/elan/v{ELAN_VERSION}/elan-init.sh"
 ELAN_INIT_SHA256 = "a620ff1641616222c8d37c54845492004bb84d6877cdbc944dd65c1aa685bf53"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolchainBuildIdentity:
+    """Exact local compiler/build-driver identity for compiled artifact reuse."""
+
+    toolchain: str
+    lean_executable_digest: str
+    lake_executable_digest: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "schema": "lean-runtime-toolchain-build-identity/1",
+            "toolchain": self.toolchain,
+            "lean_executable_digest": self.lean_executable_digest,
+            "lake_executable_digest": self.lake_executable_digest,
+        }
+
+
+_IMMUTABLE_RELEASE = re.compile(
+    r"leanprover/lean4:v[0-9]+\.[0-9]+\.[0-9]+(?:-(?:rc|beta)[0-9]+)?\Z"
+)
+_IMMUTABLE_NIGHTLY = re.compile(r"(?:leanprover/lean4:)?nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+
+
+def immutable_toolchain_spelling(toolchain: str) -> bool:
+    """Return whether a published name denotes a non-moving Lean release channel."""
+    name = normalize_toolchain(toolchain)
+    return (
+        _IMMUTABLE_RELEASE.fullmatch(name) is not None
+        or _IMMUTABLE_NIGHTLY.fullmatch(name) is not None
+    )
 
 
 def default_runtime_home() -> Path:
@@ -82,7 +116,7 @@ class ToolchainManager:
         self.elan_home = self.home / "elan"
         self.events = events or EventEmitter()
         self.remote_ensure: Callable[[str, threading.Event | None], bool] | None = None
-        self._executable_digests: dict[str, tuple[int, int, str]] = {}
+        self._executable_digests: dict[str, tuple[int, int, int, str]] = {}
 
     @property
     def environment(self) -> dict[str, str]:
@@ -450,15 +484,19 @@ class ToolchainManager:
             raise ToolchainError(f"toolchain {name!r} does not provide {executable!r}")
         stat_result = binary.stat()
         cache_key = str(binary.resolve())
-        identity = (stat_result.st_size, stat_result.st_mtime_ns)
+        identity = (stat_result.st_size, stat_result.st_mtime_ns, stat_result.st_ctime_ns)
         cached = self._executable_digests.get(cache_key)
-        if cached is not None and cached[:2] == identity:
-            return cached[2]
+        if cached is not None and cached[:3] == identity:
+            return cached[3]
         cache_path = self.home / "toolchain-executable-digests.json"
         try:
             persisted = json.loads(cache_path.read_text(encoding="utf-8"))
             entry = persisted.get(cache_key, {})
-            if entry.get("size") == identity[0] and entry.get("mtime_ns") == identity[1]:
+            if (
+                entry.get("size") == identity[0]
+                and entry.get("mtime_ns") == identity[1]
+                and entry.get("ctime_ns") == identity[2]
+            ):
                 value = entry.get("digest")
                 if isinstance(value, str):
                     self._executable_digests[cache_key] = (*identity, value)
@@ -474,8 +512,20 @@ class ToolchainManager:
         persisted[cache_key] = {
             "size": identity[0],
             "mtime_ns": identity[1],
+            "ctime_ns": identity[2],
             "digest": value,
         }
         self.home.mkdir(parents=True, exist_ok=True)
         write_json_atomic(cache_path, persisted)
         return value
+
+    def build_identity(
+        self, toolchain: str, *, cancel: threading.Event | None = None
+    ) -> ToolchainBuildIdentity:
+        """Identify the exact installed compiler and Lake used by a source build."""
+        name = self.ensure_full(toolchain, cancel=cancel)
+        return ToolchainBuildIdentity(
+            name,
+            self.executable_digest(name, "lean"),
+            self.executable_digest(name, "lake"),
+        )

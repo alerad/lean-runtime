@@ -78,7 +78,9 @@ def _git_package(path: Path) -> tuple[str, str]:
     return revision, tree
 
 
-def _published_runtime(home: Path) -> tuple[Runtime, str, EnvironmentLock]:
+def _published_runtime(
+    home: Path, *, toolchain: str = "leanprover/lean4:v4.32.0"
+) -> tuple[Runtime, str, EnvironmentLock]:
     runtime = Runtime(home=home)
     package_root = home / "fixture-package"
     revision, tree = _git_package(package_root)
@@ -102,7 +104,7 @@ def _published_runtime(home: Path) -> tuple[Runtime, str, EnvironmentLock]:
         )
     )
     lock = EnvironmentLock(
-        toolchain="leanprover/lean4:v4.32.0",
+        toolchain=toolchain,
         spec_digest="spec_" + "b" * 64,
         root_lakefile='name = "test"\n',
         root_module="import Sample\n",
@@ -852,6 +854,44 @@ def test_verified_publication_session_is_reused_by_runtime(tmp_path: Path) -> No
 
     assert access_checks == 1
     assert publishes == 1
+
+
+def test_environment_publication_refuses_a_mutable_toolchain_before_registry_access(
+    tmp_path: Path,
+) -> None:
+    producer, environment_id, _lock = _published_runtime(
+        tmp_path / "producer", toolchain="leanprover/lean4:master"
+    )
+
+    with pytest.raises(EnvironmentError, match="refusing to publish mutable toolchain"):
+        producer.publish_environment(
+            environment_id,
+            "oci://registry.example/owner/cache",
+            finalize=False,
+        )
+
+
+def test_environment_publication_requires_a_source_built_input(tmp_path: Path) -> None:
+    producer, environment_id, _lock = _published_runtime(tmp_path / "producer")
+    marker = producer.store.environment_path(environment_id) / "workspace" / ".lean-runtime"
+    marker.mkdir(parents=True)
+    (marker / "capsule.json").write_text("{}")
+
+    with pytest.raises(EnvironmentError, match="publication input must be source-built"):
+        producer.publish_environment(
+            environment_id,
+            "oci://registry.example/owner/cache",
+            finalize=False,
+        )
+
+    direct = OCIEnvironmentPublisher(
+        OCIRepository.parse("oci://registry.example/owner/cache"),
+        producer.store,
+        producer.bundles,
+        producer.events,
+    )
+    with pytest.raises(PublicationError, match="publication input must be source-built"):
+        direct.publish(environment_id, finalize=False)
 
 
 def test_oci_manifest_publication_requires_remote_digest_verification() -> None:

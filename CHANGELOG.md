@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Key shared Lake package artifacts by the exact installed Lean and Lake
+  executable digests. Existing `/1` package artifacts are source-only donors;
+  the first build of each project re-shares artifacts under the `/2` key.
+- Let an exact registered dependency graph donate source across toolchain
+  versions, while stripping its build tree, and refresh existing project
+  attachments when their computed workspace identity changes.
+- Report obsolete `/1` project artifacts in `doctor`, reclaim them through
+  `clean`, and refuse publishing moving toolchain spellings such as `master`
+  or undated `nightly`. Publication also fails early when its input is an
+  acquired sparse capsule rather than a source build.
+
 ## 4.23.0 - 2026-08-24
 
 ## 4.22.0 - 2026-08-23

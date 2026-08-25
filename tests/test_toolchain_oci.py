@@ -201,3 +201,6 @@ def test_toolchain_index_finalization_is_ordered_and_rejects_duplicate_platforms
     duplicate = descriptor("linux", "amd64", "glibc-2.35", "c")
     with pytest.raises(ValueError, match="duplicate toolchain platform"):
         publisher.publish_index("v4.33.0", [linux, duplicate])
+
+    with pytest.raises(ToolchainError, match="refusing to publish mutable toolchain"):
+        publisher.publish_index("leanprover/lean4:master", [linux])
