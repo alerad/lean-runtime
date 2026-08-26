@@ -380,6 +380,7 @@ def test_transient_download_failures_are_retried_then_succeed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manager = ToolchainManager(tmp_path / "runtime")
+    monkeypatch.setenv("LEAN_RUNTIME_ELAN_HOME", str(manager.elan_home))
     manager.install_retry_delays = (0.0, 0.0)
     monkeypatch.setattr(manager, "elan_path", lambda **_kwargs: tmp_path / "elan")
     monkeypatch.setattr(manager, "is_installed", lambda _name: False)
@@ -416,6 +417,7 @@ def test_non_download_install_failures_are_not_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manager = ToolchainManager(tmp_path / "runtime")
+    monkeypatch.setenv("LEAN_RUNTIME_ELAN_HOME", str(manager.elan_home))
     manager.install_retry_delays = (0.0, 0.0)
     monkeypatch.setattr(manager, "elan_path", lambda **_kwargs: tmp_path / "elan")
     monkeypatch.setattr(manager, "is_installed", lambda _name: False)
@@ -436,6 +438,7 @@ def test_exhausted_download_retries_report_the_attempt_count(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manager = ToolchainManager(tmp_path / "runtime")
+    monkeypatch.setenv("LEAN_RUNTIME_ELAN_HOME", str(manager.elan_home))
     manager.install_retry_delays = (0.0,)
     monkeypatch.setattr(manager, "elan_path", lambda **_kwargs: tmp_path / "elan")
     monkeypatch.setattr(
