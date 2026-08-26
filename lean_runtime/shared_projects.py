@@ -11,7 +11,7 @@ import uuid
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from ._git import git_command
 from ._paths import remove_tree
@@ -21,8 +21,12 @@ from .locking import FileLock
 from .projects import ProjectContext, discover_project
 from .serialization import sha256_id, write_json_atomic
 from .store import clone_tree, platform_compatibility, source_snapshot_digest
+from .toolchains import ToolchainBuildIdentity
 
-SHARED_PROJECT_SCHEMA = "lean-runtime-shared-project/2"
+if TYPE_CHECKING:
+    from .toolchains import ToolchainManager
+
+SHARED_PROJECT_SCHEMA = "lean-runtime-shared-project/3"
 PROJECT_SEED_REGISTRY_SCHEMA = "lean-runtime-project-seeds/1"
 _PACKAGE_ID_PATTERN = re.compile(r"project_package_[0-9a-f]{64}\Z")
 _MANAGED_PROJECT_CONFIG = 'schema = "lean-runtime-project/1"\ndependencies = "shared"\n'
@@ -142,6 +146,8 @@ class PackageArtifactKey:
     package_name: str
     source: PackageSourceKey
     toolchain: str
+    lean_executable_digest: str
+    lake_executable_digest: str
     platform_abi: dict[str, str]
     config_file: str
     manifest_file: str
@@ -149,10 +155,12 @@ class PackageArtifactKey:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema": "lean-runtime-package-artifact-key/1",
+            "schema": "lean-runtime-package-artifact-key/2",
             "package_name": self.package_name,
             "source": self.source.to_dict(),
             "toolchain": self.toolchain,
+            "lean_executable_digest": self.lean_executable_digest,
+            "lake_executable_digest": self.lake_executable_digest,
             "platform_abi": self.platform_abi,
             "config_file": self.config_file,
             "manifest_file": self.manifest_file,
@@ -304,7 +312,10 @@ def _package_artifact_key(
     entry: dict[str, Any],
     source_package: Path,
     effective_entries: dict[str, dict[str, Any]],
+    toolchain_identity: ToolchainBuildIdentity | None,
 ) -> PackageArtifactKey | None:
+    if toolchain_identity is None:
+        return None
     source = _package_source_key(entry, source_package)
     if source is None:
         return None
@@ -320,7 +331,9 @@ def _package_artifact_key(
     return PackageArtifactKey(
         package_name=str(entry.get("name", "")),
         source=source,
-        toolchain=context.toolchain,
+        toolchain=toolchain_identity.toolchain,
+        lean_executable_digest=toolchain_identity.lean_executable_digest,
+        lake_executable_digest=toolchain_identity.lake_executable_digest,
         platform_abi=platform_compatibility(),
         config_file=str(entry.get("configFile", "lakefile.toml")),
         manifest_file=manifest_name,
@@ -334,6 +347,7 @@ def _package_identity(
     entry: dict[str, Any],
     source_package: Path,
     effective_entries: dict[str, dict[str, Any]],
+    toolchain_identity: ToolchainBuildIdentity | None,
 ) -> dict[str, Any]:
     manifest_name = entry.get("manifestFile", "lake-manifest.json")
     dependency_names = _dependency_names(source_package, str(manifest_name))
@@ -350,6 +364,7 @@ def _package_identity(
         entry=entry,
         source_package=source_package,
         effective_entries=effective_entries,
+        toolchain_identity=toolchain_identity,
     )
     return {
         "schema": SHARED_PROJECT_SCHEMA,
@@ -372,11 +387,19 @@ def _normalized_package_identity(identity: dict[str, Any]) -> dict[str, Any] | N
         if not isinstance(dependency, dict):
             return None
         normalized_dependencies.append(_entry_identity(dependency))
+    artifact_key = identity.get("artifact_key")
+    normalized_artifact = (
+        artifact_key
+        if isinstance(artifact_key, dict)
+        and artifact_key.get("schema") == "lean-runtime-package-artifact-key/2"
+        else None
+    )
     return {
         "toolchain": identity.get("toolchain"),
         "platform": identity.get("platform"),
         "package": _entry_identity(package),
         "effective_dependencies": normalized_dependencies,
+        "artifact_key": normalized_artifact,
     }
 
 
@@ -507,14 +530,37 @@ def _has_root_olean(build: Path, package_name: str) -> bool:
 class SharedProjectManager:
     """Prepare and lock reusable Lake dependency workspaces."""
 
-    def __init__(self, home: Path, events: EventEmitter) -> None:
+    def __init__(
+        self,
+        home: Path,
+        events: EventEmitter,
+        toolchains: ToolchainManager | None = None,
+    ) -> None:
         self.home = home
         self.events = events
+        self.toolchains = toolchains
         self.root = home / "project-workspaces"
         self.packages = home / "project-packages"
         self.sources = home / "project-sources"
         self.locks = home / "locks"
         self.seed_registry = home / "project-seeds.json"
+
+    def _build_identity(
+        self, toolchain: str, cancel: threading.Event | None
+    ) -> ToolchainBuildIdentity | None:
+        if self.toolchains is None:
+            return None
+        identity = getattr(self.toolchains, "build_identity", None)
+        if callable(identity):
+            return cast(ToolchainBuildIdentity, identity(toolchain, cancel=cancel))
+        digest = getattr(self.toolchains, "executable_digest", None)
+        if not callable(digest):
+            return None
+        return ToolchainBuildIdentity(
+            toolchain,
+            str(digest(toolchain, "lean")),
+            str(digest(toolchain, "lake")),
+        )
 
     def remember_project(self, context: ProjectContext) -> None:
         """Remember a Lake project as a future exact dependency seed."""
@@ -562,12 +608,13 @@ class SharedProjectManager:
 
     def registered_graph_seeds(
         self,
-        toolchain: str,
+        _toolchain: str,
         entries: list[dict[str, Any]],
         *,
         roots: tuple[Path, ...] = (),
+        exclude_root: Path | None = None,
     ) -> tuple[dict[str, Path], Path | None]:
-        """Find one exact complete graph in registered or explicitly supplied projects."""
+        """Find one exact complete source graph in registered or explicit projects."""
         required = {
             str(entry.get("name")): (
                 str(entry.get("rev")),
@@ -582,10 +629,10 @@ class SharedProjectManager:
         best_root: Path | None = None
         best_score: tuple[int, int, int] = (-1, -1, -1)
         for root in candidates:
+            if exclude_root is not None and root.resolve() == exclude_root.resolve():
+                continue
             try:
                 context = discover_project(root)
-                if context.toolchain != toolchain:
-                    continue
                 manifest = _load_manifest(context)
             except ProjectError:
                 continue
@@ -648,6 +695,7 @@ class SharedProjectManager:
         entries: list[dict[str, Any]],
         *,
         effective_entries: dict[str, dict[str, Any]] | None = None,
+        toolchain_identity: ToolchainBuildIdentity | None = None,
     ) -> dict[str, RememberedPackageSeed]:
         """Match remembered project roots to individual exact Git dependencies.
 
@@ -742,17 +790,34 @@ class SharedProjectManager:
                         if divergent is not None:
                             miss = f"resolved dependency differs: {divergent}"
                         else:
-                            artifact = _package_artifact_key(
+                            expected_artifact = _package_artifact_key(
                                 context=context,
                                 entry=entry,
                                 source_package=source_package,
                                 effective_entries=effective_entries,
+                                toolchain_identity=toolchain_identity,
                             )
-                            if artifact is None:
+                            try:
+                                donor_marker = json.loads(
+                                    (producer.root / ".lean-runtime-package.json").read_text(
+                                        encoding="utf-8"
+                                    )
+                                )
+                            except (OSError, json.JSONDecodeError):
+                                donor_marker = None
+                            recorded_artifact = (
+                                donor_marker.get("artifact_key")
+                                if isinstance(donor_marker, dict)
+                                else None
+                            )
+                            if expected_artifact is None:
                                 miss = "artifact dependency cone is incomplete"
+                            elif recorded_artifact != expected_artifact.to_dict():
+                                miss = "donor has no matching toolchain artifact identity"
                             elif not (source_package / ".lake" / "build").is_dir():
-                                artifact = None
                                 miss = "donor has no compiled artifacts"
+                            else:
+                                artifact = expected_artifact
                 try:
                     modified = (source_package / ".lake" / "build").stat().st_mtime_ns
                 except OSError:
@@ -881,6 +946,7 @@ class SharedProjectManager:
         entries: list[dict[str, Any]],
         *,
         effective_entries: dict[str, dict[str, Any]] | None = None,
+        toolchain_identity: ToolchainBuildIdentity | None = None,
     ) -> dict[str, Path]:
         """Return managed packages whose recorded graph exactly matches this project."""
         if effective_entries is None:
@@ -912,6 +978,20 @@ class SharedProjectManager:
                 normalized["toolchain"] != context.toolchain
                 or normalized["platform"] != platform_compatibility()
                 or normalized["package"] != _entry_identity(entry)
+            ):
+                continue
+            subdir = _package_subdir(entry)
+            source_package = package / subdir if subdir is not None else package
+            expected_artifact = _package_artifact_key(
+                context=context,
+                entry=entry,
+                source_package=source_package,
+                effective_entries=effective_entries,
+                toolchain_identity=toolchain_identity,
+            )
+            if (
+                expected_artifact is None
+                or normalized["artifact_key"] != expected_artifact.to_dict()
             ):
                 continue
             dependencies = normalized["effective_dependencies"]
@@ -1060,11 +1140,15 @@ class SharedProjectManager:
         display_name: str | None = None,
     ) -> SharedProjectWorkspace:
         manifest = _load_manifest(context)
+        toolchain_identity = self._build_identity(context.toolchain, cancel)
         packages = manifest["packages"]
         identity_packages = _resolved_path_entries(context, packages)
         identity = {
             "schema": SHARED_PROJECT_SCHEMA,
             "toolchain": context.toolchain,
+            "toolchain_build": (
+                toolchain_identity.to_dict() if toolchain_identity is not None else None
+            ),
             "platform": platform_compatibility(),
             "packages": identity_packages,
         }
@@ -1135,11 +1219,18 @@ class SharedProjectManager:
                     context,
                     packages,
                     effective_entries=effective_entries,
+                    toolchain_identity=toolchain_identity,
                 )
                 remembered_packages = self.registered_package_seeds(
                     context,
                     packages,
                     effective_entries=effective_entries,
+                    toolchain_identity=toolchain_identity,
+                )
+                registered_graph, registered_root = self.registered_graph_seeds(
+                    context.toolchain,
+                    packages,
+                    exclude_root=context.root,
                 )
                 git_packages = [entry for entry in packages if entry["type"] == "git"]
                 git_position = 0
@@ -1173,11 +1264,31 @@ class SharedProjectManager:
                         )
                         local = local_packages / str(entry["name"])
                         remembered = remembered_packages.get(package_name)
-                        preserve_seed_artifacts = True
+                        preserve_seed_artifacts = False
                         if seed_package_paths is not None:
                             seed = seed_package_paths.get(package_name, local)
                         elif seed_packages is not None:
                             seed = seed_packages / package_name
+                        elif package_name in registered_graph:
+                            seed = registered_graph[package_name]
+                            requested = entry.get("inputRev")
+                            self.events.emit(
+                                "project.shared.project_seed_selected",
+                                f"Reusing registered project source for {package_name}",
+                                phase="shared-project",
+                                package=package_name,
+                                input_revision=requested,
+                                revision=revision,
+                                donor=str(registered_root),
+                                artifacts=False,
+                                artifact_miss=(
+                                    "toolchain differs; compiled artifacts are not eligible"
+                                    if registered_root is not None
+                                    and discover_project(registered_root).toolchain
+                                    != context.toolchain
+                                    else "registered graph donates source only"
+                                ),
+                            )
                         elif local.is_dir() and _git_head(local) == revision and _git_clean(local):
                             seed = local
                         elif remembered is not None:
@@ -1240,6 +1351,7 @@ class SharedProjectManager:
                                 entry=entry,
                                 source_package=source_package,
                                 effective_entries=effective_entries,
+                                toolchain_identity=toolchain_identity,
                             )
                             package_id = sha256_id("project_package", package_identity)
                             final_target = self.packages / package_id

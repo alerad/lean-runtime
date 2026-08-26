@@ -465,6 +465,7 @@ def plan_adoption(
                     entry=entry,
                     source_package=source_package,
                     effective_entries=effective_entries,
+                    toolchain_identity=None,
                 )
                 key = sha256_id("project_package", identity)
             else:
@@ -558,6 +559,41 @@ class ProjectAdopter:
         lake_dir = context.root / ".lake"
         lake_dir.mkdir(parents=True, exist_ok=True)
         packages_dir = _packages_directory(context)
+        marker = lake_dir / ATTACHMENT_RECORD
+        try:
+            attachment = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            attachment = None
+        links_match = isinstance(attachment, dict) and (
+            attachment.get("schema") == ATTACHMENT_SCHEMA
+            and attachment.get("workspace_id") == workspace.workspace_id
+        )
+        if links_match:
+            for entry in manifest_packages:
+                if entry["type"] != "git":
+                    continue
+                name = str(entry["name"])
+                package_dir = override_package_dirs.get(name)
+                link = packages_dir / name
+                if package_dir is None or not link.is_symlink():
+                    links_match = False
+                    break
+                subdir = _package_subdir(entry)
+                target = package_dir
+                if subdir is not None:
+                    for _part in subdir.parts:
+                        target = target.parent
+                if link.resolve() != target.resolve():
+                    links_match = False
+                    break
+        if links_match:
+            return AdoptionResult(
+                context.root,
+                "already-attached",
+                len(workspace.package_ids),
+                0,
+                workspace.workspace_id,
+            )
         if packages_dir.parent != lake_dir:
             packages_dir.parent.mkdir(parents=True, exist_ok=True)
         token = f"{os.getpid()}.{uuid.uuid4().hex}"
@@ -567,7 +603,6 @@ class ProjectAdopter:
         staging.mkdir()
         swapped = False
         had_original = packages_dir.exists() or packages_dir.is_symlink()
-        marker = lake_dir / ATTACHMENT_RECORD
         config = context.root / PROJECT_CONFIG
         try:
             self.shared.events.emit(

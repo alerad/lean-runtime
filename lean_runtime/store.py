@@ -1110,6 +1110,64 @@ class EnvironmentStore:
             reclaimed_bytes,
         )
 
+    def clean_legacy_project_artifacts(
+        self,
+        *,
+        dry_run: bool = True,
+        minimum_age_seconds: float = 0,
+    ) -> CleanupReport:
+        """Reclaim package trees whose compiled artifacts use the obsolete /1 key."""
+        root = self.home / "project-packages"
+        now = time.time()
+        candidates: list[str] = []
+        removed: list[str] = []
+        retained: list[str] = []
+        candidate_bytes = 0
+        reclaimed_bytes = 0
+        with FileLock(self.lock_dir / "project-artifact-gc.lock"):
+            for package in sorted(root.glob("project_package_*")):
+                marker = package / ".lean-runtime-package.json"
+                try:
+                    record = json.loads(marker.read_text(encoding="utf-8"))
+                    artifact = record.get("artifact_key")
+                    legacy = (
+                        isinstance(artifact, dict)
+                        and artifact.get("schema") == "lean-runtime-package-artifact-key/1"
+                    )
+                    age = now - package.stat().st_mtime
+                except (OSError, AttributeError, json.JSONDecodeError):
+                    retained.append(package.name)
+                    continue
+                if not legacy or age < minimum_age_seconds:
+                    retained.append(package.name)
+                    continue
+                size = _tree_bytes(package)
+                candidates.append(package.name)
+                candidate_bytes += size
+                if dry_run:
+                    continue
+                try:
+                    with (
+                        FileLock(self.lock_dir / f"{package.name}-build.lock", timeout=0),
+                        FileLock(self.lock_dir / f"{package.name}.lock", timeout=0),
+                    ):
+                        if not package.is_dir():
+                            continue
+                        remove_tree(package)
+                except EnvironmentError:
+                    retained.append(package.name)
+                    continue
+                removed.append(package.name)
+                reclaimed_bytes += size
+        return CleanupReport(
+            tuple(candidates),
+            tuple(removed),
+            tuple(retained),
+            dry_run,
+            candidate_bytes,
+            reclaimed_bytes,
+        )
+
     def clean_downloads(
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
     ) -> DownloadCleanupReport:

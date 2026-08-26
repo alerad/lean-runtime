@@ -378,6 +378,31 @@ def test_clean_reports_candidate_and_reclaimed_bytes(tmp_path: Path) -> None:
     assert applied.reclaimed_bytes >= 4096
 
 
+def test_clean_reclaims_legacy_toolchain_insensitive_project_artifacts(tmp_path: Path) -> None:
+    store = EnvironmentStore(tmp_path)
+    package = tmp_path / "project-packages" / ("project_package_" + "a" * 64)
+    artifact = package / ".lake" / "build" / "lib" / "lean" / "Old.olean"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"obsolete")
+    (package / ".lean-runtime-package.json").write_text(
+        json.dumps(
+            {
+                "schema": "lean-runtime-shared-project/2",
+                "artifact_key": {"schema": "lean-runtime-package-artifact-key/1"},
+            }
+        )
+    )
+
+    preview = store.clean_legacy_project_artifacts(dry_run=True)
+    assert preview.candidates == (package.name,)
+    assert package.is_dir()
+
+    applied = store.clean_legacy_project_artifacts(dry_run=False)
+    assert applied.removed == (package.name,)
+    assert applied.reclaimed_bytes >= len(b"obsolete")
+    assert not package.exists()
+
+
 def test_cas_artifact_lease_protects_a_freshly_unpacked_artifact(tmp_path: Path) -> None:
     """A concurrent download cleanup must not reclaim an artifact mid-projection."""
     store = EnvironmentStore(tmp_path)

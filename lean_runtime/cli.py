@@ -179,6 +179,7 @@ def _render_cleanup(
     environments: CleanupReport,
     downloads: DownloadCleanupReport | None,
     scratch: CleanupReport | None = None,
+    project_artifacts: CleanupReport | None = None,
 ) -> None:
     style = styler_for(sys.stdout)
     retained_note = style.dim(
@@ -220,6 +221,17 @@ def _render_cleanup(
                 )
             else:
                 print("No abandoned workspaces to remove.")
+        if project_artifacts is not None:
+            if project_artifacts.candidates:
+                anything = True
+                print(
+                    style.bold(
+                        f"Would remove {len(project_artifacts.candidates)} obsolete project "
+                        f"artifact tree(s) · {format_byte_size(project_artifacts.candidate_bytes)}"
+                    )
+                )
+            else:
+                print("No obsolete /1 project artifacts to remove.")
         print(retained_note)
         if anything:
             print()
@@ -228,10 +240,13 @@ def _render_cleanup(
     reclaimed = environments.reclaimed_bytes + (downloads.reclaimed_bytes if downloads else 0)
     if scratch is not None:
         reclaimed += scratch.reclaimed_bytes
+    if project_artifacts is not None:
+        reclaimed += project_artifacts.reclaimed_bytes
     removed = (
         len(environments.removed)
         + (len(downloads.removed) if downloads else 0)
         + (len(scratch.removed) if scratch else 0)
+        + (len(project_artifacts.removed) if project_artifacts else 0)
     )
     if removed:
         parts = [f"{len(environments.removed)} environment(s)"]
@@ -239,6 +254,8 @@ def _render_cleanup(
             parts.append(f"{len(downloads.removed)} cached download(s)")
         if scratch is not None:
             parts.append(f"{len(scratch.removed)} abandoned workspace(s)")
+        if project_artifacts is not None:
+            parts.append(f"{len(project_artifacts.removed)} obsolete project artifact tree(s)")
         print(
             style.green(f"Removed {' and '.join(parts)} · reclaimed {format_byte_size(reclaimed)}")
         )
@@ -2460,12 +2477,19 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=True,
                 minimum_age_seconds=min(args.minimum_age_hours * 3600, 3600),
             )
+            preview_project_artifacts = runtime.clean_legacy_project_artifacts(dry_run=True)
             if not args.json:
-                _render_cleanup(cleanup_preview, preview_downloads, preview_scratch)
+                _render_cleanup(
+                    cleanup_preview,
+                    preview_downloads,
+                    preview_scratch,
+                    preview_project_artifacts,
+                )
             has_candidates = bool(
                 cleanup_preview.candidates
                 or (preview_downloads and preview_downloads.candidates)
                 or preview_scratch.candidates
+                or preview_project_artifacts.candidates
             )
             if has_candidates and not args.dry_run:
                 execute_cleanup = _confirm("Remove these files?", yes=args.yes, json_mode=args.json)
@@ -2486,11 +2510,15 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=not execute_cleanup,
                 minimum_age_seconds=min(args.minimum_age_hours * 3600, 3600),
             )
+            gc_project_artifacts = runtime.clean_legacy_project_artifacts(
+                dry_run=not execute_cleanup
+            )
             if args.json:
                 gc_payload: dict[str, Any] = {
                     "environments": gc_report.to_dict(),
                     "downloaded_files": gc_downloads.to_dict() if gc_downloads else None,
                     "scratch": gc_scratch.to_dict(),
+                    "project_artifacts": gc_project_artifacts.to_dict(),
                 }
                 _json(
                     envelope(
@@ -2500,7 +2528,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
             elif execute_cleanup:
-                _render_cleanup(gc_report, gc_downloads, gc_scratch)
+                _render_cleanup(gc_report, gc_downloads, gc_scratch, gc_project_artifacts)
             return 0
         if args.command == "check":
             if args.across is not None:

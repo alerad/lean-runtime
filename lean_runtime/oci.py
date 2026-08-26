@@ -28,7 +28,7 @@ from .bundles import (
     EnvironmentBundles,
     _capsule_config_object,
 )
-from .capsules import CapsuleManifest
+from .capsules import CAPSULE_MANIFEST, CapsuleManifest
 from .errors import (
     CredentialAcquisitionError,
     DownloadLimitExceeded,
@@ -62,6 +62,7 @@ from .store import (
     platform_compatibility,
     platform_record,
 )
+from .toolchains import immutable_toolchain_spelling
 
 _REPOSITORY = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+")
 _BEARER_PARAMETER = re.compile(r'([a-zA-Z]+)="([^"]*)"')
@@ -1458,6 +1459,22 @@ class OCIEnvironmentPublisher:
     ) -> PublicationInfo:
         if profile != "check-capsule":
             raise ValueError("publication profile must be 'check-capsule'")
+        root = self.store.environment_path(environment_id)
+        try:
+            metadata = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
+            lock = self.store.load_lock(str(metadata["lock_id"]))
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise EnvironmentError("publication input has invalid environment metadata") from exc
+        if (root / "workspace" / CAPSULE_MANIFEST).is_file():
+            raise EnvironmentError(
+                "publication input must be source-built; sparse acquired capsules cannot be "
+                "republished"
+            )
+        if not immutable_toolchain_spelling(lock.toolchain):
+            raise EnvironmentError(
+                f"refusing to publish mutable toolchain spelling {lock.toolchain!r}; "
+                "use an immutable release or dated nightly"
+            )
         self.check_access()
         with tempfile.TemporaryDirectory(prefix="lean-runtime-publish-") as temporary:
             temporary_root = Path(temporary)

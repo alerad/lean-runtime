@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from lean_runtime import ProjectError, ToolchainError, normalize_toolchain, project_toolchain
-from lean_runtime.toolchains import ToolchainManager
+from lean_runtime.toolchains import ToolchainManager, immutable_toolchain_spelling
 
 
 @pytest.mark.parametrize(
@@ -192,6 +192,44 @@ def test_executable_digest_identifies_the_exact_toolchain_binary(
     assert manager.executable_digest(toolchain, "lake") == (
         "sha256:" + hashlib.sha256(b"exact lake binary").hexdigest()
     )
+
+
+def test_executable_digest_rehashes_same_size_replacement_with_restored_mtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = ToolchainManager(tmp_path / "runtime")
+    toolchain = "leanprover/lean4:v4.33.0"
+    binary = manager._elan_toolchain_dir(toolchain) / "bin" / "lean"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"first")
+    monkeypatch.setattr(manager, "ensure", lambda _toolchain: toolchain)
+    first_stat = binary.stat()
+    assert manager.executable_digest(toolchain, "lean") == (
+        "sha256:" + hashlib.sha256(b"first").hexdigest()
+    )
+
+    binary.write_bytes(b"other")
+    os.utime(binary, ns=(first_stat.st_atime_ns, first_stat.st_mtime_ns))
+
+    assert manager.executable_digest(toolchain, "lean") == (
+        "sha256:" + hashlib.sha256(b"other").hexdigest()
+    )
+
+
+@pytest.mark.parametrize(
+    ("toolchain", "expected"),
+    [
+        ("4.33.0", True),
+        ("leanprover/lean4:v4.34.0-rc1", True),
+        ("nightly-2026-08-24", True),
+        ("leanprover/lean4:master", False),
+        ("nightly", False),
+        ("stable", False),
+        ("custom-linked-toolchain", False),
+    ],
+)
+def test_publication_toolchain_spelling_must_be_immutable(toolchain: str, expected: bool) -> None:
+    assert immutable_toolchain_spelling(toolchain) is expected
 
 
 def test_ensure_full_does_not_accept_a_slim_toolchain(

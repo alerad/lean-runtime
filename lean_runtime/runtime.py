@@ -118,7 +118,7 @@ from .store import (
     platform_record,
 )
 from .toolchain_oci import OCIToolchainLibrary, OCIToolchainPublisher, ToolchainPublication
-from .toolchains import ToolchainManager, normalize_toolchain
+from .toolchains import ToolchainManager, immutable_toolchain_spelling, normalize_toolchain
 from .verification import (
     VerificationCheck,
     VerificationReport,
@@ -254,7 +254,7 @@ class Runtime:
         self.home = self.toolchains.home
         self.backend = backend or LocalBackend()
         self.store = EnvironmentStore(self.home)
-        self.shared_projects = SharedProjectManager(self.home, self.events)
+        self.shared_projects = SharedProjectManager(self.home, self.events, self.toolchains)
         self.lake_cache = LakeArtifactCache(self.home, self.toolchains, self.events)
         self.header_cache = LeanHeaderCache(self.home, self.toolchains, self.events)
         self.identifier_resolver = IdentifierResolver(self.home)
@@ -800,6 +800,16 @@ class Runtime:
         if sign and not finalize:
             raise ValueError("platform-only publishing cannot sign a lock index")
         environment = self.environment(identifier)
+        if environment.sparse:
+            raise EnvironmentError(
+                "publication input must be source-built; sparse acquired capsules cannot be "
+                "republished"
+            )
+        if not immutable_toolchain_spelling(environment.lock.toolchain):
+            raise EnvironmentError(
+                f"refusing to publish mutable toolchain spelling "
+                f"{environment.lock.toolchain!r}; use an immutable release or dated nightly"
+            )
         repository = OCIRepository.parse(library)
         selected_publisher = publisher or OCIEnvironmentPublisher(
             repository, self.store, self.bundles, self.events
@@ -1569,18 +1579,6 @@ class Runtime:
         results: list[AdoptionResult] = []
         failures: list[tuple[Path, str]] = []
         for project in selected_plan.projects:
-            if project.attached:
-                workspace_id = discover_project(project.root).provenance().workspace_id
-                results.append(
-                    AdoptionResult(
-                        project.root,
-                        "already-attached",
-                        len(project.packages),
-                        0,
-                        workspace_id,
-                    )
-                )
-                continue
             if not project.ready:
                 continue
             context = discover_project(project.root)
@@ -2466,6 +2464,14 @@ class Runtime:
     ) -> CleanupReport:
         """Reclaim abandoned disposable execution and resolution workspaces."""
         return self.store.clean_scratch(dry_run=dry_run, minimum_age_seconds=minimum_age_seconds)
+
+    def clean_legacy_project_artifacts(
+        self, *, dry_run: bool = True, minimum_age_seconds: float = 0
+    ) -> CleanupReport:
+        return self.store.clean_legacy_project_artifacts(
+            dry_run=dry_run,
+            minimum_age_seconds=minimum_age_seconds,
+        )
 
     def clean_downloads(
         self, *, dry_run: bool = True, minimum_age_seconds: float = 2_592_000
