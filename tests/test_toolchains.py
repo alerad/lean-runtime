@@ -4,6 +4,7 @@ import hashlib
 import io
 import os
 import subprocess
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,7 +12,12 @@ import pytest
 
 from lean_runtime import ProjectError, ToolchainError, normalize_toolchain, project_toolchain
 from lean_runtime.events import EventEmitter
-from lean_runtime.toolchains import ToolchainManager, immutable_toolchain_spelling
+from lean_runtime.toolchains import (
+    ELAN_RELEASE_URL,
+    ToolchainManager,
+    elan_release_archive,
+    immutable_toolchain_spelling,
+)
 
 
 @pytest.mark.parametrize(
@@ -77,6 +83,83 @@ def test_elan_bootstrap_rejects_installer_with_wrong_digest(
     monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: io.BytesIO(b"bad"))
     with pytest.raises(ToolchainError, match="integrity check"):
         ToolchainManager(tmp_path / "runtime").bootstrap_elan()
+
+
+def _fake_elan_release(script: str) -> bytes:
+    """Build a release-shaped tar.gz whose elan-init is a shell script."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        payload = script.encode()
+        info = tarfile.TarInfo("elan-init")
+        info.size = len(payload)
+        info.mode = 0o755
+        tar.addfile(info, io.BytesIO(payload))
+    return buffer.getvalue()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows bootstrap uses an existing Elan executable")
+def test_elan_bootstrap_installs_the_pinned_release_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _fake_elan_release(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$@" > "$ELAN_HOME.args"\n'
+        'mkdir -p "$ELAN_HOME/bin" && printf "" > "$ELAN_HOME/bin/elan" '
+        '&& chmod +x "$ELAN_HOME/bin/elan"\n'
+    )
+    digest = hashlib.sha256(archive).hexdigest()
+    requested: list[str] = []
+
+    def urlopen(url: str, **_kwargs: object) -> io.BytesIO:
+        requested.append(url)
+        return io.BytesIO(archive)
+
+    monkeypatch.setattr(
+        "lean_runtime.toolchains.elan_release_archive", lambda: ("elan-test.tar.gz", digest)
+    )
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.delenv("LEAN_RUNTIME_ELAN", raising=False)
+    monkeypatch.delenv("LEAN_RUNTIME_ELAN_HOME", raising=False)
+    monkeypatch.setattr("lean_runtime.toolchains.shutil.which", lambda _name: None)
+
+    manager = ToolchainManager(tmp_path / "runtime")
+    assert manager.bootstrap_elan() == manager.elan_home / "bin" / "elan"
+    assert requested == [f"{ELAN_RELEASE_URL}/elan-test.tar.gz"]
+    recorded = Path(f"{manager.elan_home}.args").read_text().split()
+    assert recorded == ["-y", "--no-modify-path", "--default-toolchain", "none"]
+
+
+@pytest.mark.parametrize(
+    ("system", "machine", "archive"),
+    [
+        ("Linux", "x86_64", "elan-x86_64-unknown-linux-gnu.tar.gz"),
+        ("Linux", "aarch64", "elan-aarch64-unknown-linux-gnu.tar.gz"),
+        ("Darwin", "arm64", "elan-aarch64-apple-darwin.tar.gz"),
+        ("Darwin", "x86_64", "elan-x86_64-apple-darwin.tar.gz"),
+    ],
+)
+def test_elan_release_archive_is_selected_per_platform(
+    monkeypatch: pytest.MonkeyPatch, system: str, machine: str, archive: str
+) -> None:
+    monkeypatch.setattr("lean_runtime.toolchains.platform.system", lambda: system)
+    monkeypatch.setattr("lean_runtime.toolchains.platform.machine", lambda: machine)
+    monkeypatch.setattr("lean_runtime.toolchains.platform.libc_ver", lambda: ("glibc", "2.39"))
+    name, digest = elan_release_archive()
+    assert name == archive
+    assert len(digest) == 64
+
+
+def test_elan_release_archive_refuses_platforms_without_a_pinned_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("lean_runtime.toolchains.platform.system", lambda: "Linux")
+    monkeypatch.setattr("lean_runtime.toolchains.platform.machine", lambda: "x86_64")
+    monkeypatch.setattr("lean_runtime.toolchains.platform.libc_ver", lambda: ("musl", "1.2"))
+    with pytest.raises(ToolchainError, match="LEAN_RUNTIME_ELAN"):
+        elan_release_archive()
+    monkeypatch.setattr("lean_runtime.toolchains.platform.system", lambda: "FreeBSD")
+    with pytest.raises(ToolchainError, match="freebsd/x86_64"):
+        elan_release_archive()
 
 
 def test_is_installed_lists_toolchains_without_running_lean(

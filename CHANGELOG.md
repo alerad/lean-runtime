@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Pin the Elan build that automatic bootstrap installs. Bootstrap now
+  downloads the `v4.2.3` release archive for the host platform directly from
+  the Elan releases, verifies its SHA-256, and runs its `elan-init`, instead of
+  running the installer script that always fetched `releases/latest`. Two
+  machines on the same Lean Runtime version therefore get the same Elan.
 - Retry `elan toolchain install` up to two more times when Elan reports a
   transient download failure (dropped connection, TLS handshake error,
   timeout), announcing each retry as a `toolchain.install_retry` event. Unknown

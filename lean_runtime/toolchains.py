@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import stat
 import subprocess
+import tarfile
 import tempfile
 import threading
 import time
@@ -31,8 +33,66 @@ from .toolchain_slim import (
 )
 
 ELAN_VERSION = "4.2.3"
-ELAN_INIT_URL = f"https://raw.githubusercontent.com/leanprover/elan/v{ELAN_VERSION}/elan-init.sh"
-ELAN_INIT_SHA256 = "a620ff1641616222c8d37c54845492004bb84d6877cdbc944dd65c1aa685bf53"
+ELAN_RELEASE_URL = f"https://github.com/leanprover/elan/releases/download/v{ELAN_VERSION}"
+#: Release archive and SHA-256 per (system, machine). Bootstrap installs exactly
+#: this Elan build rather than whatever ``releases/latest`` points at today, so
+#: two machines on the same Lean Runtime version get the same Elan. Bump the
+#: version and every digest together.
+ELAN_RELEASE_ARCHIVES: dict[tuple[str, str], tuple[str, str]] = {
+    ("linux", "x86_64"): (
+        "elan-x86_64-unknown-linux-gnu.tar.gz",
+        "df0b2b3a439961ffcbb3985214365ffe40f49bc871df04dff268c7d8e21ca8b2",
+    ),
+    ("linux", "arm64"): (
+        "elan-aarch64-unknown-linux-gnu.tar.gz",
+        "cb69af0803b04157bc30201c29c12fca882bb3ad8b43476b8d2d3064810bc3ac",
+    ),
+    ("darwin", "x86_64"): (
+        "elan-x86_64-apple-darwin.tar.gz",
+        "10d037a69731c0593723e018130c5f54afde175796b4af8ba1317e561e55598c",
+    ),
+    ("darwin", "arm64"): (
+        "elan-aarch64-apple-darwin.tar.gz",
+        "7cae4c03b2f0de4053fb04a91359d5804551e6e37a6ddd1b2e0097dc561ae4a9",
+    ),
+}
+
+
+def elan_release_archive() -> tuple[str, str]:
+    """Return the pinned Elan archive name and SHA-256 for this host."""
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    machine = {"amd64": "x86_64", "x64": "x86_64", "aarch64": "arm64"}.get(machine, machine)
+    if system == "linux":
+        libc, _version = platform.libc_ver()
+        if libc.lower() not in {"glibc", ""}:
+            raise ToolchainError(
+                f"automatic Elan bootstrap has no pinned build for {libc} Linux; "
+                "install Elan yourself and set LEAN_RUNTIME_ELAN"
+            )
+    try:
+        return ELAN_RELEASE_ARCHIVES[(system, machine)]
+    except KeyError:
+        raise ToolchainError(
+            f"automatic Elan bootstrap has no pinned build for {system}/{machine}; "
+            "install Elan yourself and set LEAN_RUNTIME_ELAN"
+        ) from None
+
+
+def _extract_elan_init(archive: bytes, archive_name: str) -> bytes:
+    """Pull the ``elan-init`` executable out of a verified release archive."""
+    import io
+
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+            for member in tar.getmembers():
+                if member.isfile() and Path(member.name).name == "elan-init":
+                    extracted = tar.extractfile(member)
+                    if extracted is not None:
+                        return extracted.read()
+    except tarfile.TarError as exc:
+        raise ToolchainError(f"could not read Elan archive {archive_name}: {exc}") from exc
+    raise ToolchainError(f"Elan archive {archive_name} does not contain elan-init")
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,22 +246,27 @@ class ToolchainManager:
                 "automatic Elan bootstrap currently supports macOS and Linux; "
                 "set LEAN_RUNTIME_ELAN on Windows"
             )
+        archive_name, expected_digest = elan_release_archive()
         self.home.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="elan-bootstrap-", dir=self.home) as raw:
-            script = Path(raw) / "elan-init.sh"
             try:
-                with urllib.request.urlopen(ELAN_INIT_URL, timeout=30) as response:
-                    installer = response.read()
+                with urllib.request.urlopen(
+                    f"{ELAN_RELEASE_URL}/{archive_name}", timeout=60
+                ) as response:
+                    archive = response.read()
             except OSError as exc:
-                raise ToolchainError(f"could not download Elan installer: {exc}") from exc
-            observed = hashlib.sha256(installer).hexdigest()
-            if observed != ELAN_INIT_SHA256:
-                raise ToolchainError("downloaded Elan installer failed its SHA-256 integrity check")
-            script.write_bytes(installer)
-            script.chmod(script.stat().st_mode | stat.S_IXUSR)
+                raise ToolchainError(f"could not download Elan {ELAN_VERSION}: {exc}") from exc
+            observed = hashlib.sha256(archive).hexdigest()
+            if observed != expected_digest:
+                raise ToolchainError(
+                    f"downloaded Elan {ELAN_VERSION} archive failed its SHA-256 integrity check"
+                )
+            installer = Path(raw) / "elan-init"
+            installer.write_bytes(_extract_elan_init(archive, archive_name))
+            installer.chmod(installer.stat().st_mode | stat.S_IXUSR)
             env = self.environment
             process = subprocess.run(
-                [str(script), "-y", "--no-modify-path", "--default-toolchain", "none"],
+                [str(installer), "-y", "--no-modify-path", "--default-toolchain", "none"],
                 env=env,
                 text=True,
                 stdout=subprocess.PIPE,

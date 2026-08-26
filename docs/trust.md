@@ -5,7 +5,8 @@ Lean Runtime records exact identities, verifies retained content, and reports th
 ## What it establishes
 
 - Exact package revisions and Git tree identities in environment locks
-- Toolchain identity
+- Toolchain identity, and the Elan build that automatic bootstrap installs
+  (pinned version, SHA-256 verified)
 - Content digests for retained and transferred artifacts
 - Platform compatibility metadata
 - Execution provenance for completed checks, including `source_digest`, the
