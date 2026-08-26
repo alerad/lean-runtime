@@ -43,6 +43,32 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -e '.[dev]'
+      # The integration tests exercise the real acquisition path: pinned Elan
+      # bootstrap, then `elan toolchain install`. Cache the resulting Elan home
+      # so warm runs never depend on the release host; a cache miss (Elan or
+      # toolchain bump, cache eviction) still runs that path end to end.
+      - name: Restore the pinned Elan and integration toolchains
+        uses: actions/cache@v4
+        with:
+          path: ~/.lean-runtime-ci
+          key: elan-home-${{ runner.os }}-${{ hashFiles('lean_runtime/toolchains.py', '.github/workflows/ci.yml') }}
+      - name: Warm Elan and the integration toolchains (downloads only on a cache miss)
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          from lean_runtime.toolchains import ToolchainManager
+
+          manager = ToolchainManager(Path.home() / ".lean-runtime-ci")
+          for toolchain in ("leanprover/lean4:v4.32.0", "leanprover/lean4:v4.32.2"):
+              print(manager.ensure_full(toolchain))
+          PY
+          {
+            echo "LEAN_RUNTIME_ELAN=$HOME/.lean-runtime-ci/elan/bin/elan"
+            echo "LEAN_RUNTIME_ELAN_HOME=$HOME/.lean-runtime-ci/elan"
+            echo "LEAN_RUNTIME_TEST_ELAN=$HOME/.lean-runtime-ci/elan/bin/elan"
+            echo "LEAN_RUNTIME_TEST_ELAN_HOME=$HOME/.lean-runtime-ci/elan"
+          } >> "$GITHUB_ENV"
       - run: pytest -m integration -vv
       - run: python -m pip install build
       - run: python -m build
