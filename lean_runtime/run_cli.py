@@ -49,7 +49,7 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, standalone: bool = Tru
     parser.add_argument(
         "--no-discover",
         action="store_true",
-        help="require explicit context or a pinned Lake project",
+        help="require an explicit environment or a pinned Lake project",
     )
     parser.add_argument(
         "--standalone",
@@ -118,7 +118,9 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, standalone: bool = Tru
         help="report the acquisition cost without downloading or checking",
     )
     parser.add_argument(
-        "--explain", action="store_true", help="explain context selection without running"
+        "--explain",
+        action="store_true",
+        help="explain where the environment would come from, without running Lean",
     )
     parser.add_argument(
         "--timings",

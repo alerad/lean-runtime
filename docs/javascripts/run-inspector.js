@@ -8,10 +8,10 @@
       record: "automatic discovery",
       lines: [
         ["dim", "Reading declared imports", "source"],
-        ["active", "Discovering an exact environment", "context"],
+        ["active", "Proposing an exact environment from imports", "context"],
         ["dim", "Trying mathlib-v4.33.0 · leanprover/lean4:v4.33.0", "environment"],
         ["dim", "Running Lean", "lean"],
-        ["ok", "✓ Primes.lean accepted in 4.45s", "record"]
+        ["ok", "✓ Primes.lean accepted in mathlib-v4.33.0 (4.45s)", "record"]
       ]
     },
     pinned: {
@@ -19,10 +19,10 @@
       context: "explicit package release",
       record: "command line",
       lines: [
-        ["dim", "Using explicit context mathlib@v4.33.0", "context"],
+        ["dim", "Using explicit environment mathlib@v4.33.0", "context"],
         ["dim", "Resolved mathlib-v4.33.0 · leanprover/lean4:v4.33.0", "environment"],
         ["dim", "Running Lean", "lean"],
-        ["ok", "✓ Primes.lean accepted", "record"]
+        ["ok", "✓ Primes.lean accepted in mathlib-v4.33.0 (3.90s)", "record"]
       ]
     },
     project: {
@@ -33,7 +33,7 @@
         ["dim", "Using lean-toolchain and lake-manifest.json", "context"],
         ["dim", "Preparing the pinned project environment", "environment"],
         ["dim", "Running Lake", "lean"],
-        ["ok", "✓ project accepted", "record"]
+        ["ok", "✓ project accepted in leanprover/lean4:v4.33.0 (6.12s)", "record"]
       ]
     }
   };

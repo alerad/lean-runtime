@@ -23,7 +23,10 @@
   `declaration-index publish` now describe the change and require `--yes` or an
   interactive confirmation, exiting with code `2` non-interactively otherwise.
 - Separate the vocabulary of *context* (where the decision comes from) and
-  *environment* (what was chosen) across help text and documentation.
+  *environment* (what was chosen) across help text and documentation;
+  `check --help` and `status --help` now describe the model, `--using` takes
+  an `ENVIRONMENT`, and the generated `AGENTS.md` opens with the same model
+  plus the `status` dry run and the `--yes` rule.
 - Improve Windows checks by reusing Elan from `PATH`, recognizing native
   `.exe` toolchain binaries, and running core-only discovery directly against
   its exact Lean toolchain when no platform environment artifact is needed.
