@@ -44,6 +44,11 @@ def serialize_execution_v1(result: ExecutionResult) -> dict[str, Any]:
     return envelope("lean-runtime.execution/v1", ok=result.ok, data=result.to_dict())
 
 
+def serialize_status_v1(payload: dict[str, Any]) -> dict[str, Any]:
+    """Wrap a ``status`` report; the report itself is always produced, so ok is true."""
+    return envelope("lean-runtime.status/v1", ok=True, data=payload)
+
+
 def serialize_verify_v1(report: VerificationReport) -> dict[str, Any]:
     warnings = [
         error(item.code, str((item.details or {}).get("message", item.code)), details=item.details)

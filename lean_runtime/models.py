@@ -177,6 +177,22 @@ class ExecutionResult:
         return self.provenance.environment_id if self.provenance else None
 
     @property
+    def verdict(self) -> str:
+        """Lean's answer, separated from whether Lean finished.
+
+        ``accepted`` and ``rejected`` are both normal results: Lean ran to
+        completion inside one exact environment and judged the source.
+        ``not_run`` means no verdict exists because the run was cut short by a
+        timeout or cancellation; ``ok`` is false in that case too, so callers
+        that only test ``ok`` remain correct.
+        """
+        if self.ok:
+            return "accepted"
+        if self.timed_out or self.cancelled:
+            return "not_run"
+        return "rejected"
+
+    @property
     def execution_id(self) -> str | None:
         return self.provenance.execution_id if self.provenance else None
 
@@ -201,7 +217,7 @@ class ExecutionResult:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""
-        return asdict(self)
+        return {**asdict(self), "verdict": self.verdict}
 
     def raise_for_error(self) -> ExecutionResult:
         """Return this result when accepted, otherwise raise ``LeanCheckError``."""

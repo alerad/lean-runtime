@@ -83,6 +83,36 @@ hide:
 
 
 
+<section class="lr-workflows" aria-labelledby="model-title">
+  <div class="lr-section-heading">
+    <p class="lr-kicker">The model</p>
+    <h2 id="model-title">Four nouns and one rule.</h2>
+  </div>
+  <div class="lr-card-grid">
+    <article>
+      <p class="lr-card-label">Context</p>
+      <h3>Where requirements come from</h3>
+      <p><code>--using</code>, frontmatter, the owning Lake project, or automatic discovery — in that order.</p>
+    </article>
+    <article>
+      <p class="lr-card-label">Environment</p>
+      <h3>One exact, immutable set</h3>
+      <p>A toolchain plus every package at a pinned revision. Identified by content, never by a mutable tag.</p>
+    </article>
+    <article>
+      <p class="lr-card-label">Lock</p>
+      <h3>An environment written down</h3>
+      <p>Reusable on any machine, including with network access disabled.</p>
+    </article>
+    <article>
+      <p class="lr-card-label">Verdict</p>
+      <h3>Lean's answer</h3>
+      <p><code>accepted</code> or <code>rejected</code>, always inside one named environment. A rejection is a normal result.</p>
+    </article>
+  </div>
+  <p class="lr-lead"><strong>Discovery proposes an environment. Only Lean accepts it.</strong> <code>status</code> shows the proposal; <code>check</code> produces the verdict.</p>
+</section>
+
 <section class="lr-workflows" aria-labelledby="workflows-title">
   <div class="lr-section-heading">
     <p class="lr-kicker">Workflows</p>

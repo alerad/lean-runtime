@@ -472,7 +472,36 @@ def test_status_without_context_is_actionable(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert main(["--home", str(tmp_path / "home"), "status", str(tmp_path)]) == 0
-    assert "no pinned Lake project" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "no pinned Lake project" in output
+    assert "Next:" in output
+
+
+def test_standalone_status_says_the_environment_is_proposed_not_proven(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "Standalone.lean"
+    source.write_text("import Mathlib\n")
+    assert main(["--home", str(tmp_path / "home"), "status", str(source)]) == 0
+    output = capsys.readouterr().out
+    assert "standalone file" in output
+    assert "proposed from imports; Lean has not run" in output
+    assert "Will try" in output
+    assert "add --probe" in output
+    assert f"Next: lean-runtime check {source}" in output
+
+
+def test_project_status_reports_an_exact_context(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "lakefile.toml").write_text('name = "fixture"\n[[lean_lib]]\nname = "Fixture"\n')
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.32.2\n")
+    assert main(["--home", str(tmp_path / "home"), "status", str(tmp_path), "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data["kind"] == "project"
+    assert data["context"]["source"] == "project"
+    assert data["context"]["confidence"] == "exact"
+    assert data["toolchain"] == "leanprover/lean4:v4.32.2"
 
 
 def test_standalone_status_reports_plan_not_selection_and_availability(
@@ -481,10 +510,22 @@ def test_standalone_status_reports_plan_not_selection_and_availability(
     source = tmp_path / "Standalone.lean"
     source.write_text("import Mathlib\n")
     assert main(["--home", str(tmp_path / "home"), "status", str(source), "--json"]) == 0
-    data = json.loads(capsys.readouterr().out)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == "lean-runtime.status/v1"
+    assert payload["ok"] is True
+    data = payload["data"]
     assert "selected" not in data
+    assert data["context"] == {
+        "source": "automatic_discovery",
+        "confidence": "proposed",
+        "reason": "no pinned Lake project found",
+    }
     assert data["planned_first"] == data["candidates"][0]
-    assert data["availability"][data["planned_first"]]["remote"] == "not_probed"
+    first = data["availability"][data["planned_first"]]
+    assert first["remote"] == "not_probed"
+    assert first["local"] is False
+    assert isinstance(first["toolchain_installed"], bool)
+    assert data["probe"] is None
 
 
 def test_status_reports_unowned_file_beneath_declarative_project_as_standalone(
@@ -497,10 +538,11 @@ def test_status_reports_unowned_file_beneath_declarative_project_as_standalone(
     source.write_text("example : True := trivial\n")
 
     assert main(["--home", str(tmp_path / "home"), "status", str(source), "--json"]) == 0
-    data = json.loads(capsys.readouterr().out)
+    data = json.loads(capsys.readouterr().out)["data"]
     assert data["kind"] == "standalone"
     assert data["parent_project"] == str(tmp_path)
     assert "no declared target owns" in data["context_reason"]
+    assert data["context"]["confidence"] == "proposed"
 
 
 def test_standalone_and_using_are_mutually_exclusive(
@@ -571,12 +613,12 @@ def test_status_reports_agent_guide_presence(
     (root / "lakefile.toml").write_text('name = "fixture"\n')
     (root / "lean-toolchain").write_text("leanprover/lean4:v4.32.2\n")
     assert main(["--home", str(tmp_path / "home"), "status", str(root), "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["agents_guide"] is None
+    assert json.loads(capsys.readouterr().out)["data"]["agents_guide"] is None
     assert main(["--home", str(tmp_path / "home"), "status", str(root)]) == 0
     assert "lean-runtime adopt" in capsys.readouterr().out
     (root / "AGENTS.md").write_text("# guide\n")
     assert main(["--home", str(tmp_path / "home"), "status", str(root), "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["agents_guide"] == str(root / "AGENTS.md")
+    assert json.loads(capsys.readouterr().out)["data"]["agents_guide"] == str(root / "AGENTS.md")
 
 
 def test_env_acquire_demands_the_full_environment(
@@ -595,3 +637,98 @@ def test_env_acquire_demands_the_full_environment(
     assert main(["--home", str(tmp_path / "home"), "env", "acquire", str(lock_file)]) == 0
     assert observed["import_roots"] == ("LeanRuntimeEnvironment",)
     assert json.loads(capsys.readouterr().out) == {"ok": True}
+
+
+def test_status_json_is_an_envelope_that_validates(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from jsonschema import Draft202012Validator
+    from referencing import Registry, Resource
+
+    import lean_runtime as lean
+
+    documents = [
+        json.loads(lean.schema_path(name).read_text(encoding="utf-8"))
+        for name in sorted(lean.SCHEMA_NAMES)
+    ]
+    registry = Registry().with_resources(
+        (document["$id"], Resource.from_contents(document)) for document in documents
+    )
+    status_schema = next(
+        item for item in documents if item["$id"].endswith("status-v1.schema.json")
+    )
+    validator = Draft202012Validator(status_schema, registry=registry)
+
+    source = tmp_path / "Standalone.lean"
+    source.write_text("example : True := trivial\n")
+    for subject in (str(source), str(tmp_path)):
+        assert main(["--home", str(tmp_path / "home"), "status", subject, "--json"]) == 0
+        validator.validate(json.loads(capsys.readouterr().out))
+
+
+def test_prune_original_requires_consent_when_not_interactive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    calls: list[str] = []
+
+    class FakeToolchains:
+        def materialize_slim(self, toolchain: str) -> SimpleNamespace:
+            calls.append(f"slim:{toolchain}")
+            return SimpleNamespace(to_dict=lambda: {"toolchain": toolchain})
+
+        def prune_original(self, toolchain: str) -> None:
+            calls.append(f"prune:{toolchain}")
+
+        def slim_path(self, toolchain: str) -> Path:
+            return tmp_path / "slim"
+
+    class FakeRuntime:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.toolchains = FakeToolchains()
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime", FakeRuntime)
+    home = str(tmp_path / "home")
+    assert main(["--home", home, "toolchain", "optimize", "v4.33.0", "--prune-original"]) == 2
+    captured = capsys.readouterr()
+    assert "Remove the full toolchain" in captured.err
+    assert "pass --yes" in captured.err
+    assert calls == []
+    assert (
+        main(["--home", home, "toolchain", "optimize", "v4.33.0", "--prune-original", "--yes"]) == 0
+    )
+    assert calls == ["slim:v4.33.0", "prune:v4.33.0"]
+
+
+def test_publish_toolchain_requires_consent_when_not_interactive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    published: list[tuple[str, str]] = []
+
+    class FakeRuntime:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def publish_toolchain(self, toolchain: str, library: str) -> SimpleNamespace:
+            published.append((toolchain, library))
+            return SimpleNamespace(to_dict=lambda: {"toolchain": toolchain})
+
+    monkeypatch.setattr("lean_runtime.cli.Runtime", FakeRuntime)
+    home = str(tmp_path / "home")
+    args = ["--home", home, "toolchain", "publish", "v4.33.0", "--library", "oci://example/lib"]
+    assert main(args) == 2
+    assert "Publish toolchain v4.33.0" in capsys.readouterr().err
+    assert published == []
+    assert main([*args, "--yes"]) == 0
+    assert published == [("v4.33.0", "oci://example/lib")]
+
+
+def test_matrix_table_reports_a_verdict_column() -> None:
+    import inspect
+
+    from lean_runtime import cli
+
+    source = inspect.getsource(cli)
+    assert r"Context\tVerdict\tTime\tEnvironment" in source
+    assert r"Context\tResult\tTime\tEnvironment" not in source

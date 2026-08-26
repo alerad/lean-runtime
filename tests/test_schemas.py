@@ -48,6 +48,7 @@ def test_every_v1_schema_compiles_eagerly() -> None:
         "plan-v1.schema",
         "profile-v1.schema",
         "publication-v1.schema",
+        "status-v1.schema",
         "verify-v1.schema",
     }
     for path in paths:
@@ -121,6 +122,7 @@ def test_every_v1_schema_accepts_its_closed_error_envelope() -> None:
         "matrix": "lean-runtime.matrix/v1",
         "profile": "lean-runtime.profile/v1",
         "publication": "lean-runtime.publication/v1",
+        "status": "lean-runtime.status/v1",
         "verify": "lean-runtime.verify/v1",
     }
     for name, identifier in schemas.items():

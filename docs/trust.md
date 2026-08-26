@@ -8,8 +8,11 @@ Lean Runtime records exact identities, verifies retained content, and reports th
 - Toolchain identity
 - Content digests for retained and transferred artifacts
 - Platform compatibility metadata
-- Execution provenance for completed checks
-- Compiler acceptance or rejection for the source that ran
+- Execution provenance for completed checks, including `source_digest`, the
+  digest of the bytes Lean actually checked, and the environment and lock
+  identities it ran in
+- Compiler acceptance or rejection for the source that ran, reported as a
+  `verdict` attributed to one exact environment
 
 ## What it does not establish
 
@@ -19,8 +22,28 @@ Lean Runtime records exact identities, verifies retained content, and reports th
 - That a Lake build script is safe to execute
 - That package code cannot access the host system
 - That integrity verification provides process isolation
+- That a discovery proposal is compatible before Lean has accepted the file in it
 
 Lake packages and build scripts can execute code during acquisition or compilation. Treat unfamiliar dependencies as code you are about to run on your machine.
+
+## Which commands change what
+
+`check`, `status`, `verify`, `doctor`, and the inspection commands read your
+project and may add toolchains, environments, and caches under the runtime home
+(`LEAN_RUNTIME_HOME`). They never modify your project directory.
+
+Commands that change a project, delete local content, or push to a remote follow
+one rule: they describe the change first and apply it only with `--yes` or an
+interactive confirmation.
+
+| Command | Changes |
+| --- | --- |
+| `new`, `adopt`, `update`, `publish`, `project share`, `project unshare` | Your project directory |
+| `clean`, `doctor` repairs, `toolchain optimize --prune-original` | Local content under the runtime home |
+| `env publish`, `toolchain publish`, `program publish`, `declaration-index publish` | A remote library |
+
+In a non-interactive session these commands exit with code `2` unless `--yes`
+is given, so a script can never mutate or publish by accident.
 
 ## Verify retained content
 
