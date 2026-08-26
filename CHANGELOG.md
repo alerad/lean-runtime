@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.27.0 - 2026-08-26
+
 - Fingerprint a project by what Lake compiles, not by everything beside the
   lakefile. The workspace digest that keys header snapshots and provenance now
   hashes `lakefile.toml`/`lakefile.lean`, `lean-toolchain`, `lake-manifest.json`,
