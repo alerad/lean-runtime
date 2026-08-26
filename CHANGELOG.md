@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.26.0 - 2026-08-26
+
 - Stop `status` claiming a download is required for core-only files. A lock
   without packages runs straight on the toolchain and never materializes an
   environment in the store, so readiness and cost are now judged by the
