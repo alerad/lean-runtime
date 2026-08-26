@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Cover the remaining silent phases with progress. Elan bootstrap and
+  `elan toolchain install`, and the `lake init`/`lake update` behind `new`, now
+  stream their output as `process.progress`/`process.output` like every other
+  subprocess. Long pure-Python loops report counted progress that renders as a
+  bar: `verification.inventory` (hashing build artifacts in `verify`),
+  `bundle.tree_inventory` (`env export`/`import`), `source.snapshot_digest`
+  (source fingerprints, including path dependencies during `adopt`), and
+  `capsule.import_parse`. The publish preflight fetch
+  (`publish.remote_probe_started`) and the Lake configuration read behind
+  project-wide `check` (`project.config_translate_started`) announce
+  themselves. Any event carrying `current`/`total` and a `label` now renders as
+  a counted bar without a dedicated console handler, and deep helpers reach
+  the active runtime's emitter through `lean_runtime.events.current()`.
 - Re-running `adopt` over a tree no longer re-probes every already attached
   project (a Lake graph load each, up to two minutes for Mathlib); the plan
   already reports them as attached and `verify` re-checks links. Attachment

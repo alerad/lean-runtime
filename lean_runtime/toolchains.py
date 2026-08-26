@@ -24,6 +24,7 @@ from .backends import LocalBackend
 from .errors import ToolchainError
 from .events import EventEmitter
 from .policies import ExecutionPolicy
+from .progress import OutputProgress, observer_arguments
 from .serialization import write_json_atomic
 from .toolchain_slim import (
     SLIM_PROFILE,
@@ -265,16 +266,20 @@ class ToolchainManager:
             installer.write_bytes(_extract_elan_init(archive, archive_name))
             installer.chmod(installer.stat().st_mode | stat.S_IXUSR)
             env = self.environment
-            process = subprocess.run(
+            observer = OutputProgress(self.events.emit, label="elan")
+            backend = LocalBackend()
+            process = backend.execute(
                 [str(installer), "-y", "--no-modify-path", "--default-toolchain", "none"],
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                check=False,
+                cwd=Path(raw),
+                environment=env,
+                policy=ExecutionPolicy(timeout_seconds=1800, max_output_bytes=10_000_000),
+                **observer_arguments(backend, observer),
             )
-        if process.returncode:
-            raise ToolchainError(f"Elan installer exited {process.returncode}:\n{process.stdout}")
+            observer.finish()
+        if process.exit_code:
+            raise ToolchainError(
+                f"Elan installer exited {process.exit_code}:\n{process.stdout}{process.stderr}"
+            )
         return self.elan_path(bootstrap=False)
 
     def is_installed(self, toolchain: str) -> bool:
@@ -493,13 +498,17 @@ class ToolchainManager:
         """
         attempts = len(self.install_retry_delays) + 1
         for attempt in range(1, attempts + 1):
-            process = LocalBackend().execute(
+            observer = OutputProgress(self.events.emit, label="elan")
+            backend = LocalBackend()
+            process = backend.execute(
                 [str(self.elan_path()), "toolchain", "install", name],
                 cwd=self.home,
                 environment=self.environment,
                 policy=ExecutionPolicy(timeout_seconds=1800, max_output_bytes=10_000_000),
                 cancel=cancel,
+                **observer_arguments(backend, observer),
             )
+            observer.finish()
             if process.cancelled:
                 raise ToolchainError(f"Lean toolchain installation was cancelled: {name!r}")
             if not process.exit_code:

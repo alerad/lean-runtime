@@ -13,9 +13,11 @@ from .bundles import _packages_directory, _verify_package, _verify_workspace_loc
 from .capsules import CAPSULE_MANIFEST, CapsuleManifest
 from .environments import Environment, EnvironmentManager
 from .errors import EnvironmentError
+from .events import current
 from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock
 from .policies import ExecutionPolicy
+from .progress import CountedProgress
 from .store import EnvironmentStore, environment_identity, platform_compatibility
 
 VERIFY_SCHEMA = "lean-runtime.verify/v1"
@@ -35,28 +37,34 @@ def _artifact_inventory(workspace: Path) -> _ArtifactInventory:
     digest = hashlib.sha256()
     entries = 0
     total = 0
-    for root in sorted(roots, key=lambda path: path.relative_to(workspace).as_posix()):
-        for path in sorted(
-            root.rglob("*"), key=lambda item: item.relative_to(workspace).as_posix()
-        ):
-            relative = path.relative_to(workspace).as_posix()
-            stat = path.lstat()
-            if path.is_symlink():
-                digest.update(b"link\0" + relative.encode() + b"\0" + os.readlink(path).encode())
-                entries += 1
-            elif path.is_file():
-                digest.update(
-                    b"file\0"
-                    + relative.encode()
-                    + b"\0"
-                    + str(stat.st_mode & 0o111).encode()
-                    + b"\0"
-                )
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                entries += 1
-                total += stat.st_size
+    paths = [
+        path
+        for root in sorted(roots, key=lambda path: path.relative_to(workspace).as_posix())
+        for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(workspace).as_posix())
+    ]
+    progress = CountedProgress(
+        current().emit,
+        "verification.inventory",
+        f"Hashing build artifacts in {workspace.parent.name}",
+        len(paths),
+        phase="verification",
+    )
+    for path in paths:
+        relative = path.relative_to(workspace).as_posix()
+        progress.advance(relative)
+        stat = path.lstat()
+        if path.is_symlink():
+            digest.update(b"link\0" + relative.encode() + b"\0" + os.readlink(path).encode())
+            entries += 1
+        elif path.is_file():
+            digest.update(
+                b"file\0" + relative.encode() + b"\0" + str(stat.st_mode & 0o111).encode() + b"\0"
+            )
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            entries += 1
+            total += stat.st_size
     return _ArtifactInventory("sha256:" + digest.hexdigest(), entries, total)
 
 

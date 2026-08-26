@@ -26,6 +26,7 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
 from ._git import git_command
 from ._paths import is_link
 from .errors import ProjectError, ProjectNotFoundError
+from .events import current
 from .models import ExecutionResult, PackageProvenance, ProjectProvenance
 from .policies import ExecutionPolicy
 from .toolchains import normalize_toolchain
@@ -160,6 +161,13 @@ def _remote_contains_commit(url: str, revision: str, directory: Path) -> None:
             check=False,
         )
         if process.returncode == 0:
+            current().emit(
+                "publish.remote_probe_started",
+                f"Proving {revision[:12]} is available from origin",
+                phase="publish",
+                url=url,
+                revision=revision,
+            )
             try:
                 process = subprocess.run(
                     git_command("-C", raw, "fetch", "--quiet", "--depth", "1", url, revision),

@@ -33,7 +33,7 @@ from .capsules import (
     setup_artifact_groups,
 )
 from .errors import EnvironmentError
-from .events import EventEmitter
+from .events import EventEmitter, current
 from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock, LockedPackage
 from .locking import FileLock
@@ -61,6 +61,7 @@ from .packs import (
     unpack_frame,
 )
 from .policies import ExecutionPolicy
+from .progress import CountedProgress
 from .serialization import canonical_json_bytes, write_json_atomic
 from .store import (
     EnvironmentStore,
@@ -130,7 +131,16 @@ def _tree_entries(
     excluded_names: frozenset[str] = frozenset(),
     omit_volatile_build_metadata: bool = False,
 ) -> Iterable[tuple[Path, str]]:
-    for path in sorted(root.rglob("*"), key=lambda value: value.relative_to(root).as_posix()):
+    paths = sorted(root.rglob("*"), key=lambda value: value.relative_to(root).as_posix())
+    progress = CountedProgress(
+        current().emit,
+        "bundle.tree_inventory",
+        f"Inventorying {root.name}",
+        len(paths),
+        phase="bundle",
+    )
+    for path in paths:
+        progress.advance()
         if excluded is not None and (path == excluded or excluded in path.parents):
             continue
         relative = path.relative_to(root)

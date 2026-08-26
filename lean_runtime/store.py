@@ -22,9 +22,11 @@ from ._git import git_command
 from ._paths import remove_tree
 from .declaration_index import DeclarationShard
 from .errors import EnvironmentError
+from .events import current
 from .lockfiles import EnvironmentLock
 from .locking import FileLock
 from .package_ids import package_directories
+from .progress import CountedProgress
 from .serialization import sha256_id, write_json_atomic
 
 STORE_SCHEMA = "lean-runtime-store/2"
@@ -38,31 +40,40 @@ SUPPORTED_BUILD_PROFILE = "release"
 
 def source_snapshot_digest(root: Path) -> str:
     """Hash checked-out content while excluding Git and runtime metadata."""
-    digest = hashlib.sha256()
+    entries: list[Path] = []
     for directory, directories, filenames in os.walk(root, followlinks=False):
-        current = Path(directory)
-        symlink_directories = [name for name in directories if (current / name).is_symlink()]
+        current_dir = Path(directory)
+        symlink_directories = [name for name in directories if (current_dir / name).is_symlink()]
         directories[:] = sorted(
             name
             for name in directories
             if name not in {".git", ".lake"} and name not in symlink_directories
         )
-        for name in sorted([*filenames, *symlink_directories]):
-            path = current / name
-            relative = path.relative_to(root)
-            if relative.as_posix() == ".lean-runtime-source.json":
-                continue
-            if path.is_symlink():
-                digest.update(b"link\0" + relative.as_posix().encode() + b"\0")
-                digest.update(os.readlink(path).encode())
-            elif path.is_file():
-                mode = path.stat().st_mode & 0o111
-                digest.update(
-                    b"file\0" + relative.as_posix().encode() + b"\0" + str(mode).encode() + b"\0"
-                )
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        digest.update(chunk)
+        entries.extend(current_dir / name for name in sorted([*filenames, *symlink_directories]))
+    progress = CountedProgress(
+        current().emit,
+        "source.snapshot_digest",
+        f"Hashing {root.name}",
+        len(entries),
+        phase="fingerprint",
+    )
+    digest = hashlib.sha256()
+    for path in entries:
+        relative = path.relative_to(root)
+        progress.advance(relative.as_posix())
+        if relative.as_posix() == ".lean-runtime-source.json":
+            continue
+        if path.is_symlink():
+            digest.update(b"link\0" + relative.as_posix().encode() + b"\0")
+            digest.update(os.readlink(path).encode())
+        elif path.is_file():
+            mode = path.stat().st_mode & 0o111
+            digest.update(
+                b"file\0" + relative.as_posix().encode() + b"\0" + str(mode).encode() + b"\0"
+            )
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
     return "sha256:" + digest.hexdigest()
 
 

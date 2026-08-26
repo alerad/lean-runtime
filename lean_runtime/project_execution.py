@@ -524,6 +524,12 @@ class ProjectExecutor:
             command = self.runtime.toolchains.command(
                 context.toolchain, "lake", "translate-config", "toml", str(output)
             )
+            self.runtime.events.emit(
+                "project.config_translate_started",
+                f"Reading Lake configuration for {context.root.name}",
+                phase="check",
+                root=str(context.root),
+            )
             process = subprocess.run(
                 command,
                 cwd=context.root,

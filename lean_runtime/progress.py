@@ -9,6 +9,7 @@ get`` and similar chatty-but-unstructured tools from looking hung.
 
 from __future__ import annotations
 
+import inspect
 import re
 import time
 from collections.abc import Callable
@@ -93,3 +94,58 @@ class OutputProgress:
             phase="execution",
             **data,
         )
+
+
+class CountedProgress:
+    """Emit one counted event kind for a loop, rate-limited to ``interval`` seconds.
+
+    The final step is always emitted so a bar reaches 100%.
+    """
+
+    def __init__(
+        self,
+        emit: Callable[..., None],
+        kind: str,
+        label: str,
+        total: int,
+        *,
+        phase: str | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        interval: float = 0.2,
+    ) -> None:
+        self._emit = emit
+        self.kind = kind
+        self.label = label
+        self.total = max(total, 0)
+        self.current = 0
+        self._phase = phase
+        self._clock = clock
+        self._interval = interval
+        self._last_at: float | None = None
+
+    def advance(self, detail: str = "", *, to: int | None = None) -> None:
+        self.current = min(self.total, self.current + 1 if to is None else to)
+        now = self._clock()
+        due = self._last_at is None or now - self._last_at >= self._interval
+        if not due and self.current < self.total:
+            return
+        self._last_at = now
+        suffix = f" {detail}" if detail else ""
+        self._emit(
+            self.kind,
+            f"{self.label}: {self.current}/{self.total}{suffix}",
+            phase=self._phase,
+            label=self.label,
+            current=self.current,
+            total=self.total,
+            detail=detail[:_MAX_LINE],
+        )
+
+
+def observer_arguments(backend: Any, observer: OutputProgress) -> dict[str, Any]:
+    """``on_output`` for backends that accept it; nothing for older ones."""
+    try:
+        supported = "on_output" in inspect.signature(backend.execute).parameters
+    except (TypeError, ValueError):
+        supported = False
+    return {"on_output": observer.line} if supported else {}

@@ -141,6 +141,18 @@ class ConsoleRenderer:
             handler = getattr(self, "_render_" + event.kind.replace(".", "_"), None)
             if handler is not None:
                 handler(event)
+            elif (
+                isinstance(event.data.get("current"), int)
+                and isinstance(event.data.get("total"), int)
+                and event.data.get("label")
+            ):
+                # Any counted event renders as a bar without a dedicated handler.
+                self._render_count_progress(
+                    str(event.data["label"]),
+                    event.data["current"],
+                    event.data["total"],
+                    str(event.data.get("detail") or ""),
+                )
 
     def note(self, message: str) -> None:
         """Print one renderer-owned status line."""

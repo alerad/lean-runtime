@@ -21,8 +21,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from .errors import EnvironmentError
+from .events import current
 from .import_syntax import IMPORT_STATEMENT
 from .lockfiles import EnvironmentLock
+from .progress import CountedProgress
 from .serialization import canonical_json_bytes, write_json_atomic
 
 CAPSULE_SCHEMA = "lean-runtime-check-capsule/1"
@@ -253,8 +255,16 @@ def parse_import_headers(
     with tempfile.TemporaryDirectory(prefix="lean-runtime-imports-") as raw:
         helper = Path(raw) / "ParseImports.lean"
         helper.write_text(IMPORT_PARSER_SOURCE, encoding="utf-8")
+        progress = CountedProgress(
+            current().emit,
+            "capsule.import_parse",
+            "Parsing imports",
+            len(source_paths),
+            phase="capsule",
+        )
         for offset in range(0, len(source_paths), batch_size):
             batch = list(source_paths[offset : offset + batch_size])
+            progress.advance(to=min(offset + len(batch), len(source_paths)))
             process = subprocess.run(
                 [*lean_command, "--run", str(helper), *(str(path) for path in batch)],
                 text=True,

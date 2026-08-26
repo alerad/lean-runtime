@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -58,3 +59,24 @@ class EventEmitter:
                     total_bytes=total_bytes,
                 )
             )
+
+
+_current_emitter: contextvars.ContextVar[EventEmitter | None] = contextvars.ContextVar(
+    "lean_runtime_events", default=None
+)
+_NULL_EMITTER = EventEmitter(None)
+
+
+def current() -> EventEmitter:
+    """The emitter of the runtime driving this context, or a null emitter.
+
+    Deep helpers such as tree hashing and import parsing report counted
+    progress through this instead of threading an emitter through every
+    signature between them and the runtime.
+    """
+    return _current_emitter.get() or _NULL_EMITTER
+
+
+def activate(emitter: EventEmitter) -> contextvars.Token[EventEmitter | None]:
+    """Make ``emitter`` the one :func:`current` returns in this context."""
+    return _current_emitter.set(emitter)

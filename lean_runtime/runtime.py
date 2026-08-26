@@ -6,7 +6,6 @@ import inspect
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -31,7 +30,7 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
     import tomli as tomllib
 
 from ._paths import remove_tree
-from .backends import Backend, LocalBackend
+from .backends import Backend, BackendResult, LocalBackend
 from .bundles import EnvironmentBundles, PortableCopyInfo
 from .capsules import source_import_roots
 from .comparison import ComparisonEntry, EnvironmentComparison, compare_locks
@@ -55,7 +54,7 @@ from .errors import (
     SpecificationError,
     ToolchainError,
 )
-from .events import EventCallback, EventEmitter
+from .events import EventCallback, EventEmitter, activate
 from .header_cache import LeanHeaderCache
 from .health import DoctorReport, diagnose, repair
 from .identifier_resolver import IdentifierResolver
@@ -80,7 +79,7 @@ from .oci import (
 from .policies import ExecutionPolicy, parse_byte_size
 from .profiling import ProfileReport, run_profile
 from .programs import ProgramInfo, ProgramLibrary, ProgramManager, ReadyProgram
-from .progress import OutputProgress
+from .progress import OutputProgress, observer_arguments
 from .project_execution import ProjectExecutor
 from .project_sharing import (
     AdoptionBatchResult,
@@ -267,6 +266,7 @@ class Runtime:
                 "required publisher verification needs trusted_publisher and trusted_issuer"
             )
         self.events = EventEmitter(on_event)
+        activate(self.events)
         self.toolchains = toolchains or ToolchainManager(home, events=self.events)
         self.home = self.toolchains.home
         self.backend = backend or LocalBackend()
@@ -2264,17 +2264,16 @@ class Runtime:
                 "lib",
             )
             command_environment = self.toolchains.environment_for(plan.toolchain)
-            process = subprocess.run(
-                command,
-                cwd=staging,
-                env=command_environment,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                check=False,
+            self.events.emit(
+                "project.new.init_started",
+                f"Initializing Lake project {plan.project_name or target.name}",
+                phase="project-new",
             )
-            if process.returncode:
-                detail = process.stdout.strip()
+            process = self._run_local(
+                command, cwd=staging, environment=command_environment, label="lake"
+            )
+            if process.exit_code:
+                detail = (process.stdout + process.stderr).strip()
                 raise ProjectError(
                     "Lake could not initialize the project" + (f":\n{detail}" if detail else "")
                 )
@@ -2303,18 +2302,17 @@ class Runtime:
             update_command = self.toolchains.command(
                 plan.toolchain, "lake", "--offline", f"--dir={staging}", "update"
             )
-            updated = subprocess.run(
-                update_command,
-                cwd=staging,
-                env=command_environment,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                check=False,
+            self.events.emit(
+                "project.new.update_started",
+                "Resolving the root manifest with Lake",
+                phase="project-new",
+            )
+            updated = self._run_local(
+                update_command, cwd=staging, environment=command_environment, label="lake"
             )
             manifest_path = staging / "lake-manifest.json"
-            if updated.returncode or not manifest_path.is_file():
-                detail = updated.stdout.strip()
+            if updated.exit_code or not manifest_path.is_file():
+                detail = (updated.stdout + updated.stderr).strip()
                 raise ProjectError(
                     "Lake could not create the root manifest identity"
                     + (f":\n{detail}" if detail else "")
@@ -2688,6 +2686,28 @@ class Runtime:
             shared=shared,
             restore_artifacts=restore_artifacts,
         )
+
+    def _run_local(
+        self,
+        command: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        label: str,
+        timeout: float = 1800,
+    ) -> BackendResult:
+        """Run a trusted local command, streaming its output as progress events."""
+        observer = OutputProgress(self.events.emit, label=label)
+        backend = LocalBackend()
+        result = backend.execute(
+            command,
+            cwd=cwd,
+            environment=environment,
+            policy=ExecutionPolicy(timeout_seconds=timeout, max_output_bytes=10_000_000),
+            **observer_arguments(backend, observer),
+        )
+        observer.finish()
+        return result
 
     def _output_observer_arguments(self, observer: OutputProgress) -> dict[str, Any]:
         """Stream subprocess output into events when the backend can do so.
