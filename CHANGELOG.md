@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.30.0 - 2026-08-26
+
 - Attach shared dependencies on Windows without administrator rights. Creating
   a symbolic link needs `SeCreateSymbolicLinkPrivilege` (administrators or
   Developer Mode), so `adopt` and `project attach` failed with
