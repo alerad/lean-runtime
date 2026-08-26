@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import shutil
@@ -79,6 +80,7 @@ from .oci import (
 from .policies import ExecutionPolicy, parse_byte_size
 from .profiling import ProfileReport, run_profile
 from .programs import ProgramInfo, ProgramLibrary, ProgramManager, ReadyProgram
+from .progress import OutputProgress
 from .project_execution import ProjectExecutor
 from .project_sharing import (
     AdoptionBatchResult,
@@ -2667,6 +2669,21 @@ class Runtime:
             restore_artifacts=restore_artifacts,
         )
 
+    def _output_observer_arguments(self, observer: OutputProgress) -> dict[str, Any]:
+        """Stream subprocess output into events when the backend can do so.
+
+        Third-party backends that predate ``on_output`` keep working; they
+        simply stay silent while a process runs.
+        """
+        supported = getattr(self, "_backend_streams_output", None)
+        if supported is None:
+            try:
+                supported = "on_output" in inspect.signature(self.backend.execute).parameters
+            except (TypeError, ValueError):
+                supported = False
+            self._backend_streams_output = supported
+        return {"on_output": observer.line} if supported else {}
+
     def _raw_result(
         self,
         command: Sequence[str],
@@ -2708,6 +2725,7 @@ class Runtime:
                 "nonce": os.urandom(16).hex(),
             },
         )
+        observer = OutputProgress(self.events.emit, label=str(request_command[0]))
         raw = self.backend.execute(
             command,
             cwd=cwd,
@@ -2716,7 +2734,9 @@ class Runtime:
             else self.toolchains.environment,
             policy=policy,
             cancel=cancel,
+            **self._output_observer_arguments(observer),
         )
+        observer.finish()
         output = "\n".join(part for part in (raw.stdout, raw.stderr) if part)
         diagnostics = map_diagnostic_paths(parse_diagnostics(output), path_map)
         if raw.timed_out:

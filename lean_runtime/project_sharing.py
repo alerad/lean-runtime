@@ -432,12 +432,36 @@ def plan_adoption(
     shared: SharedProjectManager | None = None,
 ) -> AdoptionPlan:
     roots = discover_shareable_projects(path, recursive=recursive)
-    projects = tuple(inspect_adoption(root) for root in roots)
+    events = shared.events if shared is not None else None
+    inspected: list[ProjectAdoption] = []
+    for index, root in enumerate(roots, start=1):
+        if events is not None:
+            events.emit(
+                "adopt.inspect_started",
+                f"Inspecting {root.name} ({index}/{len(roots)})",
+                phase="adopt-plan",
+                project=str(root),
+                name=root.name,
+                current=index,
+                total=len(roots),
+            )
+        inspected.append(inspect_adoption(root))
+    projects = tuple(inspected)
+    candidates = [project for project in projects if project.ready and not project.attached]
     groups: dict[str, int] = {}
     reused_groups: set[str] = set()
-    for project in projects:
-        if not project.ready or project.attached:
-            continue
+    for index, project in enumerate(candidates, start=1):
+        if events is not None:
+            events.emit(
+                "adopt.identity_started",
+                f"Resolving dependency identities for {project.root.name} "
+                f"({index}/{len(candidates)})",
+                phase="adopt-plan",
+                project=str(project.root),
+                name=project.root.name,
+                current=index,
+                total=len(candidates),
+            )
         context = discover_project(project.root)
         manifest = _read_manifest(context)
         entries = _manifest_packages(context)
@@ -703,6 +727,7 @@ class ProjectAdopter:
         staging.mkdir()
         copied = 0
         swapped = False
+        git_package_count = sum(1 for entry in manifest_packages if entry["type"] == "git")
         marker_contents = marker.read_text(encoding="utf-8")
         config = context.root / PROJECT_CONFIG
         try:
@@ -717,6 +742,14 @@ class ProjectAdopter:
                 if not target.is_dir():
                     raise ProjectError(f"attached package target is unavailable: {name}")
                 destination = staging / name
+                self.shared.events.emit(
+                    "project.detach.package_started",
+                    f"Materializing {name} ({copied + 1}/{git_package_count})",
+                    phase="project-detach",
+                    package=name,
+                    current=copied + 1,
+                    total=git_package_count,
+                )
                 clone_tree(target, destination)
                 package_marker = destination / ".lean-runtime-package.json"
                 if package_marker.is_file():

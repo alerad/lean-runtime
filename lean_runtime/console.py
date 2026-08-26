@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from typing import Any, Literal, TextIO
 
@@ -16,6 +17,15 @@ _BAR_WIDTH = 20
 _TTY_REDRAW_SECONDS = 0.1
 _PLAIN_CHECKPOINT_PERCENT = 25
 _LARGE_CLOSURE_BYTES = 1024**3
+_HEARTBEAT_POLL_SECONDS = 0.25
+_PLAIN_HEARTBEAT_FIRST_SECONDS = 10.0
+_PLAIN_HEARTBEAT_REPEAT_SECONDS = 30.0
+_DETAIL_WIDTH = 60
+_OUTPUT_WIDTH = 100
+
+
+def _truncate(text: str, width: int) -> str:
+    return text if len(text) <= width else text[: width - 1] + "…"
 
 
 def select_mode(*, quiet: bool = False, stream: TextIO | None = None) -> RenderMode:
@@ -95,6 +105,7 @@ class ConsoleRenderer:
         verbose: bool = False,
         color: bool | None = None,
         clock: Any = time.monotonic,
+        heartbeat_seconds: float | None = None,
     ) -> None:
         self.stream = stream if stream is not None else sys.stderr
         self.mode: RenderMode = mode if mode is not None else select_mode(stream=self.stream)
@@ -107,26 +118,77 @@ class ConsoleRenderer:
         self._last_redraw: float | None = None
         self._next_checkpoint = _PLAIN_CHECKPOINT_PERCENT
         self._download_finished = False
+        self._count_key: tuple[str, int] | None = None
+        self._count_checkpoint = _PLAIN_CHECKPOINT_PERCENT
+        # Heartbeat: when events stop arriving mid-operation, keep showing the
+        # last known activity so a long silent phase never looks hung.
+        self._heartbeat_seconds = heartbeat_seconds
+        self._lock = threading.RLock()
+        self._last_event_at: float | None = None
+        self._last_message = ""
+        self._next_plain_heartbeat = _PLAIN_HEARTBEAT_FIRST_SECONDS
+        self._heartbeat_thread: threading.Thread | None = None
+        self._stop = threading.Event()
 
     def __call__(self, event: RuntimeEvent) -> None:
         if self.mode == "quiet":
             return
-        if self.verbose:
-            self._verbose_line(event)
-            return
-        handler = getattr(self, "_render_" + event.kind.replace(".", "_"), None)
-        if handler is not None:
-            handler(event)
+        with self._lock:
+            self._note_activity(event)
+            if self.verbose:
+                self._verbose_line(event)
+                return
+            handler = getattr(self, "_render_" + event.kind.replace(".", "_"), None)
+            if handler is not None:
+                handler(event)
 
     def note(self, message: str) -> None:
         """Print one renderer-owned status line."""
         if self.mode == "quiet":
             return
-        self._print(message)
+        with self._lock:
+            self._print(message)
 
     def close(self) -> None:
         """Terminate any in-place progress line before final output."""
-        self._end_progress_line()
+        self._stop.set()
+        thread = self._heartbeat_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1)
+        with self._lock:
+            self._end_progress_line()
+
+    # -- heartbeat --------------------------------------------------------
+
+    def _note_activity(self, event: RuntimeEvent) -> None:
+        self._last_event_at = self._clock()
+        self._last_message = event.message
+        self._next_plain_heartbeat = _PLAIN_HEARTBEAT_FIRST_SECONDS
+        if (
+            self._heartbeat_seconds is not None
+            and self._heartbeat_thread is None
+            and not self._stop.is_set()
+        ):
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop, name="lean-runtime-heartbeat", daemon=True
+            )
+            self._heartbeat_thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        assert self._heartbeat_seconds is not None
+        while not self._stop.wait(_HEARTBEAT_POLL_SECONDS):
+            with self._lock:
+                if self._last_event_at is None or not self._last_message:
+                    continue
+                idle = self._clock() - self._last_event_at
+                if idle < self._heartbeat_seconds:
+                    continue
+                if self.mode == "tty":
+                    text = f"⋯ {_truncate(self._last_message, _OUTPUT_WIDTH)} ({int(idle)}s)"
+                    self._draw_line(text, self.style.dim(text))
+                elif idle >= self._next_plain_heartbeat:
+                    self._print(f"Still working: {self._last_message} ({int(idle)}s)")
+                    self._next_plain_heartbeat = idle + _PLAIN_HEARTBEAT_REPEAT_SECONDS
 
     # -- individual event renderings ------------------------------------
 
@@ -285,6 +347,67 @@ class ConsoleRenderer:
     def _render_project_workspace_lock_wait(self, event: RuntimeEvent) -> None:
         self._print(event.message)
 
+    # -- subprocess output and counted progress ---------------------------
+
+    def _render_process_progress(self, event: RuntimeEvent) -> None:
+        self._count_from(event, str(event.data.get("label") or "Working"), "detail")
+
+    def _render_process_output(self, event: RuntimeEvent) -> None:
+        if self.mode != "tty":
+            return
+        line = str(event.data.get("line") or "").strip()
+        if line:
+            text = _truncate(line, _OUTPUT_WIDTH)
+            self._draw_line(text, self.style.dim(text))
+
+    def _render_adopt_inspect_started(self, event: RuntimeEvent) -> None:
+        self._count_from(event, "Inspecting projects", "name")
+
+    def _render_adopt_identity_started(self, event: RuntimeEvent) -> None:
+        self._count_from(event, "Resolving dependency identities", "name")
+
+    def _render_project_detach_package_started(self, event: RuntimeEvent) -> None:
+        self._count_from(event, "Materializing packages", "package")
+
+    def _count_from(self, event: RuntimeEvent, label: str, detail_key: str) -> None:
+        current = event.data.get("current")
+        total = event.data.get("total")
+        if not isinstance(current, int) or not isinstance(total, int) or total <= 0:
+            return
+        self._render_count_progress(label, current, total, str(event.data.get(detail_key) or ""))
+
+    def _render_count_progress(self, label: str, current: int, total: int, detail: str) -> None:
+        current = min(current, total)
+        if self.mode == "tty":
+            now = self._clock()
+            if (
+                current < total
+                and self._last_redraw is not None
+                and now - self._last_redraw < _TTY_REDRAW_SECONDS
+            ):
+                return
+            self._last_redraw = now
+            filled = _BAR_WIDTH * current // total
+            bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
+            suffix = f" · {_truncate(detail, _DETAIL_WIDTH)}" if detail else ""
+            plain = f"{label} [{bar}] {current}/{total}{suffix}"
+            styled = (
+                f"{label} [{self.style.cyan(bar)}] "
+                f"{self.style.bold(f'{current}/{total}')}{self.style.dim(suffix)}"
+            )
+            self._draw_line(plain, styled)
+            if current >= total:
+                self._end_progress_line()
+            return
+        key = (label, total)
+        if self._count_key != key:
+            self._count_key = key
+            self._count_checkpoint = _PLAIN_CHECKPOINT_PERCENT
+        percent = current * 100 // total
+        while self._count_checkpoint <= percent:
+            self._print(f"{label}: {self._count_checkpoint}% ({current}/{total})")
+            self._count_checkpoint += _PLAIN_CHECKPOINT_PERCENT
+
     # -- low-level output -----------------------------------------------
 
     def _verbose_line(self, event: RuntimeEvent) -> None:
@@ -325,6 +448,13 @@ class ConsoleRenderer:
         self.stream.flush()
         self._line_length = len(plain)
 
+    def _draw_line(self, plain: str, styled: str | None = None) -> None:
+        """Redraw the single in-place status line."""
+        padding = " " * max(0, self._line_length - len(plain))
+        self.stream.write("\r" + (styled if styled is not None else plain) + padding)
+        self.stream.flush()
+        self._line_length = len(plain)
+
     def _end_progress_line(self) -> None:
         if self._line_length:
             self.stream.write("\n")
@@ -332,6 +462,7 @@ class ConsoleRenderer:
             self._line_length = 0
 
     def _print(self, message: str) -> None:
-        self._end_progress_line()
-        self.stream.write(message + "\n")
-        self.stream.flush()
+        with self._lock:
+            self._end_progress_line()
+            self.stream.write(message + "\n")
+            self.stream.flush()

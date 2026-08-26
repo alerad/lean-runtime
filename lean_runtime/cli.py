@@ -1924,6 +1924,7 @@ def main(argv: list[str] | None = None) -> int:
     renderer = ConsoleRenderer(
         mode="quiet" if args.quiet or getattr(args, "json", False) else None,
         verbose=args.verbose,
+        heartbeat_seconds=2.0,
     )
     try:
         if args.command == "completion":

@@ -14,6 +14,21 @@
   recognizes junctions too.
 - Size local dependency checkouts during `adopt` without descending into
   attached links, using one directory scan per level instead of `rglob`.
+- Show progress while subprocesses run. Lake's `[n/m]` build steps now stream
+  from `check`, `build`, and artifact hydration as `process.progress` events
+  (rate-limited to ten per second), rendered on a terminal as one in-place bar
+  (`lake [████░░░░] 3300/8318 · Building Mathlib.Foo`) and in logs as 25%
+  checkpoints; every other output line becomes a throttled `process.output`
+  heartbeat shown in place on a terminal, so `lake exe cache get` is no longer
+  silent. Third-party backends that do not accept the new optional `on_output`
+  callback keep working unchanged.
+- Announce counted phases that used to be silent: `adopt.inspect_started` and
+  `adopt.identity_started` for each project during adoption planning, and
+  `project.detach.package_started` for each package `unshare` materializes; all
+  carry `current`/`total` and render as the same counted bar.
+- Keep the terminal alive during any silent stretch: when no event has arrived
+  for two seconds the console shows `⋯ <last activity> (Ns)` in place; plain
+  logs print `Still working: …` after ten seconds and then every thirty.
 - Name new shared package directories `pkg_<32 hex>` instead of
   `project_package_<64 hex>`. The 80-character name pushed Mathlib's deepest
   build outputs past Windows' 260-character path limit, so an adopted Mathlib

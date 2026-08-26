@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -83,14 +84,39 @@ class _OutputBudget:
             return chunk[:size]
 
 
-def _drain(stream: BinaryIO, budget: _OutputBudget, chunks: list[bytes]) -> None:
+_LINE_BREAK = re.compile(rb"\r\n|\r|\n")
+
+
+def _drain(
+    stream: BinaryIO,
+    budget: _OutputBudget,
+    chunks: list[bytes],
+    on_output: Callable[[str], None] | None = None,
+) -> None:
+    pending = b""
     while True:
         chunk = stream.read(65_536)
         if not chunk:
-            return
+            break
         kept = budget.take(chunk)
         if kept:
             chunks.append(kept)
+        if on_output is None:
+            continue
+        # Progress bars redraw with bare carriage returns, so treat those as lines too.
+        parts = _LINE_BREAK.split(pending + chunk)
+        pending = parts.pop()
+        for part in parts:
+            _observe(on_output, part)
+    if on_output is not None and pending:
+        _observe(on_output, pending)
+
+
+def _observe(on_output: Callable[[str], None], line: bytes) -> None:
+    try:
+        on_output(line.decode("utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001 - an observer must never break execution
+        return
 
 
 class _TranscriptReader:
@@ -294,6 +320,7 @@ class LocalBackend:
         environment: Mapping[str, str],
         policy: ExecutionPolicy,
         cancel: threading.Event | None = None,
+        on_output: Callable[[str], None] | None = None,
     ) -> BackendResult:
         enforced, preexec, creationflags = self._process_options(policy)
 
@@ -313,8 +340,12 @@ class LocalBackend:
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
         readers = [
-            threading.Thread(target=_drain, args=(process.stdout, budget, stdout_chunks)),
-            threading.Thread(target=_drain, args=(process.stderr, budget, stderr_chunks)),
+            threading.Thread(
+                target=_drain, args=(process.stdout, budget, stdout_chunks, on_output)
+            ),
+            threading.Thread(
+                target=_drain, args=(process.stderr, budget, stderr_chunks, on_output)
+            ),
         ]
         for reader in readers:
             reader.start()
