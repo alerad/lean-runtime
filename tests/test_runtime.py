@@ -17,7 +17,7 @@ from lean_runtime import (
     Runtime,
     ToolchainError,
 )
-from lean_runtime.backends import LocalBackend
+from lean_runtime.backends import BackendResult, LocalBackend
 from lean_runtime.environments import Environment, EnvironmentManager
 from lean_runtime.runtime import _bundled_lock_for_references
 from lean_runtime.store import EnvironmentStore
@@ -128,6 +128,27 @@ def test_check_accepts_source(tmp_path: Path) -> None:
     assert result.ok
     assert result.exit_code == 0
     assert result.toolchain == "leanprover/lean4:v4.32.0"
+
+
+def test_standalone_check_progress_accepts_a_direct_toolchain_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = Runtime(toolchains=FakeToolchains(tmp_path))  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        runtime.toolchains,
+        "command",
+        lambda _toolchain, _executable, source: ["lean", source],
+    )
+    monkeypatch.setattr(
+        runtime.backend,
+        "execute",
+        lambda _command, **_kwargs: BackendResult(0, "", "", 0.01, False, False, False, ()),
+    )
+
+    result = runtime.check("example : True := by trivial", toolchain="4.32.0")
+
+    assert result.ok
+    assert result.provenance is not None
 
 
 def test_core_environment_needs_neither_lake_nor_a_full_build(tmp_path: Path) -> None:

@@ -84,9 +84,13 @@ release_commit_ready=true
 git push origin main
 
 run_id=""
-for _attempt in {1..60}; do
+echo "waiting for CI to appear for $release_sha"
+for attempt in {1..240}; do
   run_id="$(gh run list --workflow ci.yml --commit "$release_sha" --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
   [[ -n "$run_id" ]] && break
+  if (( attempt % 12 == 0 )); then
+    echo "still waiting for CI (${attempt} checks, $((attempt * 5))s)"
+  fi
   sleep 5
 done
 [[ -n "$run_id" ]] || { echo "CI did not start for $release_sha"; exit 1; }

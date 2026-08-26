@@ -2616,6 +2616,11 @@ class Runtime:
                 toolchain=selected,
                 source_digest=sha256_text(source),
                 policy=policy,
+                logical_command=(
+                    ("lean", safe_filename)
+                    if project_root is None
+                    else ("lake", "env", "lean", safe_filename)
+                ),
                 path_map={str(source_path): safe_filename},
                 environment=(
                     self.toolchains.environment_for(selected) if project_root is not None else None
@@ -2725,7 +2730,8 @@ class Runtime:
                 "nonce": os.urandom(16).hex(),
             },
         )
-        observer = OutputProgress(self.events.emit, label=str(request_command[0]))
+        observer_label = str(request_command[0]) if request_command else Path(command[0]).name
+        observer = OutputProgress(self.events.emit, label=observer_label)
         raw = self.backend.execute(
             command,
             cwd=cwd,
