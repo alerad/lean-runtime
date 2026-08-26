@@ -1577,21 +1577,21 @@ class Runtime:
             "--version",
         )
         command = self.toolchains.command(context.toolchain, "lake", *lake_args)
-        try:
-            process = subprocess.run(
-                command,
-                cwd=context.root,
-                env=self.toolchains.environment_for(context.toolchain),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise ProjectError(f"Lake graph probe timed out for {context.root}") from exc
-        if process.returncode:
-            detail = process.stdout.strip()
+        # Run through the backend so Lake's output streams as progress like
+        # every other Lake invocation; loading a Mathlib graph can take a minute.
+        observer = OutputProgress(self.events.emit, label="lake")
+        process = self.backend.execute(
+            command,
+            cwd=context.root,
+            environment=self.toolchains.environment_for(context.toolchain),
+            policy=ExecutionPolicy(timeout_seconds=timeout),
+            **self._output_observer_arguments(observer),
+        )
+        observer.finish()
+        if process.timed_out:
+            raise ProjectError(f"Lake graph probe timed out for {context.root}")
+        if process.exit_code:
+            detail = "\n".join(part for part in (process.stdout, process.stderr) if part).strip()
             raise ProjectError(
                 f"Lake could not load the {'shared' if overrides else 'attached'} dependency "
                 f"graph for {context.root}" + (f":\n{detail}" if detail else "")
@@ -1618,8 +1618,23 @@ class Runtime:
             selected_plan = self.plan_project_adoption(path, recursive=recursive)
         results: list[AdoptionResult] = []
         failures: list[tuple[Path, str]] = []
-        for project in selected_plan.projects:
-            if not project.ready:
+        ready_projects = [project for project in selected_plan.projects if project.ready]
+        for index, project in enumerate(ready_projects, start=1):
+            self.events.emit(
+                "adopt.attach_started",
+                f"Attaching {project.root.name} ({index}/{len(ready_projects)})",
+                phase="project-attach",
+                project=str(project.root),
+                name=project.root.name,
+                current=index,
+                total=len(ready_projects),
+            )
+            if project.attached and len(selected_plan.projects) > 1:
+                # A batch re-run must not pay a Lake graph load per project that
+                # the plan already reports as attached; `verify` re-checks links.
+                results.append(
+                    AdoptionResult(project.root, "already-attached", len(project.packages), 0)
+                )
                 continue
             context = discover_project(project.root)
             self.shared_projects.remember_project(context)

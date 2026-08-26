@@ -184,6 +184,7 @@ def test_adopt_and_detach_events_render_as_counted_progress() -> None:
     renderer = ConsoleRenderer(stream=stream, mode="plain", color=False)
     renderer(_event("adopt.inspect_started", name="alchemy", current=45, total=89))
     renderer(_event("adopt.inspect_started", name="zeta", current=89, total=89))
+    renderer(_event("adopt.attach_started", name="alchemy", current=81, total=81))
     renderer(_event("project.detach.package_started", package="mathlib", current=9, total=9))
     renderer.close()
     assert stream.getvalue().splitlines() == [
@@ -191,6 +192,10 @@ def test_adopt_and_detach_events_render_as_counted_progress() -> None:
         "Inspecting projects: 50% (45/89)",
         "Inspecting projects: 75% (89/89)",
         "Inspecting projects: 100% (89/89)",
+        "Attaching projects: 25% (81/81)",
+        "Attaching projects: 50% (81/81)",
+        "Attaching projects: 75% (81/81)",
+        "Attaching projects: 100% (81/81)",
         "Materializing packages: 25% (9/9)",
         "Materializing packages: 50% (9/9)",
         "Materializing packages: 75% (9/9)",
@@ -206,7 +211,8 @@ def test_heartbeat_reports_the_last_activity_when_events_stop() -> None:
     while "⋯" not in stream.getvalue() and time.monotonic() < deadline:
         time.sleep(0.05)
     renderer.close()
-    assert "⋯ Inspecting alchemy (1/89) (" in stream.getvalue()
+    assert "⋯ no new events for " in stream.getvalue()
+    assert "· last: Inspecting alchemy (1/89)" in stream.getvalue()
 
 
 def test_heartbeat_is_off_by_default_and_quiet_mode_never_renders() -> None:

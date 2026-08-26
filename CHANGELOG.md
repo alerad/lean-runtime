@@ -29,8 +29,15 @@
   `project.detach.package_started` for each package `unshare` materializes; all
   carry `current`/`total` and render as the same counted bar.
 - Keep the terminal alive during any silent stretch: when no event has arrived
-  for two seconds the console shows `⋯ <last activity> (Ns)` in place; plain
-  logs print `Still working: …` after ten seconds and then every thirty.
+  for two seconds the console shows `⋯ no new events for Ns · last: <activity>`
+  in place; plain logs print `Still working (…)` after ten seconds and then
+  every thirty.
+- Re-running `adopt` over a tree no longer re-probes every already attached
+  project (a Lake graph load each, up to two minutes for Mathlib); the plan
+  already reports them as attached and `verify` re-checks links. Attachment
+  now announces `adopt.attach_started` per project, rendered as
+  `Attaching projects [bar] i/n`, and the pre-swap Lake graph probe streams its
+  output like every other Lake invocation instead of running silently.
 - Name new shared package directories `pkg_<32 hex>` instead of
   `project_package_<64 hex>`. The 80-character name pushed Mathlib's deepest
   build outputs past Windows' 260-character path limit, so an adopted Mathlib

@@ -183,11 +183,12 @@ class ConsoleRenderer:
                 idle = self._clock() - self._last_event_at
                 if idle < self._heartbeat_seconds:
                     continue
+                last = _truncate(self._last_message, _OUTPUT_WIDTH)
                 if self.mode == "tty":
-                    text = f"⋯ {_truncate(self._last_message, _OUTPUT_WIDTH)} ({int(idle)}s)"
+                    text = f"⋯ no new events for {int(idle)}s · last: {last}"
                     self._draw_line(text, self.style.dim(text))
                 elif idle >= self._next_plain_heartbeat:
-                    self._print(f"Still working: {self._last_message} ({int(idle)}s)")
+                    self._print(f"Still working ({int(idle)}s without events; last: {last})")
                     self._next_plain_heartbeat = idle + _PLAIN_HEARTBEAT_REPEAT_SECONDS
 
     # -- individual event renderings ------------------------------------
@@ -365,6 +366,9 @@ class ConsoleRenderer:
 
     def _render_adopt_identity_started(self, event: RuntimeEvent) -> None:
         self._count_from(event, "Resolving dependency identities", "name")
+
+    def _render_adopt_attach_started(self, event: RuntimeEvent) -> None:
+        self._count_from(event, "Attaching projects", "name")
 
     def _render_project_detach_package_started(self, event: RuntimeEvent) -> None:
         self._count_from(event, "Materializing packages", "package")
