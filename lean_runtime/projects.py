@@ -24,6 +24,7 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
     import tomli as tomllib
 
 from ._git import git_command
+from ._paths import is_link
 from .errors import ProjectError, ProjectNotFoundError
 from .models import ExecutionResult, PackageProvenance, ProjectProvenance
 from .policies import ExecutionPolicy
@@ -64,7 +65,8 @@ def _publication_url(value: str, *, root: Path) -> str:
     if not value or value.startswith("-"):
         raise ProjectError("project origin is not a usable Git remote")
     parsed = urllib.parse.urlsplit(value)
-    if parsed.scheme:
+    # A Windows drive letter (`C:\...`) parses as a one-letter scheme; it is a path.
+    if parsed.scheme and len(parsed.scheme) > 1:
         if parsed.scheme not in {"file", "git", "http", "https", "ssh"}:
             raise ProjectError("project origin must use file, git, HTTP(S), or SSH transport")
         if parsed.scheme != "file" and not parsed.netloc:
@@ -455,12 +457,12 @@ class ProjectContext:
 
         for name in ("lakefile.toml", "lakefile.lean", "lean-toolchain", "lake-manifest.json"):
             candidate = self.root / name
-            if candidate.is_file() and not candidate.is_symlink():
+            if candidate.is_file() and not is_link(candidate):
                 add_file(candidate)
         seen: set[Path] = set()
         module_files, directories_to_walk = self._source_locations()
         for path in module_files:
-            if path.is_file() and not path.is_symlink():
+            if path.is_file() and not is_link(path):
                 seen.add(path)
                 add_file(path)
         for start in directories_to_walk:
@@ -469,13 +471,13 @@ class ProjectContext:
                 directories[:] = sorted(
                     name
                     for name in directories
-                    if name not in {".git", ".lake"} and not (current / name).is_symlink()
+                    if name not in {".git", ".lake"} and not is_link(current / name)
                 )
                 for name in sorted(filenames):
                     if not name.endswith(".lean"):
                         continue
                     path = current / name
-                    if path in seen or path.is_symlink():
+                    if path in seen or is_link(path):
                         continue
                     seen.add(path)
                     add_file(path)

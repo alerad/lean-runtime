@@ -54,7 +54,8 @@ def test_toolchain_zstd_layer_is_deterministic_and_preserves_executables(
     destination.mkdir()
     _extract_layer(first, destination)
     assert (destination / "bin" / "lean").read_bytes() == b"lean"
-    assert (destination / "bin" / "lean").stat().st_mode & 0o111
+    # NTFS has no execute bit; only assert it where the filesystem can hold one.
+    assert os.name == "nt" or (destination / "bin" / "lean").stat().st_mode & 0o111
 
 
 def test_toolchain_extractor_rejects_non_zstd_input(tmp_path: Path) -> None:

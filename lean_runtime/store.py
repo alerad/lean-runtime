@@ -182,6 +182,10 @@ def _tree_metrics(root: Path, seen: set[tuple[int, int]]) -> tuple[int, int]:
                             continue
                         if entry.is_file(follow_symlinks=False):
                             record = entry.stat(follow_symlinks=False)
+                            if os.name == "nt" and not record.st_ino:
+                                # DirEntry.stat() leaves st_ino/st_nlink at zero on
+                                # Windows; only os.stat() reports hard-link identity.
+                                record = os.stat(entry.path)
                             materialized += record.st_size
                             if record.st_nlink > 1 and record.st_ino:
                                 identity = (record.st_dev, record.st_ino)
@@ -579,7 +583,9 @@ class EnvironmentStore:
                 return destination
             parent = destination.parent
             parent.mkdir(parents=True, exist_ok=True)
-            stage = parent / f".staging-{os.getpid()}-{uuid.uuid4().hex}"
+            # Keep this short: Git rejects shallow-clone metadata paths near MAX_PATH
+            # on Windows ("'$GIT_DIR' too big"), and source ids are already 71 chars.
+            stage = parent / f".staging-{uuid.uuid4().hex[:12]}"
             try:
                 command = git_command(
                     "clone",
@@ -1066,7 +1072,7 @@ class EnvironmentStore:
         with FileLock(self.lock_dir / "scratch-gc.lock"):
             for path in self._scratch_paths():
                 try:
-                    age = now - path.stat().st_mtime
+                    age = max(0.0, now - path.stat().st_mtime)
                 except OSError:
                     continue
                 label = f"{path.parent.name}/{path.name}"
@@ -1184,7 +1190,7 @@ class EnvironmentStore:
                 if not path.is_file() or _OCI_BLOB.fullmatch(path.name) is None:
                     retained.append(path.name)
                     continue
-                age = now - path.stat().st_mtime
+                age = max(0.0, now - path.stat().st_mtime)
                 if (
                     path.name in referenced
                     or age < minimum_age_seconds
@@ -1202,7 +1208,7 @@ class EnvironmentStore:
                     if (
                         not path.is_file()
                         or path.name in referenced
-                        or now - path.stat().st_mtime < minimum_age_seconds
+                        or max(0.0, now - path.stat().st_mtime) < minimum_age_seconds
                         or self.has_oci_blob_leases(path.name)
                     ):
                         retained.append(path.name)
@@ -1216,7 +1222,7 @@ class EnvironmentStore:
                 if not path.is_file() or _OCI_BLOB.fullmatch(path.name) is None:
                     retained.append(label)
                     continue
-                age = now - path.stat().st_mtime
+                age = max(0.0, now - path.stat().st_mtime)
                 if age < minimum_age_seconds or self.has_cas_artifact_leases(path.name):
                     retained.append(label)
                     continue
@@ -1228,7 +1234,7 @@ class EnvironmentStore:
                 with FileLock(self.lock_dir / f"cas-{path.name}.lock"):
                     if (
                         not path.is_file()
-                        or now - path.stat().st_mtime < minimum_age_seconds
+                        or max(0.0, now - path.stat().st_mtime) < minimum_age_seconds
                         or self.has_cas_artifact_leases(path.name)
                     ):
                         retained.append(label)

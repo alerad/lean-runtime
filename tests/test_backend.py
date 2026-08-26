@@ -54,6 +54,28 @@ def test_cancellation_stops_process(tmp_path: Path) -> None:
     assert result.elapsed_seconds < 3
 
 
+def _process_alive(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def test_caller_interrupt_stops_child_before_propagating(tmp_path: Path) -> None:
     pid_path = tmp_path / "pid"
 
@@ -79,5 +101,4 @@ def test_caller_interrupt_stops_child_before_propagating(tmp_path: Path) -> None
         )
     pid = int(pid_path.read_text())
     time.sleep(0.05)
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert not _process_alive(pid)

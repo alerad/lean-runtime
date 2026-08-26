@@ -51,7 +51,8 @@ def test_clone_tree_preserves_file_timestamps(tmp_path: Path) -> None:
 
     destination = tmp_path / "destination"
     clone_tree(source, destination)
-    assert (destination / artifact.name).stat().st_mtime_ns == timestamp_ns
+    # NTFS stores timestamps in 100 ns ticks.
+    assert abs((destination / artifact.name).stat().st_mtime_ns - timestamp_ns) < 1000
 
 
 def test_aliases_and_garbage_collection(tmp_path: Path) -> None:

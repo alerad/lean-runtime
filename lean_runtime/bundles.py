@@ -360,6 +360,18 @@ def _git_object_id(kind: str, data: bytes) -> str:
     return hashlib.sha1(framed, usedforsecurity=False).hexdigest()  # noqa: S324
 
 
+def _matches_normalized(data: bytes, object_id: str) -> bool:
+    """Accept a CRLF working file whose LF-normalized blob is the recorded one.
+
+    Git with ``core.autocrlf`` (the Git for Windows default) stores text blobs
+    with LF endings while checking them out with CRLF, so the on-disk bytes of
+    an untouched file legitimately hash differently from its recorded object.
+    """
+    if b"\r\n" not in data:
+        return False
+    return _git_object_id("blob", data.replace(b"\r\n", b"\n")) == object_id
+
+
 def _source_tree_inventory(root: Path, package: LockedPackage) -> bytes:
     process = subprocess.run(
         git_command("-C", str(root), "ls-tree", "-rz", "--full-tree", "HEAD"),
@@ -475,7 +487,7 @@ def _verify_source_tree_inventory(root: Path, package: LockedPackage, path: Path
             if executable != (mode == "100755"):
                 raise EnvironmentError(f"bundled package source mode mismatch: {package.name}")
             data = source.read_bytes()
-        if _git_object_id("blob", data) != object_id:
+        if _git_object_id("blob", data) != object_id and not _matches_normalized(data, object_id):
             raise EnvironmentError(f"bundled package source mismatch: {package.name}")
         entries.append(entry)
     if _inventory_tree_id(entries) != package.tree_hash:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 import sqlite3
 from dataclasses import dataclass, replace
@@ -180,7 +181,7 @@ class DeclarationIndex:
 
     def _validate(self) -> None:
         try:
-            with self._connect() as connection:
+            with contextlib.closing(self._connect()) as connection:
                 version = int(connection.execute("PRAGMA user_version").fetchone()[0])
                 metadata = dict(connection.execute("SELECT key, value FROM meta"))
                 columns = {
@@ -226,7 +227,7 @@ class DeclarationIndex:
     @property
     def declaration_count(self) -> int:
         try:
-            with self._connect() as connection:
+            with contextlib.closing(self._connect()) as connection:
                 return int(connection.execute("SELECT count(*) FROM decl").fetchone()[0])
         except (sqlite3.Error, TypeError, ValueError) as exc:
             raise EnvironmentError("declaration shard count failed") from exc
@@ -235,7 +236,7 @@ class DeclarationIndex:
         if not valid_declaration_name(name):
             return None
         try:
-            with self._connect() as connection:
+            with contextlib.closing(self._connect()) as connection:
                 row = connection.execute(
                     "SELECT name, module, kind, weight FROM decl WHERE name = ?",
                     (name,),
@@ -248,7 +249,7 @@ class DeclarationIndex:
         if not valid_declaration_name(suffix) or not 1 <= limit <= 20:
             return ()
         try:
-            with self._connect() as connection:
+            with contextlib.closing(self._connect()) as connection:
                 rows = connection.execute(
                     """
                     SELECT d.name, d.module, d.kind, d.weight

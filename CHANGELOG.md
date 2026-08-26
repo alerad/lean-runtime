@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- Attach shared dependencies on Windows without administrator rights. Creating
+  a symbolic link needs `SeCreateSymbolicLinkPrivilege` (administrators or
+  Developer Mode), so `adopt` and `project attach` failed with
+  `WinError 1314: A required privilege is not held by the client` on a normal
+  account, and the pre-attach probe never caught it. When symlink creation is
+  denied, the package link is now created as a directory junction, which any
+  user may create and which Lake and Git traverse identically. Every place
+  that recognizes an attached package as a link (`status`, `verify`,
+  `unshare`, adoption planning, rollback, source fingerprinting) now
+  recognizes junctions too.
+- Size local dependency checkouts during `adopt` without descending into
+  attached links, using one directory scan per level instead of `rglob`.
+- Windows correctness fixes surfaced by running the suite on Windows:
+  compact source snapshots stage under a shorter directory name so Git's
+  shallow-clone metadata stays below `MAX_PATH` (`'$GIT_DIR' too big`);
+  `lean-runtime run` rewrites a container backend's POSIX staged path back to
+  the user's file on Windows hosts; lock waiters learn the holding operation
+  through a `.owner` sidecar (a byte-locked file cannot be read on Windows);
+  declaration shards close their SQLite connection before publication so the
+  rename succeeds; `storage` deduplicates hard links via `os.stat()` because
+  `DirEntry.stat()` reports no inode on Windows; `publish` accepts a
+  drive-letter origin path (`C:\...`) instead of treating `C` as a URL scheme;
+  bundle import accepts CRLF working files whose LF-normalized blob is the
+  recorded object (`core.autocrlf`); and storage cleanup clamps negative file
+  ages from filesystem timestamp granularity.
+
 ## 4.27.0 - 2026-08-26
 
 - Fingerprint a project by what Lake compiles, not by everything beside the

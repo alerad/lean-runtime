@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ._paths import remove_tree
+from ._paths import is_link, link_directory, remove_tree
 from .errors import ProjectError
 from .policies import format_byte_size
 from .projects import ProjectContext, discover_project
@@ -35,20 +35,28 @@ _CONFIG_CONTENT = f'schema = "{PROJECT_CONFIG_SCHEMA}"\ndependencies = "shared"\
 
 
 def _remove_path(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
+    if is_link(path) or path.is_file():
         path.unlink()
     elif path.exists():
         remove_tree(path)
 
 
 def _tree_bytes(root: Path) -> int:
+    """Size a local checkout without following links into shared storage."""
     total = 0
-    if not root.is_dir() or root.is_symlink():
+    if not root.is_dir() or is_link(root):
         return total
-    for path in root.rglob("*"):
+    for directory, directories, _filenames in os.walk(root, followlinks=False):
+        current = Path(directory)
+        directories[:] = [name for name in directories if not is_link(current / name)]
         try:
-            if path.is_file() and not path.is_symlink():
-                total += path.stat().st_size
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
         except OSError:
             continue
     return total
@@ -365,7 +373,7 @@ def inspect_adoption(root: Path) -> ProjectAdoption:
         return ProjectAdoption(root.resolve(), None, (), 0, False, (str(exc),))
     blockers: list[str] = []
     warnings: list[str] = []
-    if (context.root / ".lake").is_symlink():
+    if is_link(context.root / ".lake"):
         blockers.append(".lake itself is a symlink; only dependency directories can be adopted")
     config = context.root / PROJECT_CONFIG
     if config.exists() and not project_sharing_enabled(context.root):
@@ -382,7 +390,7 @@ def inspect_adoption(root: Path) -> ProjectAdoption:
                 blockers.append(f"local path dependency {name} does not exist: {dependency}")
             continue
         local = packages_dir / name
-        if local.is_symlink():
+        if is_link(local):
             continue
         if not local.exists():
             warnings.append(f"{name} is not local yet and will be fetched at its exact revision")
@@ -497,7 +505,7 @@ def plan_detachment(root: Path) -> DetachmentPlan:
         name = str(entry["name"])
         names.append(name)
         source = packages_dir / name
-        if not source.is_symlink():
+        if not is_link(source):
             blockers.append(f"attached package link is missing or replaced: {name}")
             continue
         target = source.resolve()
@@ -575,7 +583,7 @@ class ProjectAdopter:
                 name = str(entry["name"])
                 package_dir = override_package_dirs.get(name)
                 link = packages_dir / name
-                if package_dir is None or not link.is_symlink():
+                if package_dir is None or not is_link(link):
                     links_match = False
                     break
                 subdir = _package_subdir(entry)
@@ -602,7 +610,7 @@ class ProjectAdopter:
         reclaimed = _tree_bytes(packages_dir)
         staging.mkdir()
         swapped = False
-        had_original = packages_dir.exists() or packages_dir.is_symlink()
+        had_original = packages_dir.exists() or is_link(packages_dir)
         config = context.root / PROJECT_CONFIG
         try:
             self.shared.events.emit(
@@ -626,7 +634,7 @@ class ProjectAdopter:
                         target = target.parent
                     if (target / subdir).resolve() != package_dir.resolve():
                         raise ProjectError(f"shared workspace has an invalid subDir for {name}")
-                os.symlink(target, staging / name, target_is_directory=True)
+                link_directory(target, staging / name)
             if had_original:
                 packages_dir.replace(backup)
             staging.replace(packages_dir)
@@ -660,7 +668,7 @@ class ProjectAdopter:
             _remove_path(staging)
             if swapped:
                 _remove_path(packages_dir)
-            if backup.exists() or backup.is_symlink():
+            if backup.exists() or is_link(backup):
                 backup.replace(packages_dir)
             if marker.is_file():
                 marker.unlink()
@@ -703,7 +711,7 @@ class ProjectAdopter:
                     continue
                 name = str(entry["name"])
                 source = packages_dir / name
-                if not source.is_symlink():
+                if not is_link(source):
                     raise ProjectError(f"attached package link is missing or replaced: {name}")
                 target = source.resolve()
                 if not target.is_dir():
@@ -726,7 +734,7 @@ class ProjectAdopter:
             _remove_path(staging)
             if swapped:
                 _remove_path(packages_dir)
-            if backup.exists() or backup.is_symlink():
+            if backup.exists() or is_link(backup):
                 backup.replace(packages_dir)
             if not marker.exists():
                 marker.write_text(marker_contents, encoding="utf-8")

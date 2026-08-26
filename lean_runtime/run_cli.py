@@ -277,7 +277,12 @@ def _display_text(text: str, result: ExecutionResult, filename: str, display_pat
     Only the known staged source path is rewritten; dependency paths and path
     text embedded inside compiler messages are left untouched.
     """
-    staged_entry = str(Path(result.cwd) / filename)
+    cwd = result.cwd
+    if cwd.startswith("/") and "\\" not in cwd:
+        # A container backend stages under a POSIX path even on Windows hosts.
+        staged_entry = f"{cwd.rstrip('/')}/{filename}"
+    else:
+        staged_entry = str(Path(cwd) / filename)
     return text.replace(staged_entry, display_path)
 
 

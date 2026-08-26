@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from ._git import git_command
-from ._paths import remove_tree
+from ._paths import is_link, remove_tree
 from .errors import ProjectError
 from .events import EventEmitter
 from .locking import FileLock
@@ -659,7 +659,7 @@ class SharedProjectManager:
             valid = True
             for name, (revision, subdir, _url) in required.items():
                 package = package_root / name
-                if package.is_symlink():
+                if is_link(package):
                     package = package.resolve()
                 marker_id = package.name
                 managed = _PACKAGE_ID_PATTERN.fullmatch(
@@ -1317,7 +1317,7 @@ class SharedProjectManager:
                             )
                         else:
                             seed = local
-                        if seed.is_symlink():
+                        if is_link(seed):
                             seed = seed.resolve()
                         subdir = _package_subdir(entry)
                         reusable = reusable_packages.get(package_name)

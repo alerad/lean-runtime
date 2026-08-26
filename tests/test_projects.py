@@ -22,6 +22,7 @@ from lean_runtime import (
     discover_project,
 )
 from lean_runtime._git import git_command
+from lean_runtime._paths import is_link, remove_tree
 from lean_runtime.errors import DownloadLimitExceeded
 from lean_runtime.models import ExecutionResult
 from lean_runtime.policies import ExecutionPolicy
@@ -650,7 +651,7 @@ def test_attach_replaces_only_packages_and_detach_materializes_them(tmp_path: Pa
     attached = runtime.attach_projects(source)
     assert attached.ok
     package = tmp_path / "project" / ".lake" / "packages" / "dep"
-    assert package.is_symlink()
+    assert is_link(package)
     assert build_artifact.read_bytes() == b"root build"
     assert (tmp_path / "project" / "lean-runtime.toml").is_file()
     assert runtime.build(source).command[-2].startswith("--packages=")
@@ -669,7 +670,7 @@ def test_attach_replaces_only_packages_and_detach_materializes_them(tmp_path: Pa
 
     detached = runtime.detach_project(source)
     assert detached.action == "detached"
-    assert package.is_dir() and not package.is_symlink()
+    assert package.is_dir() and not is_link(package)
     assert build_artifact.read_bytes() == b"root build"
     assert not (tmp_path / "project" / "lean-runtime.toml").exists()
     assert (
@@ -822,12 +823,12 @@ def test_attach_preserves_repository_roots_for_subdir_packages(tmp_path: Path) -
 
     assert runtime.attach_projects(source).ok
     attached = tmp_path / "project" / ".lake" / "packages" / "dep"
-    assert attached.is_symlink()
+    assert is_link(attached)
     assert (attached / "nested" / "package" / "lakefile.toml").is_file()
     assert not (attached / "lakefile.toml").is_file()
 
     runtime.detach_project(source)
-    assert attached.is_dir() and not attached.is_symlink()
+    assert attached.is_dir() and not is_link(attached)
     assert (attached / "nested" / "package" / "lakefile.toml").is_file()
 
 
@@ -847,7 +848,7 @@ def test_attach_rolls_back_the_package_swap_when_plain_lake_rejects_it(tmp_path:
     with pytest.raises(ProjectError, match="plain Lake rejected"):
         runtime.project_adopter.attach(context, probe=reject_attached_graph)
 
-    assert original.is_dir() and not original.is_symlink()
+    assert original.is_dir() and not is_link(original)
     assert not (tmp_path / "project" / "lean-runtime.toml").exists()
     assert not (tmp_path / "project" / ".lake" / "lean-runtime-attachment.json").exists()
 
@@ -1697,7 +1698,7 @@ def test_sparse_environment_artifacts_without_build_identity_are_not_grafted(
         libraries=[],  # type: ignore[arg-type]
     )
     runtime.prepare_shared_project(first_source)
-    shutil.rmtree(runtime.home / "project-packages")
+    remove_tree(runtime.home / "project-packages")
     shutil.rmtree(runtime.home / "project-workspaces")
 
     sparse = tmp_path / "sparse" / "dep" / ".lake" / "build" / "lib" / "lean"

@@ -25,6 +25,7 @@ def _payload(root: Path) -> Path:
     return payload
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the fixture program is a POSIX shell script")
 def test_program_identity_payload_validation_and_interactive_execution(tmp_path: Path) -> None:
     runtime = Runtime(home=tmp_path / "runtime")
     program = runtime.create_program(

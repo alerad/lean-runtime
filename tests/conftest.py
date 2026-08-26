@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from collections.abc import Iterable
 
 import pytest
 
 from lean_runtime import EnvironmentLock, LockedPackage
 from lean_runtime.discovery import Catalog, CatalogEntry
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config: pytest.Config) -> None:
+    """Keep temporary paths short on Windows.
+
+    Git refuses shallow-clone metadata paths near MAX_PATH ("'$GIT_DIR' too big")
+    and pytest's default base directory already spends about 60 characters.
+    """
+    if os.name == "nt" and not config.option.basetemp:
+        config.option.basetemp = os.path.join(tempfile.gettempdir(), "lrt")
 
 
 def make_lock(

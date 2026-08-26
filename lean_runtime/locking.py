@@ -19,8 +19,9 @@ class FileLock:
     """One advisory cross-process lock.
 
     ``owner`` is a small JSON-serializable description of the acquiring
-    operation; on POSIX it is written into the lock file while the lock is
-    held so that waiters can attribute their wait. ``on_wait`` is invoked at
+    operation; it is published while the lock is held (POSIX: inside the lock
+    file, Windows: in a ``.owner`` sidecar, because a byte-locked file cannot
+    be read by waiters) so that waiters can attribute their wait. ``on_wait`` is invoked at
     most once, on first contention, with the current holder's description (or
     ``None`` when it cannot be read).
     """
@@ -44,19 +45,37 @@ class FileLock:
     def holder(self) -> dict[str, Any] | None:
         """Best-effort description of the current lock holder."""
         try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
+            value = json.loads(self._owner_source().read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             return None
         return value if isinstance(value, dict) else None
 
+    def _owner_source(self) -> Path:
+        """Where the holder's description lives.
+
+        POSIX writes it into the lock file itself. Windows mandatory byte locks
+        make a locked file unreadable to waiters, so the description lives in a
+        sidecar beside the lock instead.
+        """
+        if os.name == "nt":
+            return self.path.with_name(self.path.name + ".owner")
+        return self.path
+
     def _write_owner(self, handle: BinaryIO) -> None:
-        if self.owner is None or os.name == "nt":
+        if self.owner is None:
             return
         try:
-            handle.seek(0)
-            handle.truncate()
-            handle.write(json.dumps({"pid": os.getpid(), **self.owner}).encode("utf-8"))
-            handle.flush()
+            payload = json.dumps({"pid": os.getpid(), **self.owner}).encode("utf-8")
+            if os.name == "nt":
+                sidecar = self._owner_source()
+                temporary = sidecar.with_name(f"{sidecar.name}.{os.getpid()}.tmp")
+                temporary.write_bytes(payload)
+                temporary.replace(sidecar)
+            else:
+                handle.seek(0)
+                handle.truncate()
+                handle.write(payload)
+                handle.flush()
             self._owner_written = True
         except (OSError, TypeError, ValueError):
             self._owner_written = False
@@ -119,9 +138,12 @@ class FileLock:
             return
         if self._owner_written:
             with contextlib.suppress(OSError):
-                handle.seek(0)
-                handle.truncate()
-                handle.flush()
+                if os.name == "nt":
+                    self._owner_source().unlink()
+                else:
+                    handle.seek(0)
+                    handle.truncate()
+                    handle.flush()
             self._owner_written = False
         if os.name == "nt":
             import msvcrt
