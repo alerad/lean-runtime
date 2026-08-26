@@ -59,3 +59,24 @@ def test_to_dict_is_unchanged_by_convenience_properties() -> None:
     assert "warnings" not in payload
     assert "first_error" not in payload
     assert payload["diagnostics"][0]["message"] == "unsolved goals"
+
+
+def test_verdict_separates_lean_answer_from_whether_lean_finished() -> None:
+    accepted = _result((), ok=True)
+    rejected = _result((Diagnostic("Main.lean", 1, 19, "error", "boom"),), ok=False)
+    timed_out = ExecutionResult(
+        ok=False,
+        exit_code=-9,
+        toolchain="leanprover/lean4:v4.32.2",
+        command=("lean", "Main.lean"),
+        cwd="/work",
+        stdout="",
+        stderr="",
+        elapsed_seconds=30.0,
+        timed_out=True,
+    )
+    assert accepted.verdict == "accepted"
+    assert rejected.verdict == "rejected"
+    assert timed_out.verdict == "not_run"
+    assert accepted.to_dict()["verdict"] == "accepted"
+    assert timed_out.to_dict()["verdict"] == "not_run"

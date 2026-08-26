@@ -660,6 +660,10 @@ class Runtime:
             return False
         return True
 
+    def toolchain_installed(self, toolchain: str) -> bool:
+        """Report whether a toolchain is usable locally, without installing anything."""
+        return self._toolchain_installed(toolchain)
+
     def _toolchain_installed(self, toolchain: str) -> bool:
         """Answer without bootstrapping Elan or installing anything."""
         try:

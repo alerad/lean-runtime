@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .console import ConsoleRenderer, styler_for
+from .console import ConsoleRenderer, styler_for, verdict_line
 from .context_resolution import FileContextResolution, resolve_file_context
 from .discovery import (
     Catalog,
@@ -306,16 +306,9 @@ def _emit(
             continue
         print(f"Hint: {hint}", file=sys.stderr)
     style = styler_for(sys.stdout)
-    symbol = style.green("✓") if result.ok else style.red("✗")
-    if result.ok:
-        status = style.green("accepted")
-    elif result.timed_out:
-        status = style.red("timed out")
-    else:
-        status = style.red("rejected")
-    elapsed = result.elapsed_seconds if summary_elapsed_seconds is None else summary_elapsed_seconds
-    timing = style.dim(f"in {elapsed:.2f}s")
-    print(f"{symbol} {shown} {status} {timing}")
+    if summary_elapsed_seconds is not None:
+        result = replace(result, elapsed_seconds=summary_elapsed_seconds)
+    print(verdict_line(result, style=style, subject=shown))
     if discovery_summary is not None:
         print(discovery_summary)
     if show_timings:

@@ -53,6 +53,25 @@ class Styler:
         return self._wrap("36", text)
 
 
+def verdict_line(result: Any, *, style: Styler, subject: str | None = None) -> str:
+    """One line that attributes Lean's verdict to the exact environment it ran in.
+
+    ``result`` is an ``ExecutionResult``; typed loosely to keep this module
+    free of model imports.
+    """
+    where = result.environment_id or result.toolchain
+    if result.verdict == "accepted":
+        symbol, status = style.green("✓"), style.green("accepted")
+    elif result.verdict == "rejected":
+        symbol, status = style.red("✗"), style.red("rejected")
+    else:
+        detail = "timed out" if result.timed_out else "cancelled"
+        symbol, status = style.red("✗"), style.red(f"{detail} (no verdict)")
+    timing = style.dim(f"({result.elapsed_seconds:.2f}s)")
+    prefix = f"{symbol} {subject} " if subject else f"{symbol} "
+    return f"{prefix}{status} in {where} {timing}"
+
+
 def styler_for(stream: TextIO | None = None) -> Styler:
     """Style only real terminals, honoring the NO_COLOR convention."""
     stream = stream if stream is not None else sys.stderr

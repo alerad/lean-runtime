@@ -17,6 +17,7 @@ SCHEMA_NAMES = frozenset(
         "plan-v1.schema.json",
         "profile-v1.schema.json",
         "publication-v1.schema.json",
+        "status-v1.schema.json",
         "verify-v1.schema.json",
     }
 )

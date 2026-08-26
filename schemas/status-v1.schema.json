@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lean-runtime.dev/schemas/status-v1.schema.json",
+  "type": "object",
+  "required": ["schema", "ok", "data", "warnings", "errors"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "lean-runtime.status/v1"},
+    "ok": {"type": "boolean"},
+    "data": {"oneOf": [{"$ref": "#/$defs/status"}, {"$ref": "#/$defs/empty"}]},
+    "warnings": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"},
+    "errors": {"$ref": "https://lean-runtime.dev/schemas/execution-v1.schema.json#/$defs/issues"}
+  },
+  "$defs": {
+    "empty": {"type": "object", "maxProperties": 0},
+    "context": {
+      "type": "object",
+      "required": ["source", "confidence"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {"enum": ["automatic_discovery", "project", "lock", "environment", "none"]},
+        "confidence": {"enum": ["proposed", "exact", "none"]},
+        "reason": {"type": "string"}
+      }
+    },
+    "availability": {
+      "type": "object",
+      "required": ["local", "toolchain", "toolchain_installed", "remote"],
+      "additionalProperties": false,
+      "properties": {
+        "local": {"type": "boolean"},
+        "toolchain": {"type": "string"},
+        "toolchain_installed": {"type": "boolean"},
+        "remote": {"anyOf": [{"const": "not_probed"}, {"type": "object"}]}
+      }
+    },
+    "status": {
+      "type": "object",
+      "required": ["kind", "subject", "context"],
+      "properties": {
+        "kind": {"enum": ["standalone", "project", "lock", "environment", "unconfigured"]},
+        "subject": {"type": "string"},
+        "context": {"$ref": "#/$defs/context"},
+        "context_reason": {"type": "string"},
+        "parent_project": {"type": ["string", "null"]},
+        "imports": {"type": "array", "items": {"type": "string"}},
+        "candidates": {"type": "array", "items": {"type": "string"}},
+        "planned_first": {"type": ["string", "null"]},
+        "availability": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/availability"}
+        },
+        "probe": {"type": ["object", "null"]},
+        "root": {"type": "string"},
+        "toolchain": {"type": "string"},
+        "manifest": {"type": ["string", "null"]},
+        "attached": {"type": "boolean"},
+        "agents_guide": {"type": ["string", "null"]},
+        "lock_id": {"type": "string"},
+        "packages": {"type": "integer", "minimum": 0},
+        "message": {"type": "string"}
+      }
+    }
+  }
+}

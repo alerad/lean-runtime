@@ -20,7 +20,7 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover - exercised by Python 3.10 CI
     import tomli as tomllib
 
-from .console import ConsoleRenderer, styler_for
+from .console import ConsoleRenderer, styler_for, verdict_line
 from .declaration_index import DeclarationIndex, DeclarationIndexSet, DeclarationShard
 from .declaration_index_build import (
     build_declaration_index,
@@ -66,6 +66,7 @@ from .wire import (
     serialize_execution_v1,
     serialize_matrix_v1,
     serialize_profile_v1,
+    serialize_status_v1,
     serialize_verify_v1,
 )
 
@@ -79,6 +80,7 @@ def _schema_for(command: str) -> str:
         "clean": "lean-runtime.cleanup/v1",
         "inspect": "lean-runtime.inspect/v1",
         "publish-environment": "lean-runtime.publication/v1",
+        "status": "lean-runtime.status/v1",
     }.get(command, "lean-runtime.execution/v1")
 
 
@@ -286,6 +288,277 @@ def _render_adoption_plan(plan: AdoptionPlan) -> None:
     print(
         f"Estimated machine recovery: {format_byte_size(plan.estimated_machine_reclaimable_bytes)}"
     )
+
+
+def _status_report(runtime: Runtime, args: argparse.Namespace) -> dict[str, Any]:
+    """Explain which context a subject would use, without running Lean.
+
+    The report says where the decision comes from and how much confidence it
+    carries: a pinned project, lock, or stored environment is ``exact``; an
+    automatic discovery plan is only ``proposed`` until Lean accepts the file
+    inside one of its candidates.
+    """
+    subject_path = Path(args.subject).expanduser()
+    is_lean_file = subject_path.is_file() and subject_path.suffix == ".lean"
+    unowned_project = None
+    try:
+        project_status = discover_project(subject_path)
+        if is_lean_file and project_status.owns_file(subject_path) is False:
+            unowned_project = project_status
+            raise ProjectNotFoundError("file is not owned by a declared project target")
+    except ProjectNotFoundError:
+        pass
+    else:
+        owned = is_lean_file and project_status.owns_file(subject_path) is True
+        reason = (
+            "file is owned by a declared project target"
+            if owned
+            else "nearest pinned Lake project selected"
+        )
+        return {
+            "kind": "project",
+            "subject": str(subject_path.resolve()),
+            "context": {"source": "project", "confidence": "exact", "reason": reason},
+            "context_reason": reason,
+            "root": str(project_status.root),
+            "toolchain": project_status.toolchain,
+            "manifest": str(project_status.manifest) if project_status.manifest else None,
+            "attached": (project_status.root / "lean-runtime.toml").is_file(),
+            "agents_guide": (
+                str(project_status.root / "AGENTS.md")
+                if (project_status.root / "AGENTS.md").is_file()
+                else None
+            ),
+        }
+    if is_lean_file:
+        return _standalone_status(
+            runtime, subject_path, unowned_project=unowned_project, probe=args.probe
+        )
+    if subject_path.is_file() and subject_path.suffix == ".json":
+        lock = EnvironmentLock.load(subject_path)
+        return {
+            "kind": "lock",
+            "subject": str(subject_path.resolve()),
+            "context": {"source": "lock", "confidence": "exact", "reason": "exact lock file"},
+            "lock_id": lock.lock_id,
+            "toolchain": lock.toolchain,
+            "packages": len(lock.packages),
+        }
+    try:
+        environment = runtime.environment(args.subject)
+    except (LeanRuntimeError, ValueError):
+        message = "no pinned Lake project, lock, or named environment found"
+        return {
+            "kind": "unconfigured",
+            "subject": str(subject_path.resolve()),
+            "context": {"source": "none", "confidence": "none", "reason": message},
+            "message": message,
+        }
+    return {
+        "kind": "environment",
+        "subject": args.subject,
+        "context": {
+            "source": "environment",
+            "confidence": "exact",
+            "reason": "stored exact environment",
+        },
+        **environment.inspect().to_dict(),
+    }
+
+
+def _standalone_status(
+    runtime: Runtime,
+    subject_path: Path,
+    *,
+    unowned_project: Any,
+    probe: bool,
+) -> dict[str, Any]:
+    catalog = default_catalog()
+    source_text = subject_path.read_text(encoding="utf-8")
+    discovery = Discovery(catalog=catalog, runtime=runtime)
+    evidence = discovery.analyze(source_text)
+    static_plan = discovery.plan(source_text, evidence=evidence)
+    discovery_plan, _ = discovery.order(source_text, evidence, static_plan)
+    reason = (
+        "parent project found, but no declared target owns this file"
+        if unowned_project is not None
+        else "no pinned Lake project found"
+    )
+    installed: dict[str, bool] = {}
+    availability: dict[str, dict[str, Any]] = {}
+    for candidate in discovery_plan.candidates:
+        toolchain = candidate.entry.toolchain
+        if toolchain not in installed:
+            installed[toolchain] = runtime.toolchain_installed(toolchain)
+        availability[candidate.entry.id] = {
+            "local": runtime.exact_ready_locally(
+                candidate.entry.lock, import_roots=evidence.imports
+            ),
+            "toolchain": toolchain,
+            "toolchain_installed": installed[toolchain],
+            "remote": "not_probed",
+        }
+    probe_report: dict[str, Any] | None = None
+    if probe and discovery_plan.candidates:
+        first = discovery_plan.candidates[0]
+        probe_report = runtime.plan_exact(first.entry.lock, import_roots=evidence.imports)
+        availability[first.entry.id]["remote"] = probe_report
+    return {
+        "kind": "standalone",
+        "subject": str(subject_path.resolve()),
+        "context": {
+            "source": "automatic_discovery",
+            "confidence": "proposed",
+            "reason": reason,
+        },
+        "context_reason": reason,
+        "parent_project": str(unowned_project.root) if unowned_project is not None else None,
+        "imports": list(discovery_plan.evidence.imports),
+        "candidates": [candidate.entry.id for candidate in discovery_plan.candidates],
+        "planned_first": (
+            discovery_plan.candidates[0].entry.id if discovery_plan.candidates else None
+        ),
+        "availability": availability,
+        "probe": probe_report,
+    }
+
+
+def _describe_download(probe: dict[str, Any]) -> str:
+    total = probe.get("download_bytes")
+    complete = probe.get("download_bytes_complete", True)
+    if total == 0 and complete:
+        return "none: environment and toolchain are already local"
+    environment = probe.get("environment_download_bytes")
+    toolchain = probe.get("toolchain_download_bytes")
+    environment_text = (
+        format_byte_size(environment)
+        if isinstance(environment, int)
+        else "not priced by any configured library"
+    )
+    if isinstance(toolchain, int):
+        toolchain_text = "already installed" if toolchain == 0 else format_byte_size(toolchain)
+    else:
+        toolchain_text = "unknown"
+    detail = f"environment {environment_text}, Lean runtime {toolchain_text}"
+    if complete and isinstance(total, int):
+        return f"{format_byte_size(total)} ({detail})"
+    if isinstance(total, int) and total > 0:
+        return f"at least {format_byte_size(total)} ({detail})"
+    return f"unknown ({detail})"
+
+
+def _render_status(report: dict[str, Any], *, display_subject: str) -> None:
+    style = styler_for(sys.stdout)
+    kind = report["kind"]
+    name = Path(report["subject"]).name or report["subject"]
+    label = "{:<12}"
+
+    def row(key: str, value: str) -> None:
+        print(f"  {label.format(key)} {value}")
+
+    if kind == "standalone":
+        parent = report.get("parent_project")
+        where = (
+            f"below {parent}, but no declared target owns it"
+            if parent
+            else "no owning Lake project"
+        )
+        print(f"{name} — standalone file ({where})")
+        row(
+            "Context",
+            f"automatic discovery · {style.dim('proposed from imports; Lean has not run')}",
+        )
+        imports = report.get("imports") or []
+        row("Imports", ", ".join(imports) if imports else "none (core Lean only)")
+        candidates: list[str] = report.get("candidates") or []
+        availability: dict[str, dict[str, Any]] = report.get("availability") or {}
+        if not candidates:
+            row("Will try", "nothing: no catalog environment provides these imports")
+        shown = candidates[:3]
+        for index, candidate in enumerate(shown):
+            entry = availability.get(candidate, {})
+            environment_state = "ready locally" if entry.get("local") else "not local"
+            toolchain_state = "installed" if entry.get("toolchain_installed") else "not installed"
+            row(
+                "Will try" if index == 0 else "",
+                f"{candidate:<22} environment {environment_state} · toolchain {toolchain_state}",
+            )
+        if len(candidates) > len(shown):
+            row("", f"… {len(candidates) - len(shown)} more candidate(s); --json lists all")
+        probe = report.get("probe")
+        if isinstance(probe, dict):
+            row("Download", _describe_download(probe))
+        elif candidates and not availability.get(candidates[0], {}).get("local"):
+            row("Download", f"required for {candidates[0]}; add --probe to see the size")
+        elif candidates:
+            row("Download", f"none: {candidates[0]} is ready locally")
+        print()
+        print(
+            f"Next: lean-runtime check {display_subject} compiles the file and reports its verdict."
+        )
+        return
+    if kind == "project":
+        print(f"{Path(report['root']).name} — Lake project")
+        row("Context", f"project {report['root']} · pinned toolchain {report['toolchain']}")
+        row("Reason", report.get("context_reason", ""))
+        row("Manifest", report.get("manifest") or "none")
+        row(
+            "Shared deps",
+            "yes (lean-runtime.toml)"
+            if report.get("attached")
+            else "no (`lean-runtime adopt` shares them)",
+        )
+        row(
+            "AGENTS.md",
+            "present"
+            if report.get("agents_guide")
+            else "missing (`lean-runtime adopt` writes one)",
+        )
+        print()
+        target = display_subject if Path(report["subject"]).is_file() else ""
+        print(
+            f"Next: lean-runtime check {target}".rstrip()
+            + " runs Lean inside the project's pinned environment."
+        )
+        return
+    if kind == "lock":
+        print(f"{name} — exact lock")
+        row(
+            "Context",
+            f"lock {report['lock_id']} · toolchain {report['toolchain']} · "
+            f"{report['packages']} package(s)",
+        )
+        print()
+        print(
+            f"Next: lean-runtime check FILE --using {display_subject} runs Lean inside "
+            "exactly this environment."
+        )
+        return
+    if kind == "unconfigured":
+        print(f"{name} — no context")
+        row("Reason", report["message"])
+        print()
+        print(
+            "Next: point status at a Lean file, a lock, or a project, or run "
+            "`lean-runtime new NAME` to create a project."
+        )
+        return
+    print(f"{report['subject']} — stored environment")
+    row("Context", "exact environment · ready for `lean-runtime check FILE --using` it")
+    for key, value in report.items():
+        if key in {"kind", "subject", "context"}:
+            continue
+        pretty = key.replace("_", " ").title()
+        if isinstance(value, dict):
+            row(pretty, "")
+            for inner, detail in value.items():
+                if isinstance(detail, dict):
+                    detail = " ".join(f"{k}={v}" for k, v in detail.items())
+                print(f"    {inner:<20} {detail}")
+        elif isinstance(value, (list, tuple)):
+            row(pretty, ", ".join(str(item) for item in value) or "-")
+        else:
+            row(pretty, str(value))
 
 
 def _render_init_plan(plan: ProjectInitPlan) -> None:
@@ -506,12 +779,7 @@ def _emit_result(
         print(stderr, end="" if stderr.endswith("\n") else "\n", file=sys.stderr)
     for hint in result.hints:
         print(f"hint: {hint}", file=sys.stderr)
-    status = "accepted" if result.ok else "timed out" if result.timed_out else "rejected"
-    environment = f" environment={result.environment_id}" if result.environment_id else ""
-    print(
-        f"{status}:{environment} toolchain={result.toolchain} "
-        f"exit={result.exit_code} elapsed={result.elapsed_seconds:.3f}s"
-    )
+    print(verdict_line(result, style=styler_for(sys.stdout), subject=display_path))
 
 
 def _policy(arguments: argparse.Namespace) -> ExecutionPolicy:
@@ -648,13 +916,16 @@ def _add_check_v4(parser: argparse.ArgumentParser, *, watch: bool = False) -> No
     parser.add_argument(
         "--using",
         metavar="CONTEXT",
-        help="override context inference with a project, lock, environment, toolchain, or package",
+        help=(
+            "select the environment explicitly: a package release (mathlib@v4.33.0), "
+            "a lock file, a stored environment, a toolchain, or a project directory"
+        ),
     )
     if not watch:
         parser.add_argument(
             "--standalone",
             action="store_true",
-            help="ignore ancestor Lake projects and discover a standalone context",
+            help="ignore ancestor Lake projects and discover an environment from imports",
         )
         parser.add_argument(
             "--include",
@@ -809,7 +1080,15 @@ def parser() -> argparse.ArgumentParser:
         prog="lean-runtime",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Lean projects and standalone proofs, without environment busywork.",
-        epilog="""Start here:
+        epilog="""The model:
+  context      where a file's requirements come from: --using, frontmatter,
+               the owning Lake project, or automatic discovery
+  environment  one exact, immutable toolchain + package set
+  lock         an environment written down, reusable offline anywhere
+  verdict      Lean's answer inside one environment: accepted or rejected
+  Discovery proposes an environment. Only Lean accepts it.
+
+Start here:
   new NAME       Create a Lean project
   adopt [PATH]   Share dependencies from existing Lake project(s)
   check [PATH…]  Check a project or Lean source (context is inferred)
@@ -984,6 +1263,11 @@ Advanced namespaces:
         default=str(Path.cwd()),
         help="project path, Lean file, lock file, or environment (default: current directory)",
     )
+    status.add_argument(
+        "--probe",
+        action="store_true",
+        help="price the first planned download by consulting configured libraries",
+    )
     status.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     status.set_defaults(command="status")
 
@@ -1135,6 +1419,9 @@ Advanced namespaces:
     env_publish.add_argument(
         "--check-access", action="store_true", help="verify registry credentials and exit"
     )
+    env_publish.add_argument(
+        "--yes", action="store_true", help="publish without a confirmation prompt"
+    )
     _add_common_output(env_publish)
     env_publish.set_defaults(command="publish-environment")
     env_finalize = env_commands.add_parser("finalize", help="finalize a platform matrix")
@@ -1246,10 +1533,14 @@ Advanced namespaces:
     to.add_argument(
         "--prune-original", action="store_true", help="remove the full toolchain after slimming"
     )
+    to.add_argument(
+        "--yes", action="store_true", help="prune the full toolchain without a confirmation prompt"
+    )
     to.set_defaults(command="toolchain-slim")
     tp = tc.add_parser("publish", help="publish this platform's toolchain to a library")
     tp.add_argument("toolchain", help=toolchain_help)
     tp.add_argument("--library", required=True, help="target OCI repository")
+    tp.add_argument("--yes", action="store_true", help="publish without a confirmation prompt")
     tp.set_defaults(command="publish-toolchain")
     tf = tc.add_parser("finalize", help="finalize a toolchain across platforms")
     tf.add_argument("toolchain", help=toolchain_help)
@@ -1320,6 +1611,7 @@ Advanced namespaces:
     ppub.add_argument("--library", required=True, help="target OCI repository")
     ppub.add_argument("--tag", action="append", default=[], help="additional tag (repeatable)")
     ppub.add_argument("--sign", action="store_true", help="sign the publication with cosign")
+    ppub.add_argument("--yes", action="store_true", help="publish without a confirmation prompt")
     ppub.set_defaults(command="publish-program")
     pfinal = pr.add_parser("finalize", help="finalize a program across computers")
     pfinal.add_argument("source_revision", help="source revision shared by the publications")
@@ -1347,6 +1639,7 @@ Advanced namespaces:
     dip.add_argument("build", type=Path, help="build directory from `declaration-index build`")
     dip.add_argument("--library", required=True, help="target OCI repository")
     dip.add_argument("--sign", action="store_true", help="sign the publication with cosign")
+    dip.add_argument("--yes", action="store_true", help="publish without a confirmation prompt")
     dip.set_defaults(command="declaration-index-publish")
     dii = di.add_parser("inspect", help="summarize a build and resolve names")
     dii.add_argument("build", type=Path, help="build directory from `declaration-index build`")
@@ -1379,6 +1672,23 @@ def _declined_exit(*, json_mode: bool = False) -> int:
     if json_mode or not sys.stdin.isatty():
         return 2
     return 0
+
+
+def _gate_mutation(preview: str, *, yes: bool, json_mode: bool = False) -> int | None:
+    """Preview a change that leaves the runtime home, then require consent.
+
+    Every command that deletes local content, rewrites a project, or pushes to
+    a remote follows the same rule: say what will happen, apply only with
+    ``--yes`` or an interactive confirmation. Returns an exit code when the
+    change must not proceed, ``None`` when it may.
+    """
+    if not yes:
+        print(preview, file=sys.stderr)
+    if _confirm("Proceed?", yes=yes, json_mode=json_mode):
+        return None
+    if json_mode or not sys.stdin.isatty():
+        print("declined: pass --yes to apply this change non-interactively", file=sys.stderr)
+    return _declined_exit(json_mode=json_mode)
 
 
 def _path_is_project_root(path: Path) -> bool:
@@ -1616,6 +1926,13 @@ def main(argv: list[str] | None = None) -> int:
             lock = EnvironmentLock.load(args.lock)
             built = load_declaration_index_build(args.build, expected_lock_id=lock.lock_id)
             di_repository = OCIRepository.parse(args.library)
+            declined = _gate_mutation(
+                f"Publish {len(built.shards)} declaration shard(s) for {lock.lock_id} "
+                f"to {di_repository.display}",
+                yes=args.yes,
+            )
+            if declined is not None:
+                return declined
             di_publication = OCIDeclarationIndexPublisher(di_repository).publish(
                 tuple(di_item.source for di_item in built.shards), lock_id=lock.lock_id
             )
@@ -2083,6 +2400,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if args.lock is None:
                 raise ValueError("publish environment requires LOCK unless --check-access is used")
+            declined = _gate_mutation(
+                f"Build and publish the environment locked by {args.lock} to {args.publish_to}",
+                yes=args.yes,
+                json_mode=args.json,
+            )
+            if declined is not None:
+                return declined
             environment = runtime.open_exact(
                 EnvironmentLock.load(args.lock),
                 name=args.name,
@@ -2127,6 +2451,12 @@ def main(argv: list[str] | None = None) -> int:
             _json({"exact_environment_id": args.lock_id, "publication_id": digest})
             return 0
         if args.command == "publish-toolchain":
+            declined = _gate_mutation(
+                f"Publish toolchain {args.toolchain} for this platform to {args.library}",
+                yes=args.yes,
+            )
+            if declined is not None:
+                return declined
             _json(runtime.publish_toolchain(args.toolchain, args.library).to_dict())
             return 0
         if args.command == "finalize-toolchain":
@@ -2212,6 +2542,11 @@ def main(argv: list[str] | None = None) -> int:
             _json({"program_id": program.id, "description": program.description.to_dict()})
             return 0
         if args.command == "publish-program":
+            declined = _gate_mutation(
+                f"Publish program {args.program_id} to {args.library}", yes=args.yes
+            )
+            if declined is not None:
+                return declined
             _json(
                 runtime.publish_program(
                     args.program_id,
@@ -2271,122 +2606,11 @@ def main(argv: list[str] | None = None) -> int:
             _json(envelope("lean-runtime.inspect/v1", ok=True, data=payload))
             return 0
         if args.command == "status":
-            subject_path = Path(args.subject).expanduser()
-            status_payload: dict[str, Any]
-            unowned_project = None
-            try:
-                project_status = discover_project(subject_path)
-                if (
-                    subject_path.is_file()
-                    and subject_path.suffix == ".lean"
-                    and project_status.owns_file(subject_path) is False
-                ):
-                    unowned_project = project_status
-                    raise ProjectNotFoundError("file is not owned by a declared project target")
-            except ProjectNotFoundError:
-                if subject_path.is_file() and subject_path.suffix == ".lean":
-                    catalog = default_catalog()
-                    source_text = subject_path.read_text(encoding="utf-8")
-                    discovery = Discovery(catalog=catalog, runtime=runtime)
-                    evidence = discovery.analyze(source_text)
-                    static_plan = discovery.plan(source_text, evidence=evidence)
-                    discovery_plan, _ = discovery.order(source_text, evidence, static_plan)
-                    status_payload = {
-                        "kind": "standalone",
-                        "subject": str(subject_path.resolve()),
-                        "parent_project": (
-                            str(unowned_project.root) if unowned_project is not None else None
-                        ),
-                        "context_reason": (
-                            "parent project found, but no declared target owns this file"
-                            if unowned_project is not None
-                            else "no pinned Lake project found"
-                        ),
-                        "imports": list(discovery_plan.evidence.imports),
-                        "candidates": [
-                            candidate.entry.id for candidate in discovery_plan.candidates
-                        ],
-                        "planned_first": (
-                            discovery_plan.candidates[0].entry.id
-                            if discovery_plan.candidates
-                            else None
-                        ),
-                        "availability": {
-                            candidate.entry.id: {
-                                "local": runtime.exact_ready_locally(
-                                    candidate.entry.lock,
-                                    import_roots=evidence.imports,
-                                ),
-                                "remote": "not_probed",
-                            }
-                            for candidate in discovery_plan.candidates
-                        },
-                    }
-                elif subject_path.is_file() and subject_path.suffix == ".json":
-                    lock = EnvironmentLock.load(subject_path)
-                    status_payload = {
-                        "kind": "lock",
-                        "subject": str(subject_path.resolve()),
-                        "lock_id": lock.lock_id,
-                        "toolchain": lock.toolchain,
-                        "packages": len(lock.packages),
-                    }
-                else:
-                    try:
-                        environment = runtime.environment(args.subject)
-                    except (LeanRuntimeError, ValueError):
-                        status_payload = {
-                            "kind": "unconfigured",
-                            "subject": str(subject_path.resolve()),
-                            "message": "no pinned Lake project, lock, or named environment found",
-                        }
-                    else:
-                        status_payload = {
-                            "kind": "environment",
-                            **environment.inspect().to_dict(),
-                        }
-            else:
-                status_payload = {
-                    "kind": "project",
-                    "subject": str(subject_path.resolve()),
-                    "root": str(project_status.root),
-                    "context_reason": (
-                        "file is owned by a declared project target"
-                        if subject_path.is_file() and project_status.owns_file(subject_path) is True
-                        else "nearest pinned Lake project selected"
-                    ),
-                    "toolchain": project_status.toolchain,
-                    "manifest": str(project_status.manifest) if project_status.manifest else None,
-                    "attached": (project_status.root / "lean-runtime.toml").is_file(),
-                    "agents_guide": (
-                        str(project_status.root / "AGENTS.md")
-                        if (project_status.root / "AGENTS.md").is_file()
-                        else None
-                    ),
-                }
+            status_payload = _status_report(runtime, args)
             if args.json:
-                _json(status_payload)
+                _json(serialize_status_v1(status_payload))
             else:
-                display_payload = dict(status_payload)
-                if display_payload.get("kind") == "project" and (
-                    display_payload.get("agents_guide") is None
-                ):
-                    display_payload["agents_guide"] = "missing (`lean-runtime adopt` writes one)"
-                print(f"{display_payload['kind'].title()}")
-                for key, value in display_payload.items():
-                    if key == "kind":
-                        continue
-                    label = key.replace("_", " ").title()
-                    if isinstance(value, dict):
-                        print(f"  {label}")
-                        for name, detail in value.items():
-                            if isinstance(detail, dict):
-                                detail = " ".join(f"{k}={v}" for k, v in detail.items())
-                            print(f"    {name:<20} {detail}")
-                    elif isinstance(value, (list, tuple)):
-                        print(f"  {label:<14} {', '.join(str(item) for item in value) or '-'}")
-                    else:
-                        print(f"  {label:<14} {value}")
+                _render_status(status_payload, display_subject=args.subject)
             return 0
         if args.command == "environments":
             records = runtime.list_environments()
@@ -2405,6 +2629,14 @@ def main(argv: list[str] | None = None) -> int:
                 _render_storage(status)
             return 0
         if args.command == "toolchain-slim":
+            if args.prune_original:
+                declined = _gate_mutation(
+                    f"Remove the full toolchain {args.toolchain} after materializing "
+                    "its slim check-only copy",
+                    yes=args.yes,
+                )
+                if declined is not None:
+                    return declined
             manifest = runtime.toolchains.materialize_slim(args.toolchain)
             if args.prune_original:
                 runtime.toolchains.prune_original(args.toolchain)
@@ -2484,11 +2716,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.json:
                 _json(serialize_matrix_v1(matrix_result))
             else:
-                print("Context\tResult\tTime\tEnvironment")
+                print("Context\tVerdict\tTime\tEnvironment")
                 for entry in matrix_result.entries:
                     result = entry.result
                     print(
-                        f"{entry.context}\t{'accepted' if result.ok else 'rejected'}\t"
+                        f"{entry.context}\t{result.verdict}\t"
                         f"{result.elapsed_seconds:.2f}s\t{result.environment_id or '-'}"
                     )
             return 0 if matrix_result.ok else 1
@@ -2593,10 +2825,10 @@ def main(argv: list[str] | None = None) -> int:
                 if args.json:
                     _json(serialize_matrix_v1(matrix_result))
                 else:
-                    print("Context\tResult\tTime\tEnvironment")
+                    print("Context\tVerdict\tTime\tEnvironment")
                     for entry in matrix_result.entries:
                         print(
-                            f"{entry.context}\t{'accepted' if entry.result.ok else 'rejected'}\t"
+                            f"{entry.context}\t{entry.result.verdict}\t"
                             f"{entry.result.elapsed_seconds:.2f}s\t"
                             f"{entry.result.environment_id or '-'}"
                         )

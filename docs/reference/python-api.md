@@ -53,6 +53,11 @@ result = lean.check_file("./my-project/MyProject/Basic.lean")
 
 ## Read the result
 
+`result.verdict` is Lean's answer inside the environment that ran: `accepted`,
+`rejected`, or `not_run` when a timeout or cancellation cut the run short and
+no verdict exists. `result.ok` is true only for `accepted`. A rejection is a
+normal result, not an exception.
+
 Failed checks expose parsed diagnostics directly:
 
 ```python

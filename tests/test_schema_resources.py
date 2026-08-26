@@ -19,6 +19,7 @@ def test_schema_resource_names_are_closed() -> None:
         "plan-v1.schema.json",
         "profile-v1.schema.json",
         "publication-v1.schema.json",
+        "status-v1.schema.json",
         "verify-v1.schema.json",
     } == lean.SCHEMA_NAMES
     with pytest.raises(ValueError, match="unknown Lean Runtime schema"):

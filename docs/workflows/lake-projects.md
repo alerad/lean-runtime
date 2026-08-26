@@ -11,7 +11,9 @@ lean-runtime status .
 lean-runtime project info .
 ```
 
-`status` reports the selected project context. `project info` provides project-specific
+`status` reports the project context: it is **exact** — the pinned toolchain and
+`lake-manifest.json` name the environment outright, so nothing is proposed or
+discovered. `project info` provides project-specific
 storage and dependency information. It exits successfully when inspection succeeds;
 publication blockers, if any, appear under `Ready to publish: no`.
 

@@ -2,6 +2,17 @@
 
 This guide checks one core Lean file and one file that imports Mathlib. It then records an exact environment for later reuse.
 
+## The model in one paragraph
+
+Every check runs inside one **environment**: an exact, immutable toolchain plus
+package set. Where that environment comes from is the **context** — an explicit
+`--using`, frontmatter in the file, the Lake project that owns the file, or
+automatic discovery from the file's imports. A **lock** is an environment written
+down so it can be reused anywhere, including offline. The **verdict** is Lean's
+answer inside that environment: `accepted` or `rejected`.
+
+Discovery proposes an environment. Only Lean accepts it.
+
 ## Requirements
 
 - Python 3.10 or newer
@@ -33,8 +44,13 @@ Check it directly:
 lean-runtime check Basic.lean
 ```
 
-Lean Runtime selects a plausible catalog context and runs Lean. Exit code `0`
-means Lean accepted the file in the reported context.
+Lean Runtime proposes a catalog environment from the file's (absent) imports and
+runs Lean inside it. The last line names the verdict and the environment it was
+produced in:
+
+```text
+✓ Basic.lean accepted in core-v4.32.2 (0.41s)
+```
 
 ## Check a file that imports Mathlib
 
@@ -47,17 +63,36 @@ example : ∀ n : ℕ, ∃ p, n ≤ p ∧ p.Prime :=
   Nat.exists_infinite_primes
 ```
 
-Run the check without specifying a context:
+Before running Lean, ask what `check` is going to do:
+
+```console
+lean-runtime status Primes.lean
+```
+
+```text
+Primes.lean — standalone file (no owning Lake project)
+  Context      automatic discovery · proposed from imports; Lean has not run
+  Imports      Mathlib.Data.Nat.Prime.Infinite
+  Will try     mathlib-v4.33.1        environment not local · toolchain not installed
+               mathlib-v4.33.0        environment not local · toolchain not installed
+               …
+  Download     required for mathlib-v4.33.1; add --probe to see the size
+
+Next: lean-runtime check Primes.lean compiles the file and reports its verdict.
+```
+
+`status` is a dry run. It never runs Lean and never downloads anything; add
+`--probe` to price the first download against the configured libraries. Then
+check the file:
 
 ```console
 lean-runtime check Primes.lean
 ```
 
-For a standalone file, Lean Runtime uses imports as evidence for automatic
-discovery. It tries exact catalog environments within a bounded policy. A
-candidate succeeds only when Lean accepts the source in that environment.
-
-The first run may install a toolchain and acquire environment content. Later checks reuse retained content.
+Discovery tries the proposed environments in order, within a bounded policy. A
+candidate succeeds only when Lean accepts the source inside it. The first run
+may install a toolchain and acquire environment content; later checks reuse
+retained content.
 
 ## Record an exact lock
 
@@ -81,16 +116,10 @@ lean-runtime check Primes.lean --using primes.lock.json --offline
 
 Offline mode does not acquire missing remote content. Missing requirements produce an infrastructure failure rather than a Lean rejection.
 
-## Troubleshoot or override selection
-
-`status` previews routing without running Lean:
-
-```console
-lean-runtime status Primes.lean
-```
+## Override selection
 
 Most checks should rely on discovery. Use `--using` only when a particular
-release or context is part of the request:
+release or environment is part of the request:
 
 ```console
 lean-runtime check Primes.lean --using mathlib@v4.33.0
@@ -101,14 +130,20 @@ precedence, and other explicit context forms.
 
 ## Interpret the result
 
-| Exit code | Meaning |
-| --- | --- |
-| `0` | Lean accepted the source. |
-| `1` | Lean ran and rejected the source. |
-| `2` | Invocation, context, acquisition, or configuration failed, or a resource limit such as `--timeout` was hit. |
-| `130` | The operation was interrupted. |
+A rejection is a normal result: Lean ran to completion inside one environment
+and said no. Exit code `2` means something different — no environment could be
+obtained, or Lean could not be run — and carries no verdict.
 
-Use `--json` for structured results and `--verbose` for the runtime event stream.
+| Exit code | Verdict | Meaning |
+| --- | --- | --- |
+| `0` | `accepted` | Lean accepted the source in the reported environment. |
+| `1` | `rejected` | Lean ran and rejected the source. |
+| `2` | none | Invocation, context, acquisition, or configuration failed, or a resource limit such as `--timeout` was hit. |
+| `130` | none | The operation was interrupted. |
+
+`--json` carries the same distinction as `data.verdict` (`accepted`,
+`rejected`, or `not_run`) alongside the environment and lock identities and the
+digest of the source that ran. Use `--verbose` for the runtime event stream.
 
 ## Continue
 

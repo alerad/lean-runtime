@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- State the model up front: `lean-runtime --help`, the docs index, and the
+  command reference now open with the four nouns (context, environment, lock,
+  verdict) and the rule that discovery proposes an environment while only Lean
+  accepts it.
+- Make `status` a dry run of `check`. A standalone file reports its context
+  source and confidence (`proposed` for discovery, `exact` for a project, lock,
+  or stored environment), the candidates in the order `check` would try them,
+  whether each environment and toolchain is already local, and whether a
+  download is needed; `status --probe` prices the first download.
+- Report Lean's answer as a first-class `verdict` (`accepted`, `rejected`, or
+  `not_run`) in execution results, `--json` output (`data.verdict`), and the
+  `--matrix` table, and attribute every human-readable verdict to the exact
+  environment it was produced in.
+- Wrap `status --json` in a `lean-runtime.status/v1` envelope like every other
+  machine-readable command. Scripts that read the bare object must now read
+  `data`.
+- Apply one mutation rule everywhere: `toolchain optimize --prune-original`,
+  `env publish`, `toolchain publish`, `program publish`, and
+  `declaration-index publish` now describe the change and require `--yes` or an
+  interactive confirmation, exiting with code `2` non-interactively otherwise.
+- Separate the vocabulary of *context* (where the decision comes from) and
+  *environment* (what was chosen) across help text and documentation.
 - Improve Windows checks by reusing Elan from `PATH`, recognizing native
   `.exe` toolchain binaries, and running core-only discovery directly against
   its exact Lean toolchain when no platform environment artifact is needed.
