@@ -38,7 +38,7 @@ jobs:
           script = Path("site/javascripts/run-inspector.js").read_text(encoding="utf-8")
           if "Check a Lean file in the environment it needs." not in html:
               raise SystemExit("landing-page headline was not rendered")
-          if "Discovering an exact environment" not in script:
+          if "Proposing an exact environment from imports" not in script:
               raise SystemExit("landing-page animation transcript was not rendered")
           if "Primes.lean accepted" not in script:
               raise SystemExit("landing-page hero verdict was not rendered")
