@@ -24,7 +24,7 @@ hide:
   <div class="lr-hero-copy">
     <p class="lr-eyebrow"><span aria-hidden="true">⊢</span> Compiler-backed Lean execution</p>
     <h1>Check a Lean file in the environment it needs.</h1>
-    <p class="lr-lead">Lean Runtime resolves an exact toolchain and dependency context, runs Lean, and records what actually ran.</p>
+    <p class="lr-lead">Lean Runtime resolves one exact environment — toolchain and dependencies — runs Lean inside it, and records what actually ran.</p>
     <div class="lr-actions">
       <a class="md-button md-button--primary" href="tutorial/">Run your first check</a>
       <a class="md-button" href="concepts/context-selection/">How context is selected</a>

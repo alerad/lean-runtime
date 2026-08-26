@@ -915,7 +915,7 @@ def _add_check_v4(parser: argparse.ArgumentParser, *, watch: bool = False) -> No
         )
     parser.add_argument(
         "--using",
-        metavar="CONTEXT",
+        metavar="ENVIRONMENT",
         help=(
             "select the environment explicitly: a package release (mathlib@v4.33.0), "
             "a lock file, a stored environment, a toolchain, or a project directory"
@@ -948,7 +948,7 @@ def _add_check_v4(parser: argparse.ArgumentParser, *, watch: bool = False) -> No
             dest="lock_out",
             type=Path,
             metavar="PATH",
-            help="write the exact environment selected by a successful standalone check",
+            help="write the exact environment a successful standalone check ran in",
         )
         lock_options.add_argument(
             "--lock-out", dest="lock_out", type=Path, metavar="PATH", help=argparse.SUPPRESS
@@ -975,7 +975,7 @@ def _add_check_v4(parser: argparse.ArgumentParser, *, watch: bool = False) -> No
             const=Path("lean-runtime.matrix.toml"),
             type=Path,
             metavar="FILE",
-            help="check one file across the contexts in a matrix file "
+            help="check one file across every environment named in a matrix file "
             "(default: lean-runtime.matrix.toml)",
         )
         parser.add_argument(
@@ -1199,9 +1199,30 @@ Advanced namespaces:
     _add_common_output(adopt)
     adopt.set_defaults(command="attach", recursive=None, execute=False)
 
-    check = commands.add_parser("check", help="check Lean code; context is inferred")
+    check = commands.add_parser(
+        "check",
+        help="check Lean code; the environment is inferred",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="""Run Lean on a file or project inside one exact environment.
+
+Where the environment comes from (the context), in order:
+  1. --using            an explicit release, lock, environment, toolchain, or project
+  2. frontmatter        `-- /// lean-runtime` … `-- ///` at the top of the file
+  3. owning project     the nearest pinned Lake project that declares the file
+  4. discovery          catalog environments proposed from the file's imports
+
+Discovery proposes an environment; only Lean accepts it. The last line names
+the verdict and the environment it was produced in. A rejection is a normal
+result (exit 1); exit 2 means no environment could be obtained or Lean could
+not run, and carries no verdict. `lean-runtime status FILE` previews all of
+this without running Lean.""",
+    )
     _add_check_v4(check)
-    watch = commands.add_parser("watch", help="re-check one Lean file when it changes")
+    watch = commands.add_parser(
+        "watch",
+        help="re-check one Lean file when it changes",
+        description="Re-run `check` on one file inside a pinned Lake project whenever it changes.",
+    )
     _add_check_v4(watch, watch=True)
 
     build = commands.add_parser("build", help="build the current Lake project")
@@ -1256,7 +1277,22 @@ Advanced namespaces:
     publish.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     publish.set_defaults(command="publish-project")
 
-    status = commands.add_parser("status", help="explain the current project or context")
+    status = commands.add_parser(
+        "status",
+        help="dry run of check: where the environment comes from and what it costs",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="""Explain what `check` would do for a subject, without running Lean.
+
+Reports the context source and its confidence:
+  exact      a pinned Lake project, a lock file, or a stored environment
+  proposed   automatic discovery from imports; not proven until Lean accepts
+             the file inside one of the candidates
+
+For a standalone file it lists the candidate environments in the order check
+would try them, whether each environment and toolchain is already local, and
+whether a download is needed. Nothing is downloaded; add --probe to price the
+first download.""",
+    )
     status.add_argument(
         "subject",
         nargs="?",
@@ -2955,7 +2991,7 @@ def main(argv: list[str] | None = None) -> int:
                     if not sys.stdin.isatty():
                         raise ProjectNotFoundError(
                             f"{exc}\nTo check Lean source from stdin, pass '-': "
-                            "lean-runtime check - --using CONTEXT"
+                            "lean-runtime check - --using ENVIRONMENT"
                         ) from exc
                     raise
                 source_file = None

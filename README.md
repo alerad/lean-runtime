@@ -27,6 +27,23 @@ reuse.
 [Read the documentation](https://alerad.github.io/lean-runtime/) ·
 [Explore the CLI](https://alerad.github.io/lean-runtime/reference/commands/)
 
+## The model
+
+| Noun | Meaning |
+| --- | --- |
+| **context** | where a file's requirements come from: `--using`, frontmatter, the owning Lake project, or automatic discovery |
+| **environment** | one exact, immutable toolchain + package set |
+| **lock** | an environment written down, reusable offline anywhere |
+| **verdict** | Lean's answer inside one environment: `accepted` or `rejected` |
+
+Discovery proposes an environment. Only Lean accepts it. `lean-runtime status`
+shows the proposal without running anything; `lean-runtime check` produces the
+verdict and names the environment it was produced in:
+
+```text
+✓ Main.lean accepted in mathlib-v4.33.0 (3.21s)
+```
+
 ## Start where you are
 
 Create a project:
@@ -71,7 +88,7 @@ Record the environment only when the result must be reproduced elsewhere:
 lean-runtime check Main.lean --write-lock environment.lock.json
 ```
 
-A file can instead carry an explicit context in strict comment frontmatter:
+A file can instead name its environment in strict comment frontmatter:
 
 ```lean
 -- /// lean-runtime
@@ -82,7 +99,7 @@ import Mathlib
 example : 2 + 2 = 4 := by norm_num
 ```
 
-When inference needs an override, there is one spelling:
+When discovery needs an override, there is one spelling:
 
 ```bash
 lean-runtime check Main.lean --using mathlib@v4.33.0
@@ -109,7 +126,7 @@ watch FILE       re-check on save
 build [TARGET]   build the current project
 update           preview and apply a safe project update
 publish          configure verified project publication
-status [PATH]    explain the selected project or environment
+status [PATH]    dry run of check: where the environment comes from, what it costs
 verify SUBJECT   verify an exact artifact
 doctor           diagnose and offer safe repairs
 clean            preview and reclaim unused storage
@@ -117,9 +134,10 @@ replay CAPTURE   replay an execution capture
 completion SHELL generate shell completion
 ```
 
-Project commands use the current directory when no path is supplied. Guided
-mutations show their plan and ask before changing anything; automation passes
-`--yes`, and inspection-only calls pass `--dry-run`.
+Project commands use the current directory when no path is supplied. Every
+command that changes a project, deletes local content, or publishes to a remote
+shows its plan and asks before changing anything; automation passes `--yes`,
+and inspection-only calls pass `--dry-run`.
 
 Persistent registry, availability, store, and publisher-trust policy belongs
 in `~/.config/lean-runtime/config.toml`; the nearest project's
@@ -187,8 +205,9 @@ interfaces for infrastructure code.
 - User project metadata and user Elan state are not silently rewritten.
 - The local execution backend enforces supported resource limits but is not a
   network sandbox; unsupported isolation requests fail explicitly.
-- Logical Lean rejections exit 1; invalid/infrastructure invocations exit 2;
-  publication failures retain their documented classified exit statuses.
+- A Lean rejection is a normal verdict and exits 1. Invalid or infrastructure
+  invocations exit 2 and carry no verdict. Publication failures retain their
+  documented classified exit statuses.
 
 Documentation lives at
 [alerad.github.io/lean-runtime](https://alerad.github.io/lean-runtime/).
