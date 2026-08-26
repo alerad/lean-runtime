@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.24.0 - 2026-08-26
+
 - Key shared Lake package artifacts by the exact installed Lean and Lake
   executable digests. Existing `/1` package artifacts are source-only donors;
   the first build of each project re-shares artifacts under the `/2` key.
