@@ -528,6 +528,43 @@ def test_standalone_status_reports_plan_not_selection_and_availability(
     assert data["probe"] is None
 
 
+def test_core_only_status_needs_no_download_once_the_toolchain_is_installed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A core-only file never materializes a store environment, so status must
+    # judge it by the toolchain alone rather than by a store directory that
+    # `check` will never create.
+    source = tmp_path / "Core.lean"
+    source.write_text("example : True := by trivial\n")
+    monkeypatch.setattr("lean_runtime.cli.Runtime._toolchain_installed", lambda _self, _t: True)
+    assert main(["--home", str(tmp_path / "home"), "status", str(source)]) == 0
+    output = capsys.readouterr().out
+    assert "Imports      none (core Lean only)" in output
+    assert "environment ready locally · toolchain installed" in output
+    assert "Download     none: core-" in output
+    assert "required" not in output
+
+    assert main(["--home", str(tmp_path / "home"), "status", str(source), "--probe"]) == 0
+    output = capsys.readouterr().out
+    assert "Download     none: environment and toolchain are already local" in output
+
+    assert main(["--home", str(tmp_path / "home"), "status", str(source), "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data["availability"][data["planned_first"]]["local"] is True
+
+
+def test_core_only_status_still_needs_the_toolchain_when_it_is_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "Core.lean"
+    source.write_text("example : True := by trivial\n")
+    monkeypatch.setattr("lean_runtime.cli.Runtime._toolchain_installed", lambda _self, _t: False)
+    assert main(["--home", str(tmp_path / "home"), "status", str(source)]) == 0
+    output = capsys.readouterr().out
+    assert "environment not local · toolchain not installed" in output
+    assert "Download     required for core-" in output
+
+
 def test_status_reports_unowned_file_beneath_declarative_project_as_standalone(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

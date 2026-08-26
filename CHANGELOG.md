@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Stop `status` claiming a download is required for core-only files. A lock
+  without packages runs straight on the toolchain and never materializes an
+  environment in the store, so readiness and cost are now judged by the
+  toolchain alone: `status` reports `environment ready locally` and
+  `Download none` once the toolchain is installed, and `status --probe`
+  prices it as zero instead of `unknown`. Previously the store directory that
+  `check` never creates kept the row at `not local · Download required`.
+
 ## 4.25.0 - 2026-08-26
 
 - Pin the Elan build that automatic bootstrap installs. Bootstrap now

@@ -569,8 +569,14 @@ class Runtime:
         """Report what opening a lock would cost, without acquiring anything."""
         environment_id = environment_identity(lock, build_profile)
         destination = self.store.environment_path(environment_id)
-        ready = destination.is_dir()
-        sparse = (destination / "workspace" / ".lean-runtime" / "capsule.json").is_file()
+        # A lock without packages runs straight on the toolchain: no environment
+        # is ever materialized in the store, so only the toolchain can cost anything.
+        core_only = not lock.packages
+        ready = core_only or destination.is_dir()
+        sparse = (
+            not core_only
+            and (destination / "workspace" / ".lean-runtime" / "capsule.json").is_file()
+        )
         libraries: list[dict[str, Any]] = []
         environment_download: int | None = 0 if ready and not sparse else None
         if not ready or sparse:
@@ -659,6 +665,10 @@ class Runtime:
     ) -> bool:
         """Return whether a lock and import closure can check without acquisition."""
 
+        if not lock.packages:
+            # Core-only locks never touch the environment store; the toolchain is
+            # the whole environment.
+            return self._toolchain_installed(lock.toolchain)
         environment_id = environment_identity(lock)
         if not self.store.environment_path(environment_id).is_dir():
             return False

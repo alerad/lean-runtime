@@ -274,3 +274,56 @@ def test_full_environment_build_installs_a_lake_capable_toolchain(tmp_path: Path
     environment = runtime.open_toolchain("v4.32.2")
     environment.build(("Demo",))
     assert toolchains.full_installs == ["leanprover/lean4:v4.32.2"]
+
+
+class InstalledToolchains(FakeToolchains):
+    def __init__(self, home: Path, installed: str) -> None:
+        super().__init__(home)
+        self.installed = installed
+
+    def is_available_locally(self, toolchain: str) -> bool:
+        return toolchain == self.installed
+
+
+def _core_lock(toolchain: str) -> EnvironmentLock:
+    return EnvironmentLock(
+        toolchain=toolchain,
+        spec_digest="spec_" + "c" * 64,
+        root_lakefile='name = "core"\n',
+        root_module="",
+        manifest={"packages": []},
+        packages=(),
+    )
+
+
+def test_core_lock_is_ready_locally_once_its_toolchain_is_installed(tmp_path: Path) -> None:
+    # Core-only checks run straight on the toolchain and never materialize an
+    # environment in the store, so the store must not decide their readiness.
+    runtime = Runtime(
+        home=tmp_path / "home",
+        toolchains=InstalledToolchains(tmp_path, "leanprover/lean4:v4.32.2"),  # type: ignore[arg-type]
+        libraries=[],
+    )
+    assert runtime.exact_ready_locally(_core_lock("leanprover/lean4:v4.32.2")) is True
+    assert runtime.exact_ready_locally(_core_lock("leanprover/lean4:v4.31.0")) is False
+
+
+def test_core_lock_plan_costs_nothing_once_its_toolchain_is_installed(tmp_path: Path) -> None:
+    runtime = Runtime(
+        home=tmp_path / "home",
+        toolchains=InstalledToolchains(tmp_path, "leanprover/lean4:v4.32.2"),  # type: ignore[arg-type]
+        libraries=[],
+    )
+    plan = runtime.plan_exact(_core_lock("leanprover/lean4:v4.32.2"))
+    assert plan["environment_ready"] is True
+    assert plan["environment_download_bytes"] == 0
+    assert plan["toolchain_download_bytes"] == 0
+    assert plan["download_bytes"] == 0
+    assert plan["download_bytes_complete"] is True
+    assert plan["libraries"] == []
+
+    missing = runtime.plan_exact(_core_lock("leanprover/lean4:v4.31.0"))
+    assert missing["environment_ready"] is True
+    assert missing["environment_download_bytes"] == 0
+    assert missing["toolchain_installed"] is False
+    assert missing["download_bytes_complete"] is False
