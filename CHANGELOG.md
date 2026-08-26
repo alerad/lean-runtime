@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Re-running `adopt` over a tree no longer re-probes every already attached
+  project (a Lake graph load each, up to two minutes for Mathlib); the plan
+  already reports them as attached and `verify` re-checks links. Attachment
+  now announces `adopt.attach_started` per project, rendered as
+  `Attaching projects [bar] i/n`, and the pre-swap Lake graph probe streams its
+  output like every other Lake invocation instead of running silently.
+
 ## 4.30.0 - 2026-08-26
 
 - Attach shared dependencies on Windows without administrator rights. Creating
@@ -32,12 +39,6 @@
   for two seconds the console shows `⋯ no new events for Ns · last: <activity>`
   in place; plain logs print `Still working (…)` after ten seconds and then
   every thirty.
-- Re-running `adopt` over a tree no longer re-probes every already attached
-  project (a Lake graph load each, up to two minutes for Mathlib); the plan
-  already reports them as attached and `verify` re-checks links. Attachment
-  now announces `adopt.attach_started` per project, rendered as
-  `Attaching projects [bar] i/n`, and the pre-swap Lake graph probe streams its
-  output like every other Lake invocation instead of running silently.
 - Name new shared package directories `pkg_<32 hex>` instead of
   `project_package_<64 hex>`. The 80-character name pushed Mathlib's deepest
   build outputs past Windows' 260-character path limit, so an adopted Mathlib
