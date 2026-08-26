@@ -305,6 +305,18 @@ def test_core_lock_is_ready_locally_once_its_toolchain_is_installed(tmp_path: Pa
         libraries=[],
     )
     assert runtime.exact_ready_locally(_core_lock("leanprover/lean4:v4.32.2")) is True
+    assert (
+        runtime.exact_ready_locally(
+            _core_lock("leanprover/lean4:v4.32.2"), import_roots=("Lean.Elab", "Std.Data.HashMap")
+        )
+        is True
+    )
+    assert (
+        runtime.exact_ready_locally(
+            _core_lock("leanprover/lean4:v4.32.2"), import_roots=("Mathlib",)
+        )
+        is False
+    )
     assert runtime.exact_ready_locally(_core_lock("leanprover/lean4:v4.31.0")) is False
 
 

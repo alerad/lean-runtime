@@ -667,8 +667,13 @@ class Runtime:
 
         if not lock.packages:
             # Core-only locks never touch the environment store; the toolchain is
-            # the whole environment.
-            return self._toolchain_installed(lock.toolchain)
+            # the whole environment. Do not call it ready for an external import,
+            # though: discovery uses this result for local-first ordering, and an
+            # installed core toolchain must not outrank the package that provides
+            # (for example) Mathlib.
+            core_roots = {"Init", "Lean", "Std"}
+            imports_are_core = all(module.split(".", 1)[0] in core_roots for module in import_roots)
+            return imports_are_core and self._toolchain_installed(lock.toolchain)
         environment_id = environment_identity(lock)
         if not self.store.environment_path(environment_id).is_dir():
             return False
