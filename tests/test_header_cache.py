@@ -313,6 +313,7 @@ def test_shared_builds_record_workspace_lock_timing(tmp_path: Path) -> None:
             ),
             build_lock=build_lock,
         ),
+        events=SimpleNamespace(emit=lambda *_args, **_kwargs: None),
         _raw_result=lambda *_args, **_kwargs: _execution(True),
     )
     executor = ProjectExecutor(runtime)  # type: ignore[arg-type]

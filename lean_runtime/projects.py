@@ -27,7 +27,6 @@ from ._git import git_command
 from .errors import ProjectError, ProjectNotFoundError
 from .models import ExecutionResult, PackageProvenance, ProjectProvenance
 from .policies import ExecutionPolicy
-from .store import source_snapshot_digest
 from .toolchains import normalize_toolchain
 
 if TYPE_CHECKING:
@@ -363,6 +362,28 @@ class ProjectContext:
         selected = Path(path).expanduser().resolve()
         if selected.suffix != ".lean":
             return None
+        roots = self.source_roots()
+        if roots is None:
+            return None
+        for source_root, root_parts in roots:
+            try:
+                relative = selected.relative_to(source_root)
+            except ValueError:
+                continue
+            relative_module = relative.with_suffix("").parts
+            if relative_module[: len(root_parts)] == root_parts:
+                return True
+        return False
+
+    def source_roots(self) -> tuple[tuple[Path, tuple[str, ...]], ...] | None:
+        """Return the module prefixes Lake compiles for this project.
+
+        Each entry pairs a resolved source directory with a module-name prefix
+        (``("Foo", "Bar")`` for ``Foo.Bar``). Declarative Lake files can be
+        inspected exactly without executing Lake; ``None`` means the project
+        format is not safely understood and callers should fall back to the
+        whole project tree.
+        """
         if self.lakefile.name != "lakefile.toml":
             return None
         try:
@@ -377,6 +398,7 @@ class ProjectContext:
             targets.extend((key, item) for item in entries)
         if not targets:
             return None
+        result: list[tuple[Path, tuple[str, ...]]] = []
         for target_kind, target in targets:
             src_dir = target.get("srcDir", ".")
             if not isinstance(src_dir, str):
@@ -389,21 +411,95 @@ class ProjectContext:
                 return None
             # `roots` selects library build roots; it does not restrict the
             # namespace of source modules belonging to a lean_lib target.
-            # Include the library name so sibling modules are still recognized.
+            # Include the library name so sibling modules are still recognized,
+            # and the leading module of each glob so `Foo.*` style globs count.
             name = target.get("name")
             if target_kind == "lean_lib" and isinstance(name, str) and name not in roots:
                 roots = [name, *roots]
+            globs = target.get("globs", [])
+            if not isinstance(globs, list) or not all(isinstance(glob, str) for glob in globs):
+                return None
+            for glob in globs:
+                prefix = glob.removesuffix(".*").removesuffix(".+")
+                if prefix and prefix not in roots:
+                    roots.append(prefix)
             source_root = (self.root / src_dir).resolve()
-            try:
-                relative = selected.relative_to(source_root)
-            except ValueError:
-                continue
-            relative_module = relative.with_suffix("").parts
             for root in roots:
                 root_parts = tuple(part for part in root.replace("`", "").split(".") if part)
-                if relative_module[: len(root_parts)] == root_parts:
-                    return True
-        return False
+                if root_parts and (source_root, root_parts) not in result:
+                    result.append((source_root, root_parts))
+        return tuple(result)
+
+    def source_digest(self) -> str:
+        """Hash only the content Lake compiles: configuration and module sources.
+
+        Unlike :func:`source_snapshot_digest`, which fingerprints a whole tree,
+        this ignores datasets, virtual environments, and anything else that
+        happens to live beside the lakefile. The digest still changes whenever
+        the lakefile, toolchain pin, manifest, or any owned ``.lean`` file
+        changes, which is what the header cache keys on.
+        """
+        digest = hashlib.sha256()
+
+        def add_file(path: Path) -> None:
+            try:
+                mode = path.stat().st_mode & 0o111
+                relative = path.relative_to(self.root).as_posix()
+                with path.open("rb") as handle:
+                    digest.update(b"file\0" + relative.encode() + b"\0")
+                    digest.update(str(mode).encode() + b"\0")
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            except OSError:
+                return
+
+        for name in ("lakefile.toml", "lakefile.lean", "lean-toolchain", "lake-manifest.json"):
+            candidate = self.root / name
+            if candidate.is_file() and not candidate.is_symlink():
+                add_file(candidate)
+        seen: set[Path] = set()
+        module_files, directories_to_walk = self._source_locations()
+        for path in module_files:
+            if path.is_file() and not path.is_symlink():
+                seen.add(path)
+                add_file(path)
+        for start in directories_to_walk:
+            for directory, directories, filenames in os.walk(start, followlinks=False):
+                current = Path(directory)
+                directories[:] = sorted(
+                    name
+                    for name in directories
+                    if name not in {".git", ".lake"} and not (current / name).is_symlink()
+                )
+                for name in sorted(filenames):
+                    if not name.endswith(".lean"):
+                        continue
+                    path = current / name
+                    if path in seen or path.is_symlink():
+                        continue
+                    seen.add(path)
+                    add_file(path)
+        return "sha256:" + digest.hexdigest()
+
+    def _source_locations(self) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+        """Split owned sources into root module files and directories to walk.
+
+        A module prefix ``Foo.Bar`` owns ``Foo/Bar.lean`` and everything under
+        ``Foo/Bar/``. Without declared targets the whole project tree is walked.
+        """
+        roots = self.source_roots()
+        if roots is None:
+            return ((), (self.root,))
+        files: list[Path] = []
+        directories: list[Path] = []
+        for source_root, root_parts in roots:
+            module = source_root.joinpath(*root_parts)
+            module_file = module.with_suffix(".lean")
+            if module_file not in files:
+                files.append(module_file)
+            if module not in directories:
+                directories.append(module)
+        return tuple(files), tuple(directories)
 
     def current_manifest(self) -> Path | None:
         path = self.root / "lake-manifest.json"
@@ -424,7 +520,7 @@ class ProjectContext:
             pass
         return ProjectProvenance(
             root=str(self.root),
-            workspace_digest=source_snapshot_digest(self.root),
+            workspace_digest=self.source_digest(),
             lakefile_digest=_file_digest(self.lakefile) or "",
             manifest_digest=_file_digest(manifest) if manifest is not None else None,
             git_revision=revision,

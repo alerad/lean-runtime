@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Fingerprint a project by what Lake compiles, not by everything beside the
+  lakefile. The workspace digest that keys header snapshots and provenance now
+  hashes `lakefile.toml`/`lakefile.lean`, `lean-toolchain`, `lake-manifest.json`,
+  and the `.lean` files under each declared target's module roots (the whole
+  tree, minus `.git` and `.lake`, when the lakefile is not declarative).
+  Previously every byte under the project root was read on each `check` and
+  `build`, so a lakefile above a data directory, a virtual environment, or an
+  unrelated monorepo made the first step of a check run for minutes with no
+  output. Digests change value once because of this.
+- Announce project fingerprinting as `project.fingerprint_started` and
+  `project.fingerprint_finished` events (phase `fingerprint`, with
+  `elapsed_ms`), so `--verbose` never goes silent between `check.started` and
+  the first Lake invocation.
+
 ## 4.26.0 - 2026-08-26
 
 - Stop `status` claiming a download is required for core-only files. A lock

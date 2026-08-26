@@ -137,8 +137,11 @@ and lock identities, exact package commits and Git tree hashes, toolchain,
 platform, backend, policy, source digest, and start time.
 
 Mutable project results have no environment or lock identity. Their provenance
-instead records the canonical root, a workspace digest excluding `.git` and
-`.lake`, Lake configuration and manifest digests, and Git revision state.
+instead records the canonical root, a workspace digest of what Lake compiles
+(the lakefile, toolchain pin, manifest, and the `.lean` files under each
+declared target's module roots; the whole tree minus `.git` and `.lake` when the
+lakefile is not declarative), Lake configuration and manifest digests, and Git
+revision state.
 
 ## Work with Lake projects
 

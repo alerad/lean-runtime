@@ -1811,3 +1811,117 @@ def test_project_async_cancellation_waits_for_process_cleanup(tmp_path: Path) ->
             await task
 
     asyncio.run(cancel_check())
+
+
+def test_project_source_digest_ignores_unrelated_files(tmp_path: Path) -> None:
+    from lean_runtime.projects import discover_project
+
+    source = _project(tmp_path / "project")
+    (tmp_path / "project" / "lakefile.toml").write_text(
+        'name = "sample"\n[[lean_lib]]\nname = "Sample"\n'
+    )
+    context = discover_project(source)
+    assert context.source_roots() == (((tmp_path / "project").resolve(), ("Sample",)),)
+    original = context.provenance().workspace_digest
+    assert original.startswith("sha256:")
+
+    # Data, tooling, and nested unrelated projects beside the lakefile are not sources.
+    (tmp_path / "project" / "README.md").write_text("notes\n")
+    (tmp_path / "project" / "data").mkdir()
+    (tmp_path / "project" / "data" / "blob.bin").write_bytes(b"\0" * 4096)
+    (tmp_path / "project" / "venv" / "lib").mkdir(parents=True)
+    (tmp_path / "project" / "venv" / "lib" / "site.py").write_text("x = 1\n")
+    (tmp_path / "project" / "Other").mkdir()
+    (tmp_path / "project" / "Other" / "Unowned.lean").write_text("example : True := trivial\n")
+    assert context.provenance().workspace_digest == original
+
+    # Owned modules, sibling modules, and configuration do change it.
+    (tmp_path / "project" / "Sample" / "Extra.lean").write_text("example : True := trivial\n")
+    with_module = context.provenance().workspace_digest
+    assert with_module != original
+    (tmp_path / "project" / "Sample.lean").write_text("import Sample.Main\n")
+    with_root_module = context.provenance().workspace_digest
+    assert with_root_module != with_module
+    source.write_text("example : 1 = 1 := rfl\n")
+    with_edit = context.provenance().workspace_digest
+    assert with_edit != with_root_module
+    (tmp_path / "project" / "lean-toolchain").write_text("leanprover/lean4:v4.33.0\n")
+    with_toolchain = context.provenance().workspace_digest
+    assert with_toolchain != with_edit
+    (tmp_path / "project" / "lakefile.toml").write_text('name = "sample"\nversion = "0.2.0"\n')
+    assert context.provenance().workspace_digest != with_toolchain
+
+
+def test_project_source_digest_walks_whole_tree_without_declared_targets(
+    tmp_path: Path,
+) -> None:
+    from lean_runtime.projects import discover_project
+
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "lean-toolchain").write_text("leanprover/lean4:v4.32.0\n")
+    (root / "lakefile.lean").write_text("import Lake\nopen Lake DSL\npackage sample\n")
+    (root / "Sample").mkdir()
+    (root / "Sample" / "Main.lean").write_text("example : True := trivial\n")
+    context = discover_project(root / "Sample" / "Main.lean")
+    assert context.source_roots() is None
+    original = context.provenance().workspace_digest
+
+    (root / "data").mkdir()
+    (root / "data" / "blob.bin").write_bytes(b"\0" * 4096)
+    (root / ".lake").mkdir()
+    (root / ".lake" / "Ignored.lean").write_text("example : True := trivial\n")
+    assert context.provenance().workspace_digest == original
+
+    (root / "Anywhere").mkdir()
+    (root / "Anywhere" / "Module.lean").write_text("example : True := trivial\n")
+    assert context.provenance().workspace_digest != original
+
+
+def test_project_source_roots_include_globs_and_exe_roots(tmp_path: Path) -> None:
+    from lean_runtime.projects import discover_project
+
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "lean-toolchain").write_text("leanprover/lean4:v4.32.0\n")
+    (root / "lakefile.toml").write_text(
+        'name = "sample"\n'
+        "[[lean_lib]]\n"
+        'name = "Sample"\n'
+        'srcDir = "src"\n'
+        'globs = ["Extra.*"]\n'
+        "[[lean_exe]]\n"
+        'name = "tool"\n'
+        'root = "Tool.Main"\n'
+    )
+    (root / "src" / "Sample").mkdir(parents=True)
+    (root / "src" / "Sample" / "Main.lean").write_text("example : True := trivial\n")
+    context = discover_project(root / "src" / "Sample" / "Main.lean")
+    roots = context.source_roots()
+    assert roots is not None
+    assert set(roots) == {
+        ((root / "src").resolve(), ("Sample",)),
+        ((root / "src").resolve(), ("Extra",)),
+        (root.resolve(), ("Tool", "Main")),
+    }
+    assert context.owns_file(root / "src" / "Extra" / "Thing.lean") is True
+    assert context.owns_file(root / "Tool" / "Main" / "Impl.lean") is True
+    assert context.owns_file(root / "src" / "Stray.lean") is False
+
+
+def test_project_check_announces_fingerprinting(tmp_path: Path) -> None:
+    source = _project(tmp_path / "project")
+    events: list[RuntimeEvent] = []
+    runtime = Runtime(
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+        on_event=events.append,
+    )
+    result = runtime.project(source).check_file(source)
+    assert result.ok
+    kinds = [event.kind for event in events]
+    started = kinds.index("project.fingerprint_started")
+    finished = kinds.index("project.fingerprint_finished")
+    assert started < finished
+    assert events[started].data["root"] == str(runtime.project(source).root)
+    assert isinstance(events[finished].data["elapsed_ms"], int)

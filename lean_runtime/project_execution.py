@@ -31,7 +31,7 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
 from .errors import ProjectError
 from .import_syntax import IMPORT_STATEMENT
 from .locking import FileLock
-from .models import ExecutionResult, PhaseTiming
+from .models import ExecutionResult, PhaseTiming, ProjectProvenance
 from .policies import ExecutionPolicy
 from .project_sharing import project_sharing_enabled
 from .projects import ProjectContext
@@ -93,6 +93,26 @@ class ProjectExecutor:
 
     def __init__(self, runtime: Runtime) -> None:
         self.runtime = runtime
+
+    def _provenance(self, context: ProjectContext) -> ProjectProvenance:
+        """Fingerprint the project, announcing the work so large trees never look hung."""
+        self.runtime.events.emit(
+            "project.fingerprint_started",
+            f"Fingerprinting project sources: {context.root}",
+            phase="fingerprint",
+            root=str(context.root),
+        )
+        started = time.monotonic()
+        provenance = context.provenance()
+        elapsed = time.monotonic() - started
+        self.runtime.events.emit(
+            "project.fingerprint_finished",
+            f"Fingerprinted project sources in {elapsed:.2f}s",
+            phase="fingerprint",
+            root=str(context.root),
+            elapsed_ms=round(elapsed * 1000),
+        )
+        return provenance
 
     @staticmethod
     def _declares_dependencies(context: ProjectContext) -> bool:
@@ -202,7 +222,7 @@ class ProjectExecutor:
             context.toolchain, "lake", "env", "lean", relative
         )
         text = source.read_text(encoding="utf-8")
-        provenance = context.provenance()
+        provenance = self._provenance(context)
 
         def execute(selected_command: list[str]) -> ExecutionResult:
             return self.runtime._raw_result(
@@ -248,7 +268,7 @@ class ProjectExecutor:
             command = self.runtime.toolchains.command(
                 context.toolchain, "lake", "env", "lean", relative
             )
-            provenance = context.provenance()
+            provenance = self._provenance(context)
 
             def execute(selected_command: list[str]) -> ExecutionResult:
                 return self.runtime._raw_result(
@@ -368,7 +388,7 @@ class ProjectExecutor:
         )
         command = self.runtime.toolchains.command(context.toolchain, "lake", *lake_arguments)
         environment = self.runtime.lake_cache.environment(context)
-        project_provenance = context.provenance()
+        project_provenance = self._provenance(context)
         package_provenance = context.package_provenance()
         package_arguments = (
             (f"--packages={workspace.overrides_file}",) if workspace is not None else ()
