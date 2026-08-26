@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.25.0 - 2026-08-26
+
 - Pin the Elan build that automatic bootstrap installs. Bootstrap now
   downloads the `v4.2.3` release archive for the host platform directly from
   the Elan releases, verifies its SHA-256, and runs its `elan-init`, instead of
