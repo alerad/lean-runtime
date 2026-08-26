@@ -14,6 +14,17 @@
   recognizes junctions too.
 - Size local dependency checkouts during `adopt` without descending into
   attached links, using one directory scan per level instead of `rglob`.
+- Name new shared package directories `pkg_<32 hex>` instead of
+  `project_package_<64 hex>`. The 80-character name pushed Mathlib's deepest
+  build outputs past Windows' 260-character path limit, so an adopted Mathlib
+  project could hydrate its cache but never finish `build`
+  (`failed to create file '…\Isometric.olean.server'`). The digest is the same
+  identity truncated to 128 bits; existing `project_package_*` directories stay
+  valid and reusable. To move already adopted projects onto short paths,
+  `lean-runtime project unshare` each of them, delete the legacy
+  `project-packages/project_package_*` directories (nothing references them once
+  every project is unshared; `clean` does not yet reclaim them), and
+  `lean-runtime adopt` again.
 - Windows correctness fixes surfaced by running the suite on Windows:
   compact source snapshots stage under a shorter directory name so Git's
   shallow-clone metadata stays below `MAX_PATH` (`'$GIT_DIR' too big`);

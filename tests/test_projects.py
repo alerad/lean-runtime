@@ -25,6 +25,7 @@ from lean_runtime._git import git_command
 from lean_runtime._paths import is_link, remove_tree
 from lean_runtime.errors import DownloadLimitExceeded
 from lean_runtime.models import ExecutionResult
+from lean_runtime.package_ids import is_package_id
 from lean_runtime.policies import ExecutionPolicy
 from lean_runtime.serialization import sha256_id
 
@@ -602,9 +603,7 @@ def test_shared_project_build_uses_exact_external_package_override(tmp_path: Pat
     record_path.write_text(json.dumps(record))
     repaired_again = runtime.prepare_shared_project(source)
     assert not repaired_again.reused
-    assert all(
-        package_id.startswith("project_package_") for package_id in repaired_again.package_ids
-    )
+    assert all(is_package_id(package_id) for package_id in repaired_again.package_ids)
 
 
 def test_shared_project_requires_a_lock_manifest(tmp_path: Path) -> None:

@@ -24,6 +24,7 @@ from .declaration_index import DeclarationShard
 from .errors import EnvironmentError
 from .lockfiles import EnvironmentLock
 from .locking import FileLock
+from .package_ids import package_directories
 from .serialization import sha256_id, write_json_atomic
 
 STORE_SCHEMA = "lean-runtime-store/2"
@@ -947,9 +948,7 @@ class EnvironmentStore:
             oci_blobs_bytes=oci_blobs_bytes,
             cas_artifacts_bytes=cas_artifacts_bytes,
             declaration_indexes_bytes=declaration_indexes_bytes,
-            project_packages=sum(
-                1 for path in project_packages.glob("project_package_*") if path.is_dir()
-            ),
+            project_packages=sum(1 for _path in package_directories(project_packages)),
             project_packages_bytes=project_packages_bytes,
             toolchains_bytes=toolchains_bytes,
             executions_bytes=executions_bytes,
@@ -1131,7 +1130,7 @@ class EnvironmentStore:
         candidate_bytes = 0
         reclaimed_bytes = 0
         with FileLock(self.lock_dir / "project-artifact-gc.lock"):
-            for package in sorted(root.glob("project_package_*")):
+            for package in package_directories(root):
                 marker = package / ".lean-runtime-package.json"
                 try:
                     record = json.loads(marker.read_text(encoding="utf-8"))

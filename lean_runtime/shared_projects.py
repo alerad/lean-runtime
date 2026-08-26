@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import threading
 import uuid
@@ -18,6 +17,12 @@ from ._paths import is_link, remove_tree
 from .errors import ProjectError
 from .events import EventEmitter
 from .locking import FileLock
+from .package_ids import (
+    PACKAGE_ID_PATTERN,
+    package_directories,
+    package_directory_id,
+    package_id_matches,
+)
 from .projects import ProjectContext, discover_project
 from .serialization import sha256_id, write_json_atomic
 from .store import clone_tree, platform_compatibility, source_snapshot_digest
@@ -28,7 +33,7 @@ if TYPE_CHECKING:
 
 SHARED_PROJECT_SCHEMA = "lean-runtime-shared-project/3"
 PROJECT_SEED_REGISTRY_SCHEMA = "lean-runtime-project-seeds/1"
-_PACKAGE_ID_PATTERN = re.compile(r"project_package_[0-9a-f]{64}\Z")
+_PACKAGE_ID_PATTERN = PACKAGE_ID_PATTERN
 _MANAGED_PROJECT_CONFIG = 'schema = "lean-runtime-project/1"\ndependencies = "shared"\n'
 
 
@@ -515,7 +520,7 @@ def _valid_package_marker(package: Path, package_id: str) -> bool:
         marker = json.loads((package / ".lean-runtime-package.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    return isinstance(marker, dict) and sha256_id("project_package", marker) == package_id
+    return isinstance(marker, dict) and package_id_matches(marker, package_id)
 
 
 def _has_root_olean(build: Path, package_name: str) -> bool:
@@ -909,7 +914,8 @@ class SharedProjectManager:
 
         found: dict[str, Path] = {}
         scores: dict[str, tuple[bool, bool, int]] = {}
-        for marker in self.packages.glob("project_package_*/.lean-runtime-package.json"):
+        for package_directory in package_directories(self.packages):
+            marker = package_directory / ".lean-runtime-package.json"
             try:
                 identity = json.loads(marker.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
@@ -1353,7 +1359,7 @@ class SharedProjectManager:
                                 effective_entries=effective_entries,
                                 toolchain_identity=toolchain_identity,
                             )
-                            package_id = sha256_id("project_package", package_identity)
+                            package_id = package_directory_id(package_identity)
                             final_target = self.packages / package_id
                         # A marker created by an older schema may describe the exact same
                         # graph with cosmetic scope/URL differences. Reuse that managed
