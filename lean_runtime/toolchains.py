@@ -118,6 +118,18 @@ class ToolchainManager:
         self.remote_ensure: Callable[[str, threading.Event | None], bool] | None = None
         self._executable_digests: dict[str, tuple[int, int, int, str]] = {}
 
+    @staticmethod
+    def _binary(directory: Path, executable: str) -> Path:
+        """Return the platform-native executable path in a toolchain directory."""
+        binary = directory / "bin" / executable
+        if os.name != "nt":
+            return binary
+        native = binary.with_suffix(".exe")
+        # Real Windows toolchains use `.exe`. Accept a suffixless file when it
+        # already exists so copied slim profiles and portable fixtures remain
+        # readable across platforms.
+        return native if native.is_file() or not binary.is_file() else binary
+
     @property
     def environment(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -136,9 +148,7 @@ class ToolchainManager:
         env = self.environment
         name = normalize_toolchain(toolchain)
         full = self._full_toolchain_dir(name)
-        lean = full / "bin" / "lean"
-        if os.name == "nt":
-            lean = lean.with_suffix(".exe")
+        lean = self._binary(full, "lean")
         if not lean.is_file():
             raise ToolchainError(f"full toolchain is unavailable: {name}")
         env["PATH"] = os.pathsep.join((str(full / "bin"), env.get("PATH", "")))
@@ -158,8 +168,11 @@ class ToolchainManager:
         private = self.elan_home / "bin" / name
         if private.is_file():
             return private
+        discovered = shutil.which("elan")
+        if discovered:
+            return Path(discovered).expanduser().absolute()
         if not bootstrap:
-            raise ToolchainError("private Elan is not installed")
+            raise ToolchainError("Elan is not installed or available on PATH")
         self.bootstrap_elan()
         if not private.is_file():
             raise ToolchainError("Elan installer completed without creating the executable")
@@ -236,7 +249,7 @@ class ToolchainManager:
             names.update(
                 self._toolchain_name(path.name)
                 for path in root.iterdir()
-                if path.is_dir() and (path / "bin" / "lean").is_file()
+                if path.is_dir() and self._binary(path, "lean").is_file()
             )
         return tuple(sorted(names))
 
@@ -268,11 +281,11 @@ class ToolchainManager:
         if home is None:
             return None
         directory = home / "toolchains" / self._toolchain_dir_name(name)
-        return directory if (directory / "bin" / "lean").is_file() else None
+        return directory if self._binary(directory, "lean").is_file() else None
 
     def _full_toolchain_dir(self, name: str) -> Path:
         private = self._elan_toolchain_dir(name)
-        if (private / "bin" / "lean").is_file():
+        if self._binary(private, "lean").is_file():
             return private
         external = self._user_toolchain_dir(name)
         return external if external is not None else private
@@ -289,19 +302,21 @@ class ToolchainManager:
 
     def has_slim(self, toolchain: str) -> bool:
         directory = self.slim_path(toolchain)
-        return SlimManifest.load(directory) is not None and (directory / "bin" / "lean").is_file()
+        return (
+            SlimManifest.load(directory) is not None and self._binary(directory, "lean").is_file()
+        )
 
     def is_available_locally(self, toolchain: str) -> bool:
         """Check for a usable local toolchain without bootstrapping or network access."""
         name = normalize_toolchain(toolchain)
         full = self._full_toolchain_dir(name)
-        return self.has_slim(name) or (full / "bin" / "lean").is_file()
+        return self.has_slim(name) or self._binary(full, "lean").is_file()
 
     def full_path(self, toolchain: str) -> Path:
         """Return the exact full toolchain root, installing it when necessary."""
         name = self.ensure(toolchain)
         path = self._full_toolchain_dir(name)
-        if not (path / "bin" / "lean").is_file():
+        if not self._binary(path, "lean").is_file():
             raise ToolchainError(f"full toolchain is unavailable: {name}")
         return path
 
@@ -357,7 +372,10 @@ class ToolchainManager:
                 f"refusing to prune {name!r}: no verified slim toolchain is present"
             )
         external = self._user_toolchain_dir(name)
-        if external is not None and not (self._elan_toolchain_dir(name) / "bin" / "lean").is_file():
+        if (
+            external is not None
+            and not self._binary(self._elan_toolchain_dir(name), "lean").is_file()
+        ):
             raise ToolchainError(
                 "refusing to prune a user-managed Elan toolchain; Lean Runtime only removes "
                 "toolchains from its private store"
@@ -382,7 +400,7 @@ class ToolchainManager:
     def ensure(self, toolchain: str, *, cancel: threading.Event | None = None) -> str:
         """Install a toolchain if necessary and return its normalized name."""
         name = normalize_toolchain(toolchain)
-        if self.has_slim(name) or (self._full_toolchain_dir(name) / "bin" / "lean").is_file():
+        if self.has_slim(name) or self._binary(self._full_toolchain_dir(name), "lean").is_file():
             return name
         if self.remote_ensure is not None and self.remote_ensure(name, cancel):
             if not self.has_slim(name):
@@ -414,7 +432,7 @@ class ToolchainManager:
         """Install the full Lake-capable toolchain even when a slim copy exists."""
         name = normalize_toolchain(toolchain)
         directory = self._full_toolchain_dir(name)
-        if (directory / "bin" / "lean").is_file() and (directory / "bin" / "lake").is_file():
+        if self._binary(directory, "lean").is_file() and self._binary(directory, "lake").is_file():
             return name
         self.events.emit(
             "toolchain.install_started",
@@ -435,7 +453,8 @@ class ToolchainManager:
             raise ToolchainError(
                 f"could not install full Lean toolchain {name!r}:\n{process.stdout}{process.stderr}"
             )
-        if not (directory / "bin" / "lake").is_file():
+        directory = self._full_toolchain_dir(name)
+        if not self._binary(directory, "lake").is_file():
             raise ToolchainError(f"installed toolchain {name!r} does not provide 'lake'")
         return name
 
@@ -447,22 +466,16 @@ class ToolchainManager:
         """
         name = self.ensure_full(toolchain) if executable == "lake" else self.ensure(toolchain)
         full = self._full_toolchain_dir(name)
-        full_lean = full / "bin" / "lean"
-        if os.name == "nt":
-            full_lean = full_lean.with_suffix(".exe")
+        full_lean = self._binary(full, "lean")
         if self.has_slim(name) and not full_lean.is_file():
-            binary = self.slim_path(name) / "bin" / executable
-            if os.name == "nt":
-                binary = binary.with_suffix(".exe")
+            binary = self._binary(self.slim_path(name), executable)
             if not binary.is_file():
                 raise ToolchainError(
                     f"slim toolchain {name!r} does not provide {executable!r}; "
                     "reinstall the full toolchain for this operation"
                 )
             return [str(binary), *args]
-        binary = full / "bin" / executable
-        if os.name == "nt":
-            binary = binary.with_suffix(".exe")
+        binary = self._binary(full, executable)
         if not binary.is_file():
             raise ToolchainError(f"toolchain {name!r} does not provide {executable!r}")
         return [str(binary), *args]
@@ -471,9 +484,7 @@ class ToolchainManager:
         """Hash the exact resolved executable for compatibility-cache identities."""
         name = self.ensure(toolchain)
         full = self._full_toolchain_dir(name)
-        full_lean = full / "bin" / "lean"
-        if os.name == "nt":
-            full_lean = full_lean.with_suffix(".exe")
+        full_lean = self._binary(full, "lean")
         if self.has_slim(name) and not full_lean.is_file():
             binary = self.slim_path(name) / "bin" / executable
         else:

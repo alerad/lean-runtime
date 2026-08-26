@@ -37,6 +37,53 @@ def test_context_resolution_distinguishes_absence_from_broken_project(
         resolve_file_context(source, LeanFrontmatter(), discover=True)
 
 
+def test_declarative_project_only_claims_files_under_declared_targets(tmp_path: Path) -> None:
+    (tmp_path / "lakefile.toml").write_text('name = "fixture"\n[[lean_lib]]\nname = "Fixture"\n')
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.32.2\n")
+    owned = tmp_path / "Fixture" / "Main.lean"
+    owned.parent.mkdir()
+    owned.write_text("example : True := trivial\n")
+    scratch = tmp_path / "scratch" / "Main.lean"
+    scratch.parent.mkdir()
+    scratch.write_text("example : True := trivial\n")
+
+    owned_resolution = resolve_file_context(owned, LeanFrontmatter(), discover=True)
+    scratch_resolution = resolve_file_context(scratch, LeanFrontmatter(), discover=True)
+
+    assert owned_resolution.kind == "project"
+    assert "owns" in owned_resolution.reasons[0]
+    assert scratch_resolution.kind == "discovery"
+    assert scratch_resolution.project is not None
+    assert "not owned" in scratch_resolution.reasons[0]
+
+
+def test_imperative_project_preserves_ancestry_behavior_when_ownership_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "lakefile.lean").write_text("import Lake\nopen Lake DSL\npackage fixture\n")
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.32.2\n")
+    source = tmp_path / "scratch" / "Main.lean"
+    source.parent.mkdir()
+    source.write_text("example : True := trivial\n")
+
+    resolution = resolve_file_context(source, LeanFrontmatter(), discover=True)
+
+    assert resolution.kind == "project"
+    assert "ambiguous" in resolution.reasons[0]
+
+
+def test_standalone_override_ignores_an_owned_parent_project(tmp_path: Path) -> None:
+    (tmp_path / "lakefile.toml").write_text('name = "fixture"\n[[lean_lib]]\nname = "Fixture"\n')
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.32.2\n")
+    source = tmp_path / "Fixture.lean"
+    source.write_text("example : True := trivial\n")
+
+    resolution = resolve_file_context(source, LeanFrontmatter(), discover=True, standalone=True)
+
+    assert resolution.kind == "discovery"
+    assert "explicitly requested" in resolution.reasons[0]
+
+
 def test_runtime_exposes_analysis_plan_and_context_layers(tmp_path: Path) -> None:
     source = tmp_path / "Main.lean"
     source.write_text("import Mathlib\n")

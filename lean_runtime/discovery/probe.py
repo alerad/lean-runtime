@@ -94,6 +94,17 @@ class LeanRuntimeProbe:
                 toolchain=candidate.entry.toolchain,
                 remembered=remembered,
             )
+        if not candidate.entry.lock.packages:
+            try:
+                toolchain = self.runtime.toolchains.ensure(candidate.entry.toolchain, cancel=cancel)
+            except ToolchainError as exc:
+                raise ProbeUnavailable(str(exc)) from exc
+            return AcquiredCandidate(
+                candidate=candidate,
+                environment_id=f"toolchain:{toolchain}",
+                acquisition="local",
+                handle=toolchain,
+            )
         try:
             environment = self.runtime.open_exact(
                 candidate.entry.lock,
@@ -145,6 +156,19 @@ class LeanRuntimeProbe:
         cancel: threading.Event,
     ) -> ProbeOutcome:
         environment = acquired.handle
+        if isinstance(environment, str):
+            result = self.runtime.check(
+                source,
+                filename=self.filename,
+                toolchain=environment,
+                policy=ExecutionPolicy(timeout_seconds=timeout_seconds),
+                cancel=cancel,
+            )
+            return ProbeOutcome(
+                environment_id=acquired.environment_id,
+                execution_result=result,
+                acquisition=acquired.acquisition,
+            )
         if not isinstance(environment, Environment):
             raise ProbeUnavailable("acquired candidate does not hold an open environment")
         try:

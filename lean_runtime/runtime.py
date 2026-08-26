@@ -1289,6 +1289,7 @@ class Runtime:
         policy: ExecutionPolicy | None = None,
         cancel: threading.Event | None = None,
         discover: bool = True,
+        standalone: bool = False,
     ) -> ExecutionResult:
         source_path = Path(path).expanduser().resolve()
         selected_policy = policy or ExecutionPolicy(timeout_seconds=timeout or 120)
@@ -1312,6 +1313,7 @@ class Runtime:
                     source_path,
                     parse_frontmatter(source) or LeanFrontmatter(),
                     discover=discover,
+                    standalone=standalone,
                 )
                 if resolution.kind == "lock":
                     assert resolution.explicit.lock is not None
@@ -1421,6 +1423,7 @@ class Runtime:
         path: str | os.PathLike[str],
         *,
         discover: bool = True,
+        standalone: bool = False,
     ) -> FileContextResolution:
         """Resolve explicit frontmatter, a pinned project, or discovery need."""
 
@@ -1433,6 +1436,7 @@ class Runtime:
             source_path,
             parse_frontmatter(source) or LeanFrontmatter(),
             discover=discover,
+            standalone=standalone,
         )
 
     def check_files(

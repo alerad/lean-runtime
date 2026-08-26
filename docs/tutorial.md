@@ -7,7 +7,8 @@ This guide checks one core Lean file and one file that imports Mathlib. It then 
 - Python 3.10 or newer
 - Git
 - macOS or Linux for automatic Elan bootstrap
-- On Windows, an existing Elan installation identified by `LEAN_RUNTIME_ELAN`
+- On Windows, an existing Elan installation available on `PATH` (or identified
+  explicitly by `LEAN_RUNTIME_ELAN`)
 
 ## Install Lean Runtime
 

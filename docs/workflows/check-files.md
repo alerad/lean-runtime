@@ -10,6 +10,14 @@ lean-runtime check Main.lean
 
 For a standalone file without explicit context, Lean Runtime reads its declared imports and searches the bundled catalog for exact environments that provide those modules. The search is bounded. Lean remains the final authority for acceptance.
 
+If a scratch file sits below an unrelated Lake project, declarative target
+ownership normally keeps it standalone. Use `--standalone` when you want to
+override project inference explicitly:
+
+```console
+lean-runtime check Scratch.lean --standalone
+```
+
 Preview the routing decision without running Lean:
 
 ```console

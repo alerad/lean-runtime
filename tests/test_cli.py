@@ -487,6 +487,31 @@ def test_standalone_status_reports_plan_not_selection_and_availability(
     assert data["availability"][data["planned_first"]]["remote"] == "not_probed"
 
 
+def test_status_reports_unowned_file_beneath_declarative_project_as_standalone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "lakefile.toml").write_text('name = "fixture"\n[[lean_lib]]\nname = "Fixture"\n')
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.32.2\n")
+    source = tmp_path / "scratch" / "Main.lean"
+    source.parent.mkdir()
+    source.write_text("example : True := trivial\n")
+
+    assert main(["--home", str(tmp_path / "home"), "status", str(source), "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["kind"] == "standalone"
+    assert data["parent_project"] == str(tmp_path)
+    assert "no declared target owns" in data["context_reason"]
+
+
+def test_standalone_and_using_are_mutually_exclusive(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "Main.lean"
+    source.write_text("example : True := trivial\n")
+    assert main(["check", str(source), "--standalone", "--using", "4.32.2"]) == 2
+    assert "cannot be combined" in capsys.readouterr().err
+
+
 def _fake_adoption(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     plan = SimpleNamespace(ready=1, blocked=0, to_dict=lambda: {"ready": 1})
     entry = SimpleNamespace(root=root, action="attached", packages=1, reclaimed_bytes=0)

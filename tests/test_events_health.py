@@ -30,12 +30,8 @@ def test_doctor_and_empty_store_status_do_not_install_tools(tmp_path: Path) -> N
         "cleanup",
     }
     elan = next(check for check in report.checks if check.name == "elan")
-    if os.name == "nt":
-        assert not report.ok
-        assert elan.status == "fail"
-    else:
-        assert report.ok
-        assert elan.status in {"pass", "warning"}
+    assert report.ok
+    assert elan.status in {"pass", "warning"}
     status = runtime.store_status()
     assert status.environments == 0
     assert status.sources == 0

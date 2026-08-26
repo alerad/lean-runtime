@@ -12,7 +12,7 @@ For a Lean file, Lean Runtime considers context sources in this order:
 
 1. An explicit command-line or Python API context
 2. Lean Runtime frontmatter in the file
-3. The nearest pinned Lake project
+3. The nearest pinned Lake project that owns the file
 4. Automatic catalog discovery
 
 If none can produce a context, the operation fails before Lean runs.
@@ -38,7 +38,21 @@ Frontmatter travels with the source while remaining valid Lean comments.
 
 ## Pinned project context
 
-A file beneath a Lake project uses the nearest project with both a pinned toolchain and manifest. Lean Runtime does not replace those version decisions during a normal project check.
+A file declared beneath a target in a `lakefile.toml` project uses the nearest
+project with a pinned toolchain. A file that is merely stored under that project,
+but outside every declared target root, proceeds to automatic discovery. For an
+imperative `lakefile.lean`, where ownership cannot be established without running
+project code, Lean Runtime conservatively preserves ancestry-based selection.
+Lean Runtime does not replace project version decisions during a normal project check.
+
+To explicitly ignore every ancestor project, use:
+
+```console
+lean-runtime check Main.lean --standalone
+```
+
+`--standalone` cannot be combined with `--using` because they are competing
+context-selection instructions.
 
 ## Automatic discovery
 
@@ -55,4 +69,6 @@ lean-runtime status Main.lean
 lean-runtime status Main.lean --json
 ```
 
-`status` reports evidence and routing. A successful `check` reports compiler acceptance and execution provenance.
+`status` reports evidence and routing, including an ancestor project that was
+ignored because no declared target owns the file. A successful `check` reports
+compiler acceptance and execution provenance.
