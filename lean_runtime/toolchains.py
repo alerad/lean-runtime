@@ -11,6 +11,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -397,6 +398,68 @@ class ToolchainManager:
             toolchain=name,
         )
 
+    #: Pauses between attempts when Elan's download fails for a transient reason.
+    install_retry_delays: tuple[float, ...] = (2.0, 6.0)
+
+    _TRANSIENT_DOWNLOAD_MARKERS = (
+        "could not download",
+        "error during download",
+        "ssl connect error",
+        "tls connect error",
+        "connection reset",
+        "timed out",
+        "temporary failure in name resolution",
+    )
+
+    def _install_with_elan(
+        self,
+        name: str,
+        *,
+        cancel: threading.Event | None,
+        capability: str | None = None,
+    ) -> None:
+        """Run ``elan toolchain install`` and retry transient download failures.
+
+        A toolchain download is one HTTPS fetch of a large archive; a dropped
+        connection or a TLS hiccup at the release host is not a reason to fail
+        the whole check. Retries are bounded, announced as events, and only
+        happen when Elan's output shows a download problem rather than an
+        unknown toolchain or a disk error.
+        """
+        attempts = len(self.install_retry_delays) + 1
+        for attempt in range(1, attempts + 1):
+            process = LocalBackend().execute(
+                [str(self.elan_path()), "toolchain", "install", name],
+                cwd=self.home,
+                environment=self.environment,
+                policy=ExecutionPolicy(timeout_seconds=1800, max_output_bytes=10_000_000),
+                cancel=cancel,
+            )
+            if process.cancelled:
+                raise ToolchainError(f"Lean toolchain installation was cancelled: {name!r}")
+            if not process.exit_code:
+                return
+            output = f"{process.stdout}{process.stderr}"
+            transient = any(marker in output.lower() for marker in self._TRANSIENT_DOWNLOAD_MARKERS)
+            if not transient or attempt == attempts:
+                what = "full Lean toolchain" if capability == "lake" else "Lean toolchain"
+                suffix = f" after {attempt} attempts" if attempt > 1 else ""
+                raise ToolchainError(f"could not install {what} {name!r}{suffix}:\n{output}")
+            delay = self.install_retry_delays[attempt - 1]
+            self.events.emit(
+                "toolchain.install_retry",
+                f"Retrying Lean toolchain download for {name} in {delay:g}s",
+                toolchain=name,
+                attempt=attempt,
+                remaining=attempts - attempt,
+                delay_seconds=delay,
+            )
+            if cancel is not None:
+                if cancel.wait(delay):
+                    raise ToolchainError(f"Lean toolchain installation was cancelled: {name!r}")
+            else:
+                time.sleep(delay)
+
     def ensure(self, toolchain: str, *, cancel: threading.Event | None = None) -> str:
         """Install a toolchain if necessary and return its normalized name."""
         name = normalize_toolchain(toolchain)
@@ -413,19 +476,7 @@ class ToolchainManager:
             f"Installing Lean toolchain {name}",
             toolchain=name,
         )
-        process = LocalBackend().execute(
-            [str(self.elan_path()), "toolchain", "install", name],
-            cwd=self.home,
-            environment=self.environment,
-            policy=ExecutionPolicy(timeout_seconds=1800, max_output_bytes=10_000_000),
-            cancel=cancel,
-        )
-        if process.cancelled:
-            raise ToolchainError(f"Lean toolchain installation was cancelled: {name!r}")
-        if process.exit_code:
-            raise ToolchainError(
-                f"could not install Lean toolchain {name!r}:\n{process.stdout}{process.stderr}"
-            )
+        self._install_with_elan(name, cancel=cancel)
         return name
 
     def ensure_full(self, toolchain: str, *, cancel: threading.Event | None = None) -> str:
@@ -440,19 +491,7 @@ class ToolchainManager:
             toolchain=name,
             capability="lake",
         )
-        process = LocalBackend().execute(
-            [str(self.elan_path()), "toolchain", "install", name],
-            cwd=self.home,
-            environment=self.environment,
-            policy=ExecutionPolicy(timeout_seconds=1800, max_output_bytes=10_000_000),
-            cancel=cancel,
-        )
-        if process.cancelled:
-            raise ToolchainError(f"Lean toolchain installation was cancelled: {name!r}")
-        if process.exit_code:
-            raise ToolchainError(
-                f"could not install full Lean toolchain {name!r}:\n{process.stdout}{process.stderr}"
-            )
+        self._install_with_elan(name, cancel=cancel, capability="lake")
         directory = self._full_toolchain_dir(name)
         if not self._binary(directory, "lake").is_file():
             raise ToolchainError(f"installed toolchain {name!r} does not provide 'lake'")

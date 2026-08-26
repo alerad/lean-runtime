@@ -5,10 +5,12 @@ import io
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from lean_runtime import ProjectError, ToolchainError, normalize_toolchain, project_toolchain
+from lean_runtime.events import EventEmitter
 from lean_runtime.toolchains import ToolchainManager, immutable_toolchain_spelling
 
 
@@ -285,3 +287,77 @@ def test_ensure_full_does_not_accept_a_slim_toolchain(
 
     assert manager.ensure_full(toolchain) == toolchain
     assert calls and calls[0][-3:] == ["toolchain", "install", toolchain]
+
+
+def _install_process(exit_code: int, stderr: str = "") -> SimpleNamespace:
+    return SimpleNamespace(exit_code=exit_code, cancelled=False, stdout="", stderr=stderr)
+
+
+def test_transient_download_failures_are_retried_then_succeed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = ToolchainManager(tmp_path / "runtime")
+    manager.install_retry_delays = (0.0, 0.0)
+    monkeypatch.setattr(manager, "elan_path", lambda **_kwargs: tmp_path / "elan")
+    monkeypatch.setattr(manager, "is_installed", lambda _name: False)
+    outcomes = iter(
+        [
+            _install_process(
+                1,
+                "error: could not download file from 'https://releases.lean-lang.org/x'\n"
+                "info: caused by: [35] SSL connect error (TLS connect error)\n",
+            ),
+            _install_process(1, "info: caused by: error during download\n"),
+            _install_process(0),
+        ]
+    )
+    commands: list[list[str]] = []
+
+    def execute(_self, command, **_kwargs):
+        commands.append(list(command))
+        return next(outcomes)
+
+    monkeypatch.setattr("lean_runtime.toolchains.LocalBackend.execute", execute)
+    events: list[str] = []
+    manager.events = EventEmitter(lambda event: events.append(event.kind))
+
+    assert manager.ensure("leanprover/lean4:v4.32.0") == "leanprover/lean4:v4.32.0"
+    assert len(commands) == 3
+    assert all(
+        command[1:] == ["toolchain", "install", "leanprover/lean4:v4.32.0"] for command in commands
+    )
+    assert events.count("toolchain.install_retry") == 2
+
+
+def test_non_download_install_failures_are_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = ToolchainManager(tmp_path / "runtime")
+    manager.install_retry_delays = (0.0, 0.0)
+    monkeypatch.setattr(manager, "elan_path", lambda **_kwargs: tmp_path / "elan")
+    monkeypatch.setattr(manager, "is_installed", lambda _name: False)
+    calls = 0
+
+    def execute(_self, command, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return _install_process(1, "error: unknown toolchain 'leanprover/lean4:v9.99.0'\n")
+
+    monkeypatch.setattr("lean_runtime.toolchains.LocalBackend.execute", execute)
+    with pytest.raises(ToolchainError, match="unknown toolchain"):
+        manager.ensure("leanprover/lean4:v9.99.0")
+    assert calls == 1
+
+
+def test_exhausted_download_retries_report_the_attempt_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = ToolchainManager(tmp_path / "runtime")
+    manager.install_retry_delays = (0.0,)
+    monkeypatch.setattr(manager, "elan_path", lambda **_kwargs: tmp_path / "elan")
+    monkeypatch.setattr(
+        "lean_runtime.toolchains.LocalBackend.execute",
+        lambda _self, _command, **_kwargs: _install_process(1, "error during download\n"),
+    )
+    with pytest.raises(ToolchainError, match="after 2 attempts"):
+        manager.ensure_full("leanprover/lean4:v4.32.0")

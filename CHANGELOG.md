@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Retry `elan toolchain install` up to two more times when Elan reports a
+  transient download failure (dropped connection, TLS handshake error,
+  timeout), announcing each retry as a `toolchain.install_retry` event. Unknown
+  toolchains and disk errors still fail immediately.
 - State the model up front: `lean-runtime --help`, the docs index, and the
   command reference now open with the four nouns (context, environment, lock,
   verdict) and the rule that discovery proposes an environment while only Lean
