@@ -88,6 +88,15 @@ echo "waiting for CI to appear for $release_sha"
 for attempt in {1..240}; do
   run_id="$(gh run list --workflow ci.yml --commit "$release_sha" --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
   [[ -n "$run_id" ]] && break
+  if (( attempt == 13 )); then
+    remote_sha="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+    [[ "$remote_sha" == "$release_sha" ]] || {
+      echo "origin/main moved to $remote_sha while waiting for release CI"
+      exit 1
+    }
+    echo "push-triggered CI has not appeared; dispatching CI for origin/main"
+    gh workflow run ci.yml --ref main
+  fi
   if (( attempt % 12 == 0 )); then
     echo "still waiting for CI (${attempt} checks, $((attempt * 5))s)"
   fi
