@@ -57,6 +57,23 @@ def test_declarative_project_only_claims_files_under_declared_targets(tmp_path: 
     assert "not owned" in scratch_resolution.reasons[0]
 
 
+def test_library_roots_do_not_exclude_sibling_modules_from_project_ownership(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "lakefile.toml").write_text(
+        'name = "fixture"\n[[lean_lib]]\nname = "Fixture"\nroots = ["Fixture.Defs"]\n'
+    )
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.32.2\n")
+    source = tmp_path / "Fixture" / "Main.lean"
+    source.parent.mkdir()
+    source.write_text("import Fixture.Defs\n")
+
+    resolution = resolve_file_context(source, LeanFrontmatter(), discover=True)
+
+    assert resolution.kind == "project"
+    assert "owns" in resolution.reasons[0]
+
+
 def test_imperative_project_preserves_ancestry_behavior_when_ownership_is_ambiguous(
     tmp_path: Path,
 ) -> None:

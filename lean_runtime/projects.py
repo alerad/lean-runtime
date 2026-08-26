@@ -369,15 +369,15 @@ class ProjectContext:
             document = tomllib.loads(self.lakefile.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError):
             return None
-        targets: list[dict[str, Any]] = []
+        targets: list[tuple[str, dict[str, Any]]] = []
         for key in ("lean_lib", "lean_exe"):
             entries = document.get(key, [])
             if not isinstance(entries, list) or not all(isinstance(item, dict) for item in entries):
                 return None
-            targets.extend(entries)
+            targets.extend((key, item) for item in entries)
         if not targets:
             return None
-        for target in targets:
+        for target_kind, target in targets:
             src_dir = target.get("srcDir", ".")
             if not isinstance(src_dir, str):
                 return None
@@ -387,6 +387,12 @@ class ProjectContext:
                 roots = [root] if isinstance(root, str) else []
             if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
                 return None
+            # `roots` selects library build roots; it does not restrict the
+            # namespace of source modules belonging to a lean_lib target.
+            # Include the library name so sibling modules are still recognized.
+            name = target.get("name")
+            if target_kind == "lean_lib" and isinstance(name, str) and name not in roots:
+                roots = [name, *roots]
             source_root = (self.root / src_dir).resolve()
             try:
                 relative = selected.relative_to(source_root)
