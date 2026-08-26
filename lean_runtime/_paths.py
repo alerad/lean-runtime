@@ -9,7 +9,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
-from typing import Any
+from typing import Any, cast
+
+_WINDOWS_MOUNT_POINT_REPARSE_TAG = 0xA0000003
 
 
 def _retry_writable(
@@ -42,7 +44,7 @@ def is_link(path: Path) -> bool:
     attributes = getattr(status, "st_file_attributes", 0)
     reparse_tag = getattr(status, "st_reparse_tag", 0)
     return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT) and (
-        reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+        reparse_tag == _WINDOWS_MOUNT_POINT_REPARSE_TAG
     )
 
 
@@ -63,7 +65,11 @@ def link_directory(target: Path, link: Path) -> None:
             raise
         import _winapi
 
-        _winapi.CreateJunction(str(target.resolve()), str(link))
+        # These members exist only in the Windows runtime/typeshed surface.
+        # Resolve the API dynamically so strict checking on macOS/Linux still
+        # validates this module instead of rejecting the platform-only member.
+        create_junction = cast(Callable[[str, str], None], vars(_winapi)["CreateJunction"])
+        create_junction(str(target.resolve()), str(link))
 
 
 def remove_tree(path: Path) -> None:
