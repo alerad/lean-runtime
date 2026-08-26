@@ -26,6 +26,7 @@ def resolve_file_context(
     explicit: LeanFrontmatter,
     *,
     discover: bool,
+    standalone: bool = False,
 ) -> FileContextResolution:
     """Apply the public context precedence table without executing anything."""
 
@@ -39,6 +40,12 @@ def resolve_file_context(
         return FileContextResolution(
             "toolchain", explicit, reasons=("explicit toolchain selected",)
         )
+    if standalone:
+        if not discover:
+            raise SpecificationError("standalone context selection requires discovery")
+        return FileContextResolution(
+            "discovery", explicit, reasons=("standalone context explicitly requested",)
+        )
     try:
         project = discover_project(path)
     except ProjectNotFoundError:
@@ -51,9 +58,28 @@ def resolve_file_context(
             explicit,
             reasons=("no explicit context or pinned Lake project",),
         )
+    ownership = project.owns_file(path)
+    if ownership is False:
+        if not discover:
+            raise SpecificationError(
+                "the file is beneath a pinned Lake project but is not owned by a declared target"
+            )
+        return FileContextResolution(
+            "discovery",
+            explicit,
+            project=project,
+            reasons=(
+                "nearest pinned Lake project found but file is not owned by a declared target",
+            ),
+        )
+    reason = (
+        "nearest pinned Lake project owns the file"
+        if ownership is True
+        else "nearest pinned Lake project selected; target ownership is ambiguous"
+    )
     return FileContextResolution(
         "project",
         explicit,
         project=project,
-        reasons=("nearest pinned Lake project selected",),
+        reasons=(reason,),
     )

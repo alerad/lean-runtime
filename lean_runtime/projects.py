@@ -353,6 +353,58 @@ class ProjectContext:
     lakefile: Path
     manifest: Path | None
 
+    def owns_file(self, path: str | os.PathLike[str]) -> bool | None:
+        """Report whether a Lean file belongs to a declared project target.
+
+        Declarative Lake files can be inspected exactly without executing Lake.
+        A ``None`` result means the project format is not safely understood and
+        callers should preserve the traditional ancestry-based behavior.
+        """
+        selected = Path(path).expanduser().resolve()
+        if selected.suffix != ".lean":
+            return None
+        if self.lakefile.name != "lakefile.toml":
+            return None
+        try:
+            document = tomllib.loads(self.lakefile.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return None
+        targets: list[tuple[str, dict[str, Any]]] = []
+        for key in ("lean_lib", "lean_exe"):
+            entries = document.get(key, [])
+            if not isinstance(entries, list) or not all(isinstance(item, dict) for item in entries):
+                return None
+            targets.extend((key, item) for item in entries)
+        if not targets:
+            return None
+        for target_kind, target in targets:
+            src_dir = target.get("srcDir", ".")
+            if not isinstance(src_dir, str):
+                return None
+            roots = target.get("roots")
+            if roots is None:
+                root = target.get("root", target.get("name"))
+                roots = [root] if isinstance(root, str) else []
+            if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
+                return None
+            # `roots` selects library build roots; it does not restrict the
+            # namespace of source modules belonging to a lean_lib target.
+            # Include the library name so sibling modules are still recognized.
+            name = target.get("name")
+            if target_kind == "lean_lib" and isinstance(name, str) and name not in roots:
+                roots = [name, *roots]
+            source_root = (self.root / src_dir).resolve()
+            try:
+                relative = selected.relative_to(source_root)
+            except ValueError:
+                continue
+            relative_module = relative.with_suffix("").parts
+            for root in roots:
+                root_parts = tuple(part for part in root.replace("`", "").split(".") if part)
+                if relative_module[: len(root_parts)] == root_parts:
+                    return True
+        return False
+
     def current_manifest(self) -> Path | None:
         path = self.root / "lake-manifest.json"
         return path if path.is_file() else None

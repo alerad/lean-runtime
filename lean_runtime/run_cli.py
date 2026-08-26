@@ -52,6 +52,11 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, standalone: bool = Tru
         help="require explicit context or a pinned Lake project",
     )
     parser.add_argument(
+        "--standalone",
+        action="store_true",
+        help="ignore ancestor Lake projects",
+    )
+    parser.add_argument(
         "--offline",
         action="store_true",
         help="use retained local environments only",
@@ -427,6 +432,7 @@ def run(
             source_path,
             context,
             discover=not arguments.no_discover,
+            standalone=arguments.standalone,
         )
         if arguments.explain:
             if context_resolution.kind == "lock":

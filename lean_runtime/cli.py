@@ -652,6 +652,11 @@ def _add_check_v4(parser: argparse.ArgumentParser, *, watch: bool = False) -> No
     )
     if not watch:
         parser.add_argument(
+            "--standalone",
+            action="store_true",
+            help="ignore ancestor Lake projects and discover a standalone context",
+        )
+        parser.add_argument(
             "--include",
             action="append",
             default=[],
@@ -1434,6 +1439,7 @@ def _standalone_check_args(args: argparse.Namespace, source: Path) -> argparse.N
         toolchain=args.toolchain,
         catalog=None,
         no_discover=False,
+        standalone=args.standalone,
         offline=args.offline,
         no_source_build=args.no_source_build,
         allow_source_build=args.allow_source_build,
@@ -1479,7 +1485,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "update":
         args.plan = args.dry_run
     if args.command == "check":
+        if getattr(args, "standalone", False) and args.using is not None:
+            print("lean-runtime: --standalone cannot be combined with --using", file=sys.stderr)
+            return 2
         _apply_using(args)
+        if getattr(args, "standalone", False) and (
+            len(args.inputs) != 1 or args.inputs[0] == "-" or args.watch
+        ):
+            print(
+                "lean-runtime: --standalone requires exactly one Lean file",
+                file=sys.stderr,
+            )
+            return 2
         if args.matrix is not None:
             args.across = args.matrix
         if args.lock_out is not None:
@@ -1516,12 +1533,14 @@ def main(argv: list[str] | None = None) -> int:
         ):
             source = Path(args.inputs[0]).expanduser()
             project_available = False
-            if args.project is not None:
+            if args.standalone:
+                project_available = False
+            elif args.project is not None:
                 project_available = True
             elif source.is_file():
                 try:
-                    discover_project(source)
-                    project_available = True
+                    inferred_project = discover_project(source)
+                    project_available = inferred_project.owns_file(source) is not False
                 except ProjectNotFoundError:
                     pass
             if args.lock_out is not None and project_available and not args.package_refs:
@@ -1537,7 +1556,7 @@ def main(argv: list[str] | None = None) -> int:
             if (
                 source.is_file()
                 and args.environment is None
-                and (explicit_discovery or not project_available)
+                and (args.standalone or explicit_discovery or not project_available)
             ):
                 return _run_front_door(
                     _standalone_check_args(args, source), command_name="lean-runtime check"
@@ -1724,7 +1743,7 @@ def main(argv: list[str] | None = None) -> int:
                     if created
                     else Path(project_name) / "Basic.lean"
                 )
-                print(f"Next: cd {init_result.root} && lean-runtime check {module_file}")
+                print(f"Next: cd {init_result.root} && lean-runtime check {module_file.as_posix()}")
             return 0
         if args.command == "scan":
             scan_result = runtime.scan_projects(args.path, recursive=args.recursive)
@@ -2254,8 +2273,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "status":
             subject_path = Path(args.subject).expanduser()
             status_payload: dict[str, Any]
+            unowned_project = None
             try:
                 project_status = discover_project(subject_path)
+                if (
+                    subject_path.is_file()
+                    and subject_path.suffix == ".lean"
+                    and project_status.owns_file(subject_path) is False
+                ):
+                    unowned_project = project_status
+                    raise ProjectNotFoundError("file is not owned by a declared project target")
             except ProjectNotFoundError:
                 if subject_path.is_file() and subject_path.suffix == ".lean":
                     catalog = default_catalog()
@@ -2267,6 +2294,14 @@ def main(argv: list[str] | None = None) -> int:
                     status_payload = {
                         "kind": "standalone",
                         "subject": str(subject_path.resolve()),
+                        "parent_project": (
+                            str(unowned_project.root) if unowned_project is not None else None
+                        ),
+                        "context_reason": (
+                            "parent project found, but no declared target owns this file"
+                            if unowned_project is not None
+                            else "no pinned Lake project found"
+                        ),
                         "imports": list(discovery_plan.evidence.imports),
                         "candidates": [
                             candidate.entry.id for candidate in discovery_plan.candidates
@@ -2313,7 +2348,13 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 status_payload = {
                     "kind": "project",
+                    "subject": str(subject_path.resolve()),
                     "root": str(project_status.root),
+                    "context_reason": (
+                        "file is owned by a declared project target"
+                        if subject_path.is_file() and project_status.owns_file(subject_path) is True
+                        else "nearest pinned Lake project selected"
+                    ),
                     "toolchain": project_status.toolchain,
                     "manifest": str(project_status.manifest) if project_status.manifest else None,
                     "attached": (project_status.root / "lean-runtime.toml").is_file(),

@@ -47,6 +47,17 @@ def test_explicit_elan_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert ToolchainManager(tmp_path / "runtime").elan_path() == executable.absolute()
 
 
+def test_elan_on_path_is_reused_without_private_bootstrap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / ("elan.exe" if os.name == "nt" else "elan")
+    executable.write_text("")
+    monkeypatch.delenv("LEAN_RUNTIME_ELAN", raising=False)
+    monkeypatch.setattr("lean_runtime.toolchains.shutil.which", lambda _name: str(executable))
+
+    assert ToolchainManager(tmp_path / "runtime").elan_path() == executable.absolute()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows runners may not permit symlink creation")
 def test_elan_override_preserves_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     target = tmp_path / "elan-init"
@@ -57,6 +68,7 @@ def test_elan_override_preserves_symlink(tmp_path: Path, monkeypatch: pytest.Mon
     assert ToolchainManager(tmp_path / "runtime").elan_path() == link.absolute()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows bootstrap uses an existing Elan executable")
 def test_elan_bootstrap_rejects_installer_with_wrong_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -99,17 +111,20 @@ def test_existing_user_elan_toolchain_is_reused_read_only(
     toolchain = "leanprover/lean4:v4.33.0"
     directory = elan_home / "toolchains" / "leanprover--lean4---v4.33.0" / "bin"
     directory.mkdir(parents=True)
-    (directory / "lean").write_text("")
-    (directory / "lake").write_text("")
+    lean_name = "lean.exe" if os.name == "nt" else "lean"
+    lake_name = "lake.exe" if os.name == "nt" else "lake"
+    (directory / lean_name).write_text("")
+    (directory / lake_name).write_text("")
     monkeypatch.setenv("HOME", str(user_home))
     monkeypatch.setenv("PATH", str(elan.parent))
     monkeypatch.delenv("LEAN_RUNTIME_ELAN", raising=False)
     monkeypatch.delenv("LEAN_RUNTIME_ELAN_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: user_home)
 
     manager = ToolchainManager(tmp_path / "runtime")
     assert manager.ensure_full(toolchain) == toolchain
     assert manager.command(toolchain, "lean", "--version") == [
-        str(directory / "lean"),
+        str(directory / lean_name),
         "--version",
     ]
     execution_path = manager.environment_for(toolchain)["PATH"].split(os.pathsep)
@@ -161,18 +176,26 @@ def test_package_manager_elan_uses_the_default_user_home(
     user_home = tmp_path / "user"
     manager_bin = tmp_path / "package-manager" / "bin"
     manager_bin.mkdir(parents=True)
-    elan = manager_bin / "elan"
+    elan = manager_bin / ("elan.exe" if os.name == "nt" else "elan")
     elan.write_text("#!/bin/sh\n")
     elan.chmod(0o755)
     toolchain = "leanprover/lean4:v4.32.2"
-    lean = user_home / ".elan" / "toolchains" / "leanprover--lean4---v4.32.2" / "bin" / "lean"
+    lean = (
+        user_home
+        / ".elan"
+        / "toolchains"
+        / "leanprover--lean4---v4.32.2"
+        / "bin"
+        / ("lean.exe" if os.name == "nt" else "lean")
+    )
     lean.parent.mkdir(parents=True)
     lean.write_text("")
-    (lean.parent / "lake").write_text("")
+    (lean.parent / ("lake.exe" if os.name == "nt" else "lake")).write_text("")
     monkeypatch.setenv("HOME", str(user_home))
     monkeypatch.setenv("PATH", str(manager_bin))
     monkeypatch.delenv("LEAN_RUNTIME_ELAN", raising=False)
     monkeypatch.delenv("LEAN_RUNTIME_ELAN_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: user_home)
 
     manager = ToolchainManager(tmp_path / "runtime")
     assert manager.command(toolchain, "lean") == [str(lean)]
@@ -194,12 +217,15 @@ def test_executable_digest_identifies_the_exact_toolchain_binary(
     )
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="Windows preserves creation time when replacing file contents in place"
+)
 def test_executable_digest_rehashes_same_size_replacement_with_restored_mtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manager = ToolchainManager(tmp_path / "runtime")
     toolchain = "leanprover/lean4:v4.33.0"
-    binary = manager._elan_toolchain_dir(toolchain) / "bin" / "lean"
+    binary = manager._binary(manager._elan_toolchain_dir(toolchain), "lean")
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b"first")
     monkeypatch.setattr(manager, "ensure", lambda _toolchain: toolchain)
@@ -239,15 +265,15 @@ def test_ensure_full_does_not_accept_a_slim_toolchain(
     toolchain = "leanprover/lean4:v4.33.0"
     slim = manager.slim_path(toolchain)
     (slim / "bin").mkdir(parents=True)
-    (slim / "bin" / "lean").write_text("")
+    manager._binary(slim, "lean").write_text("")
     calls: list[list[str]] = []
 
     def execute(_backend, command, **_kwargs):
         calls.append(list(command))
         full = manager._elan_toolchain_dir(toolchain) / "bin"
         full.mkdir(parents=True)
-        (full / "lean").write_text("")
-        (full / "lake").write_text("")
+        manager._binary(full.parent, "lean").write_text("")
+        manager._binary(full.parent, "lake").write_text("")
         from lean_runtime.backends import BackendResult
 
         return BackendResult(0, "", "", 0.01, False, False, False, ())

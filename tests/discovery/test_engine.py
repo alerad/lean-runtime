@@ -503,6 +503,43 @@ def test_lean_runtime_probe_passes_the_acquisition_budget_to_builds(sample_catal
     assert acquired.environment_id == "env_fake"
 
 
+def test_core_only_probe_uses_the_exact_toolchain_without_an_environment_artifact(
+    sample_catalog,
+) -> None:  # type: ignore[no-untyped-def]
+    from types import SimpleNamespace
+
+    from lean_runtime.discovery.probe import LeanRuntimeProbe
+
+    calls: list[str] = []
+
+    class Toolchains:
+        def ensure(self, toolchain: str, **_kwargs: object) -> str:
+            calls.append(f"ensure:{toolchain}")
+            return toolchain
+
+    def check(_source: str, *, toolchain: str, **_kwargs: object) -> ExecutionResult:
+        calls.append(f"check:{toolchain}")
+        return execution(True, toolchain=toolchain)
+
+    runtime = SimpleNamespace(toolchains=Toolchains(), check=check)
+    candidate = Discovery(catalog=sample_catalog).plan("example : True := trivial\n").candidates[0]
+    probe = LeanRuntimeProbe(runtime=runtime)  # type: ignore[arg-type]
+
+    acquired = probe.acquire(candidate, timeout_seconds=10, cancel=threading.Event())
+    outcome = probe.check(
+        acquired,
+        "example : True := trivial\n",
+        timeout_seconds=10,
+        cancel=threading.Event(),
+    )
+
+    assert outcome.execution_result.ok
+    assert calls == [
+        f"ensure:{candidate.entry.toolchain}",
+        f"check:{candidate.entry.toolchain}",
+    ]
+
+
 def test_probe_uses_typed_retryability_not_error_text(sample_catalog) -> None:  # type: ignore[no-untyped-def]
     from types import SimpleNamespace
 

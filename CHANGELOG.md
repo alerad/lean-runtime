@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Improve Windows checks by reusing Elan from `PATH`, recognizing native
+  `.exe` toolchain binaries, and running core-only discovery directly against
+  its exact Lean toolchain when no platform environment artifact is needed.
+- Treat files outside every declared `lakefile.toml` target as standalone even
+  when they sit below a pinned project, add `check --standalone` as an explicit
+  override, and explain ignored parent projects in `status`.
+
 ## 4.24.0 - 2026-08-26
 
 - Key shared Lake package artifacts by the exact installed Lean and Lake
