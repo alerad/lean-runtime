@@ -2231,7 +2231,11 @@ class Runtime:
                         "offline initialization needs an exact local Mathlib graph; "
                         "run `lean-runtime project scan PATH` or `lean-runtime adopt PATH`"
                     )
-                environment = self.open_exact(selected.lock, import_roots=("Mathlib",))
+                environment = self.open_exact(
+                    selected.lock,
+                    import_roots=("Mathlib",),
+                    accelerate=True,
+                )
                 raw_packages = selected.lock.manifest.get("packagesDir", ".lake/packages")
                 seed_packages = environment.workspace / str(raw_packages)
                 seed_package_paths = None

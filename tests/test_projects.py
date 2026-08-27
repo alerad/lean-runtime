@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1413,6 +1414,36 @@ def test_latest_mathlib_init_uses_tag_input_and_exact_manifest(
     assert root_module == "import fresh.Basic\n"
     assert mathlib["rev"] == "0df444a360eaa60ab8c11dca51a86af692955474"
     assert mathlib["inputRev"] == "v4.33.1"
+
+
+def test_latest_mathlib_init_accelerates_a_cold_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = Runtime(
+        toolchains=InitProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(runtime, "_project_seed_paths", lambda *_args, **_kwargs: ({}, None))
+    environment_workspace = tmp_path / "environment" / "workspace"
+    (environment_workspace / ".lake" / "packages").mkdir(parents=True)
+    observed: list[bool] = []
+
+    def open_exact(_lock, **kwargs):
+        observed.append(kwargs.get("accelerate") is True)
+        return SimpleNamespace(workspace=environment_workspace)
+
+    def accept_attach(path, **_kwargs):
+        root = Path(path)
+        plan = AdoptionPlan((), False, 0, 0)
+        result = AdoptionResult(root, "attached", 9, 0, "workspace")
+        return AdoptionBatchResult(plan, (result,))
+
+    monkeypatch.setattr(runtime, "open_exact", open_exact)
+    monkeypatch.setattr(runtime, "attach_projects", accept_attach)
+
+    runtime.init_project(tmp_path / "fresh")
+
+    assert observed == [True]
 
 
 def test_update_plans_catalog_versions_and_applies_exact_graph(

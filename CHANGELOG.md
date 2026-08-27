@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Hydrate Mathlib's upstream build cache when `new` has no exact shared project
+  or downloadable environment to seed from. The cold-start fallback previously
+  opened the catalog environment without enabling the trusted URL-keyed
+  accelerator, so it skipped `lake exe cache get` and compiled all of Mathlib
+  from source.
 - Cover the remaining silent phases with progress. Elan bootstrap and
   `elan toolchain install`, and the `lake init`/`lake update` behind `new`, now
   stream their output as `process.progress`/`process.output` like every other
