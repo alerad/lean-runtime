@@ -33,6 +33,14 @@ class _ArtifactInventory:
 
 
 def _artifact_inventory(workspace: Path) -> _ArtifactInventory:
+    scan = CountedProgress(
+        current().emit,
+        "verification.inventory_scan",
+        f"Scanning build artifacts in {workspace.parent.name}",
+        1,
+        phase="verification",
+    )
+    scan.start()
     roots = [path for path in workspace.rglob(".lake/build") if path.is_dir()]
     digest = hashlib.sha256()
     entries = 0
@@ -42,6 +50,7 @@ def _artifact_inventory(workspace: Path) -> _ArtifactInventory:
         for root in sorted(roots, key=lambda path: path.relative_to(workspace).as_posix())
         for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(workspace).as_posix())
     ]
+    scan.advance(f"{len(paths)} entries")
     progress = CountedProgress(
         current().emit,
         "verification.inventory",
@@ -49,9 +58,9 @@ def _artifact_inventory(workspace: Path) -> _ArtifactInventory:
         len(paths),
         phase="verification",
     )
+    progress.start()
     for path in paths:
         relative = path.relative_to(workspace).as_posix()
-        progress.advance(relative)
         stat = path.lstat()
         if path.is_symlink():
             digest.update(b"link\0" + relative.encode() + b"\0" + os.readlink(path).encode())
@@ -65,6 +74,7 @@ def _artifact_inventory(workspace: Path) -> _ArtifactInventory:
                     digest.update(chunk)
             entries += 1
             total += stat.st_size
+        progress.advance(relative)
     return _ArtifactInventory("sha256:" + digest.hexdigest(), entries, total)
 
 
@@ -93,22 +103,34 @@ def _verify_capsule_state(environment: Environment) -> int:
     if not isinstance(modules, list) or not isinstance(capabilities, list):
         raise EnvironmentError("sparse capsule provenance is incomplete")
     selected = frozenset(str(item) for item in capabilities)
+    artifacts = [
+        artifact
+        for module in manifest.closure(str(item) for item in modules)
+        for artifact in module.artifacts
+        if artifact.capability in selected
+    ]
+    progress = CountedProgress(
+        current().emit,
+        "verification.capsule_inventory",
+        f"Verifying sparse artifacts in {environment.id}",
+        len(artifacts),
+        phase="verification",
+    )
+    progress.start()
     verified = 0
-    for module in manifest.closure(str(item) for item in modules):
-        for artifact in module.artifacts:
-            if artifact.capability not in selected:
-                continue
-            path = workspace.joinpath(*Path(artifact.path).parts)
-            if not path.is_file() or path.stat().st_size != artifact.size:
-                raise EnvironmentError(f"sparse capsule artifact is missing: {artifact.path}")
-            observed = hashlib.sha256()
-            with path.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    observed.update(chunk)
-            digest = observed.hexdigest()
-            if "sha256:" + digest != artifact.digest:
-                raise EnvironmentError(f"sparse capsule artifact changed: {artifact.path}")
-            verified += 1
+    for artifact in artifacts:
+        path = workspace.joinpath(*Path(artifact.path).parts)
+        if not path.is_file() or path.stat().st_size != artifact.size:
+            raise EnvironmentError(f"sparse capsule artifact is missing: {artifact.path}")
+        observed = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                observed.update(chunk)
+        digest = observed.hexdigest()
+        if "sha256:" + digest != artifact.digest:
+            raise EnvironmentError(f"sparse capsule artifact changed: {artifact.path}")
+        verified += 1
+        progress.advance(artifact.path)
     return verified
 
 

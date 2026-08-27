@@ -262,9 +262,9 @@ def parse_import_headers(
             len(source_paths),
             phase="capsule",
         )
+        progress.start()
         for offset in range(0, len(source_paths), batch_size):
             batch = list(source_paths[offset : offset + batch_size])
-            progress.advance(to=min(offset + len(batch), len(source_paths)))
             process = subprocess.run(
                 [*lean_command, "--run", str(helper), *(str(path) for path in batch)],
                 text=True,
@@ -296,6 +296,7 @@ def parse_import_headers(
                     if isinstance(item, dict) and isinstance(item.get("module"), str)
                 }
                 result[path] = tuple(sorted(names))
+            progress.advance(to=min(offset + len(batch), len(source_paths)))
     return result
 
 
@@ -379,16 +380,34 @@ def build_manifest(
     complete_modules: frozenset[str] | None = None,
 ) -> CapsuleManifest:
     """Inventory retained module artifacts beneath package build roots."""
+    scan = CountedProgress(
+        current().emit,
+        "capsule.artifact_scan",
+        "Scanning capsule artifacts",
+        1,
+        phase="capsule",
+    )
+    scan.start()
+    paths = [
+        (package, root, path)
+        for package, root in sorted(build_roots.items())
+        if root.is_dir()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    ]
+    scan.advance(f"{len(paths)} files")
+    progress = CountedProgress(
+        current().emit,
+        "capsule.artifact_inventory",
+        "Hashing capsule artifacts",
+        len(paths),
+        phase="capsule",
+    )
+    progress.start()
     modules: dict[str, tuple[str, list[CapsuleArtifact]]] = {}
-    for package, root in sorted(build_roots.items()):
-        if not root.is_dir():
-            continue
-        for path in sorted(root.rglob("*")):
-            if not path.is_file():
-                continue
-            module = module_from_artifact(path.relative_to(root))
-            if module is None:
-                continue
+    for package, root, path in paths:
+        module = module_from_artifact(path.relative_to(root))
+        if module is not None:
             relative = path.relative_to(workspace).as_posix()
             capability = artifact_capability(path)
             artifact = CapsuleArtifact(
@@ -400,6 +419,7 @@ def build_manifest(
                     f"capsule module {module} is provided by both {existing[0]} and {package}"
                 )
             modules.setdefault(module, (package, []))[1].append(artifact)
+        progress.advance(path.relative_to(workspace).as_posix())
     known_complete = frozenset(imports) if complete_modules is None else complete_modules
     records = tuple(
         CapsuleModule(
@@ -446,6 +466,14 @@ def inventory_workspace(
 ) -> CapsuleManifest:
     """Build an exact capsule inventory from a verified full workspace."""
     source_roots, build_roots = _package_directories(workspace, lock)
+    discovery = CountedProgress(
+        current().emit,
+        "capsule.module_discovery",
+        "Discovering capsule modules",
+        len(build_roots) + len(source_roots),
+        phase="capsule",
+    )
+    discovery.start()
     modules_by_package: dict[str, set[str]] = {}
     for package, root in build_roots.items():
         modules_by_package[package] = {
@@ -453,11 +481,13 @@ def inventory_workspace(
             for path in root.rglob("*.olean")
             if (module := module_from_artifact(path.relative_to(root))) is not None
         }
+        discovery.advance(package)
 
     source_modules: dict[Path, str] = {}
     claimed: dict[str, tuple[int, Path]] = {}
     for package, root in source_roots.items():
         if not root.is_dir():
+            discovery.advance(package)
             continue
         available = modules_by_package[package]
         for path in sorted(root.rglob("*.lean")):
@@ -483,6 +513,7 @@ def inventory_workspace(
                 source_modules.pop(previous[1], None)
             claimed[module] = (stripped, path)
             source_modules[path] = module
+        discovery.advance(package)
 
     parsed = parse_import_headers(lean_command, tuple(source_modules))
     imports = {source_modules[path]: names for path, names in parsed.items()}

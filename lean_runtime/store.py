@@ -40,6 +40,14 @@ SUPPORTED_BUILD_PROFILE = "release"
 
 def source_snapshot_digest(root: Path) -> str:
     """Hash checked-out content while excluding Git and runtime metadata."""
+    scan = CountedProgress(
+        current().emit,
+        "source.snapshot_scan",
+        f"Scanning {root.name}",
+        1,
+        phase="fingerprint",
+    )
+    scan.start()
     entries: list[Path] = []
     for directory, directories, filenames in os.walk(root, followlinks=False):
         current_dir = Path(directory)
@@ -50,6 +58,7 @@ def source_snapshot_digest(root: Path) -> str:
             if name not in {".git", ".lake"} and name not in symlink_directories
         )
         entries.extend(current_dir / name for name in sorted([*filenames, *symlink_directories]))
+    scan.advance(f"{len(entries)} entries")
     progress = CountedProgress(
         current().emit,
         "source.snapshot_digest",
@@ -57,11 +66,12 @@ def source_snapshot_digest(root: Path) -> str:
         len(entries),
         phase="fingerprint",
     )
+    progress.start()
     digest = hashlib.sha256()
     for path in entries:
         relative = path.relative_to(root)
-        progress.advance(relative.as_posix())
         if relative.as_posix() == ".lean-runtime-source.json":
+            progress.advance(relative.as_posix())
             continue
         if path.is_symlink():
             digest.update(b"link\0" + relative.as_posix().encode() + b"\0")
@@ -74,6 +84,7 @@ def source_snapshot_digest(root: Path) -> str:
             with path.open("rb") as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     digest.update(chunk)
+        progress.advance(relative.as_posix())
     return "sha256:" + digest.hexdigest()
 
 
@@ -124,6 +135,14 @@ def clone_tree(source: Path, destination: Path) -> None:
     """Clone a tree using copy-on-write where the host supports it."""
     if destination.exists():
         raise EnvironmentError(f"clone destination already exists: {destination}")
+    progress = CountedProgress(
+        current().emit,
+        "storage.tree_clone",
+        f"Copying {source.name}",
+        1,
+        phase="storage",
+    )
+    progress.start()
     destination.parent.mkdir(parents=True, exist_ok=True)
     if platform.system() == "Darwin":
         result = subprocess.run(
@@ -135,6 +154,7 @@ def clone_tree(source: Path, destination: Path) -> None:
             check=False,
         )
         if result.returncode == 0:
+            progress.advance()
             return
     elif platform.system() == "Linux":
         result = subprocess.run(
@@ -144,8 +164,10 @@ def clone_tree(source: Path, destination: Path) -> None:
             check=False,
         )
         if result.returncode == 0:
+            progress.advance()
             return
     shutil.copytree(source, destination, symlinks=True)
+    progress.advance()
 
 
 def _tree_bytes(root: Path) -> int:
@@ -878,8 +900,18 @@ class EnvironmentStore:
         for name, environment_id in aliases.items():
             names_by_environment.setdefault(environment_id, []).append(name)
         usage: list[EnvironmentUsage] = []
-        for path in sorted(self.environments.glob("env_*")):
+        environment_paths = sorted(self.environments.glob("env_*"))
+        accounting = CountedProgress(
+            current().emit,
+            "storage.accounting",
+            "Measuring storage",
+            len(environment_paths) + 10,
+            phase="storage",
+        )
+        accounting.start()
+        for path in environment_paths:
             if not path.is_dir():
+                accounting.advance(path.name)
                 continue
             toolchain: str | None = None
             with suppress(OSError, json.JSONDecodeError, TypeError):
@@ -897,6 +929,7 @@ class EnvironmentStore:
                     last_used_at=self._last_used_at(path),
                 )
             )
+            accounting.advance(path.name)
         usage.sort(key=lambda item: item.bytes_used, reverse=True)
         project_packages = self.home / "project-packages"
         project_sources = self.home / "project-sources"
@@ -913,16 +946,26 @@ class EnvironmentStore:
             return materialized
 
         sources_bytes = measure(self.sources)
+        accounting.advance("sources")
         oci_blobs_bytes = measure(self.oci_blobs)
+        accounting.advance("OCI blobs")
         cas_artifacts_bytes = measure(self.cas_artifacts)
+        accounting.advance("capsule artifacts")
         declaration_indexes_bytes = measure(self.declaration_indexes)
+        accounting.advance("declaration indexes")
         project_packages_bytes = measure(project_packages, project_sources, project_workspaces)
+        accounting.advance("shared projects")
         toolchains_bytes = measure(self.home / "elan", self.home / "toolchains")
+        accounting.advance("toolchains")
         executions_bytes = measure(self.executions)
+        accounting.advance("executions")
         scratch_paths = self._scratch_paths()
         scratch_bytes = measure(*scratch_paths)
+        accounting.advance("scratch workspaces")
         locks_bytes = measure(self.locks)
+        accounting.advance("locks")
         names_bytes = measure(self.names)
+        accounting.advance("names")
         bytes_used = sum(
             (
                 environments_bytes,
@@ -1020,10 +1063,16 @@ class EnvironmentStore:
             reverse=True,
         )
         protected = {path.name for path in unaliased[:keep_last]}
+        paths = sorted(self.environments.glob("env_*"))
+        progress = CountedProgress(
+            current().emit, "storage.cleanup", "Inspecting environments", len(paths), phase="clean"
+        )
+        progress.start()
         with FileLock(self.lock_dir / "gc.lock"):
-            for path in sorted(self.environments.glob("env_*")):
+            for path in paths:
                 if _ENVIRONMENT_ID.fullmatch(path.name) is None:
                     retained.append(path.name)
+                    progress.advance(path.name)
                     continue
                 usage = self.usage / f"{path.name}.json"
                 age = now - (usage.stat().st_mtime if usage.exists() else path.stat().st_mtime)
@@ -1034,6 +1083,7 @@ class EnvironmentStore:
                     or self.has_execution_leases(path.name)
                 ):
                     retained.append(path.name)
+                    progress.advance(path.name)
                     continue
                 candidates.append(path.name)
                 size = _tree_bytes(path)
@@ -1050,11 +1100,13 @@ class EnvironmentStore:
                             or self.has_execution_leases(path.name)
                         ):
                             retained.append(path.name)
+                            progress.advance(path.name)
                             continue
                         remove_tree(path)
                         usage.unlink(missing_ok=True)
                         removed.append(path.name)
                         reclaimed_bytes += size
+                progress.advance(path.name)
         return CleanupReport(
             tuple(candidates),
             tuple(removed),
@@ -1079,11 +1131,21 @@ class EnvironmentStore:
         removed: list[str] = []
         candidate_bytes = 0
         reclaimed_bytes = 0
+        paths = self._scratch_paths()
+        progress = CountedProgress(
+            current().emit,
+            "storage.scratch_cleanup",
+            "Inspecting scratch workspaces",
+            len(paths),
+            phase="clean",
+        )
+        progress.start()
         with FileLock(self.lock_dir / "scratch-gc.lock"):
-            for path in self._scratch_paths():
+            for path in paths:
                 try:
                     age = max(0.0, now - path.stat().st_mtime)
                 except OSError:
+                    progress.advance(path.name)
                     continue
                 label = f"{path.parent.name}/{path.name}"
                 marker = path / ".lean-runtime-workspace.json"
@@ -1098,25 +1160,30 @@ class EnvironmentStore:
                     or self._workspace_active(path)
                 ):
                     retained.append(label)
+                    progress.advance(label)
                     continue
                 size = _tree_bytes(path)
                 candidates.append(label)
                 candidate_bytes += size
                 if dry_run:
+                    progress.advance(label)
                     continue
                 if path.name.startswith(".trash-"):
                     remove_tree(path)
                     removed.append(label)
                     reclaimed_bytes += size
+                    progress.advance(label)
                     continue
                 tombstone = path.with_name(f".trash-{path.name}-{uuid.uuid4().hex}")
                 try:
                     path.replace(tombstone)
                 except FileNotFoundError:
+                    progress.advance(label)
                     continue
                 remove_tree(tombstone)
                 removed.append(label)
                 reclaimed_bytes += size
+                progress.advance(label)
         return CleanupReport(
             tuple(candidates),
             tuple(removed),
@@ -1140,8 +1207,17 @@ class EnvironmentStore:
         retained: list[str] = []
         candidate_bytes = 0
         reclaimed_bytes = 0
+        packages = tuple(package_directories(root))
+        progress = CountedProgress(
+            current().emit,
+            "storage.project_cleanup",
+            "Inspecting legacy project artifacts",
+            len(packages),
+            phase="clean",
+        )
+        progress.start()
         with FileLock(self.lock_dir / "project-artifact-gc.lock"):
-            for package in package_directories(root):
+            for package in packages:
                 marker = package / ".lean-runtime-package.json"
                 try:
                     record = json.loads(marker.read_text(encoding="utf-8"))
@@ -1150,17 +1226,20 @@ class EnvironmentStore:
                         isinstance(artifact, dict)
                         and artifact.get("schema") == "lean-runtime-package-artifact-key/1"
                     )
-                    age = now - package.stat().st_mtime
+                    age = max(0.0, now - package.stat().st_mtime)
                 except (OSError, AttributeError, json.JSONDecodeError):
                     retained.append(package.name)
+                    progress.advance(package.name)
                     continue
                 if not legacy or age < minimum_age_seconds:
                     retained.append(package.name)
+                    progress.advance(package.name)
                     continue
                 size = _tree_bytes(package)
                 candidates.append(package.name)
                 candidate_bytes += size
                 if dry_run:
+                    progress.advance(package.name)
                     continue
                 try:
                     with (
@@ -1168,13 +1247,16 @@ class EnvironmentStore:
                         FileLock(self.lock_dir / f"{package.name}.lock", timeout=0),
                     ):
                         if not package.is_dir():
+                            progress.advance(package.name)
                             continue
                         remove_tree(package)
                 except EnvironmentError:
                     retained.append(package.name)
+                    progress.advance(package.name)
                     continue
                 removed.append(package.name)
                 reclaimed_bytes += size
+                progress.advance(package.name)
         return CleanupReport(
             tuple(candidates),
             tuple(removed),
@@ -1194,11 +1276,22 @@ class EnvironmentStore:
         reclaimed_bytes = 0
         candidate_bytes = 0
         now = time.time()
+        blob_paths = sorted(self.oci_blobs.iterdir())
+        artifact_paths = sorted(self.cas_artifacts.iterdir())
+        progress = CountedProgress(
+            current().emit,
+            "storage.download_cleanup",
+            "Inspecting downloaded artifacts",
+            len(blob_paths) + len(artifact_paths),
+            phase="clean",
+        )
+        progress.start()
         with FileLock(self.lock_dir / "oci-gc.lock"):
             referenced = self.referenced_oci_blobs()
-            for path in sorted(self.oci_blobs.iterdir()):
+            for path in blob_paths:
                 if not path.is_file() or _OCI_BLOB.fullmatch(path.name) is None:
                     retained.append(path.name)
+                    progress.advance(path.name)
                     continue
                 age = max(0.0, now - path.stat().st_mtime)
                 if (
@@ -1207,11 +1300,13 @@ class EnvironmentStore:
                     or self.has_oci_blob_leases(path.name)
                 ):
                     retained.append(path.name)
+                    progress.advance(path.name)
                     continue
                 candidates.append(path.name)
                 with suppress(OSError):
                     candidate_bytes += path.stat().st_size
                 if dry_run:
+                    progress.advance(path.name)
                     continue
                 with FileLock(self.lock_dir / f"oci-{path.name}.lock"):
                     referenced = self.referenced_oci_blobs()
@@ -1222,24 +1317,29 @@ class EnvironmentStore:
                         or self.has_oci_blob_leases(path.name)
                     ):
                         retained.append(path.name)
+                        progress.advance(path.name)
                         continue
                     size = path.stat().st_size
                     path.unlink()
                     reclaimed_bytes += size
                     removed.append(path.name)
-            for path in sorted(self.cas_artifacts.iterdir()):
+                progress.advance(path.name)
+            for path in artifact_paths:
                 label = f"cas:{path.name}"
                 if not path.is_file() or _OCI_BLOB.fullmatch(path.name) is None:
                     retained.append(label)
+                    progress.advance(label)
                     continue
                 age = max(0.0, now - path.stat().st_mtime)
                 if age < minimum_age_seconds or self.has_cas_artifact_leases(path.name):
                     retained.append(label)
+                    progress.advance(label)
                     continue
                 candidates.append(label)
                 with suppress(OSError):
                     candidate_bytes += path.stat().st_size
                 if dry_run:
+                    progress.advance(label)
                     continue
                 with FileLock(self.lock_dir / f"cas-{path.name}.lock"):
                     if (
@@ -1248,11 +1348,13 @@ class EnvironmentStore:
                         or self.has_cas_artifact_leases(path.name)
                     ):
                         retained.append(label)
+                        progress.advance(label)
                         continue
                     size = path.stat().st_size
                     path.unlink()
                     reclaimed_bytes += size
                     removed.append(label)
+                progress.advance(label)
         return DownloadCleanupReport(
             tuple(candidates),
             tuple(removed),

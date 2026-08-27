@@ -25,7 +25,9 @@ from typing import Any
 
 from .backends import LocalBackend
 from .errors import ToolchainError
+from .events import current
 from .policies import ExecutionPolicy
+from .progress import CountedProgress
 from .serialization import write_json_atomic
 
 SLIM_PROFILE = "check"
@@ -174,26 +176,44 @@ def materialize(
     excluded_files = 0
     excluded_bytes = 0
     try:
-        for root, _dirs, names in os.walk(source):
-            for name in names:
-                path = Path(root) / name
-                relative = path.relative_to(source)
-                size = path.lstat().st_size
-                if is_excluded(relative):
-                    excluded_files += 1
-                    excluded_bytes += size
-                    continue
-                target = staging / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if path.is_symlink():
-                    target.symlink_to(os.readlink(path))
-                else:
-                    try:
-                        os.link(path, target)
-                    except OSError:
-                        shutil.copy2(path, target)
-                kept_files += 1
-                kept_bytes += size
+        scan = CountedProgress(
+            current().emit,
+            "toolchain.slim_scan",
+            f"Scanning {source.name}",
+            1,
+            phase="toolchain",
+        )
+        scan.start()
+        paths = [Path(root) / name for root, _dirs, names in os.walk(source) for name in names]
+        scan.advance(f"{len(paths)} files")
+        progress = CountedProgress(
+            current().emit,
+            "toolchain.slim_materialize",
+            "Materializing slim toolchain",
+            len(paths),
+            phase="toolchain",
+        )
+        progress.start()
+        for path in paths:
+            relative = path.relative_to(source)
+            size = path.lstat().st_size
+            if is_excluded(relative):
+                excluded_files += 1
+                excluded_bytes += size
+                progress.advance(relative.as_posix())
+                continue
+            target = staging / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if path.is_symlink():
+                target.symlink_to(os.readlink(path))
+            else:
+                try:
+                    os.link(path, target)
+                except OSError:
+                    shutil.copy2(path, target)
+            kept_files += 1
+            kept_bytes += size
+            progress.advance(relative.as_posix())
         manifest = SlimManifest(
             toolchain=toolchain,
             profile=SLIM_PROFILE,
@@ -231,6 +251,14 @@ def verify_capabilities(
         raise ToolchainError(f"slim toolchain has no lean executable: {slim_dir}")
     selected = backend or LocalBackend()
     results: list[tuple[str, bool, str]] = []
+    progress = CountedProgress(
+        current().emit,
+        "toolchain.slim_verify",
+        "Verifying slim toolchain",
+        len(CAPABILITY_CORPUS),
+        phase="toolchain",
+    )
+    progress.start()
     with tempfile.TemporaryDirectory(prefix="slim-corpus-") as raw:
         for name, source in CAPABILITY_CORPUS:
             probe = Path(raw) / f"{name}.lean"
@@ -244,4 +272,5 @@ def verify_capabilities(
             )
             detail = (outcome.stderr or outcome.stdout).strip()
             results.append((name, outcome.exit_code == 0, detail))
+            progress.advance(name)
     return tuple(results)
