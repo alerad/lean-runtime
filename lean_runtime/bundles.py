@@ -17,7 +17,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Protocol
 
 import zstandard
 
@@ -83,10 +83,22 @@ SOURCE_TREE_INVENTORY = ".lean-runtime-source-tree.json"
 MAX_CAPSULE_CONFIG_BYTES = 64 * 1024**2
 
 
+class _BinaryReader(Protocol):
+    def read(self, size: int = -1) -> bytes: ...
+
+    def readinto(self, buffer: Any) -> int | None: ...
+
+    def seek(self, offset: int, whence: int = 0) -> int: ...
+
+    def tell(self) -> int: ...
+
+
 class _ProgressReader:
     """Report bytes after a consumer has actually read them."""
 
-    def __init__(self, handle: Any, progress: CountedProgress, *, offset: int = 0) -> None:
+    def __init__(
+        self, handle: _BinaryReader, progress: CountedProgress, *, offset: int = 0
+    ) -> None:
         self._handle = handle
         self._progress = progress
         self._offset = offset
@@ -106,7 +118,7 @@ class _ProgressReader:
     def readinto(self, buffer: Any) -> int:
         count = self._handle.readinto(buffer)
         self._report()
-        return count
+        return count if count is not None else 0
 
     def seek(self, offset: int, whence: int = 0) -> int:
         return self._handle.seek(offset, whence)
