@@ -19,7 +19,9 @@ from .declaration_index import (
 )
 from .declaration_index_oci import DeclarationShardSource
 from .errors import EnvironmentError
+from .events import current
 from .lockfiles import EnvironmentLock, LockedPackage
+from .progress import CountedProgress
 from .runtime import Runtime
 from .serialization import canonical_json_bytes
 
@@ -101,9 +103,26 @@ def _declarations(root: Path) -> tuple[dict[str, str], tuple[str, ...], tuple[st
     declarations: dict[str, str] = {}
     ambiguous: set[str] = set()
     modules: set[str] = set()
+    scan = CountedProgress(
+        current().emit,
+        "declaration_index.scan",
+        f"Scanning declarations in {root.name}",
+        1,
+        phase="declaration-index",
+    )
+    scan.start()
     ileans = tuple(sorted(root.rglob("*.ilean"), key=lambda item: item.as_posix()))
+    scan.advance(f"{len(ileans)} files")
     if not ileans:
         raise EnvironmentError(f"compiled declaration root contains no .ilean files: {root}")
+    progress = CountedProgress(
+        current().emit,
+        "declaration_index.parse",
+        f"Reading declarations in {root.name}",
+        len(ileans),
+        phase="declaration-index",
+    )
+    progress.start()
     for path in ileans:
         if path.stat().st_size > MAX_ILEAN_BYTES:
             raise EnvironmentError(f"Lean index exceeds its supported size: {path}")
@@ -129,6 +148,7 @@ def _declarations(root: Path) -> tuple[dict[str, str], tuple[str, ...], tuple[st
                 ambiguous.add(name)
                 continue
             declarations[name] = module
+        progress.advance(path.name)
     if not declarations:
         raise EnvironmentError(f"compiled declaration root produced no public names: {root}")
     namespace_roots = {name.split(".", 1)[0] for name in declarations}
@@ -147,6 +167,14 @@ def _write_shard(
 ) -> None:
     if output.exists():
         raise EnvironmentError(f"refusing to overwrite declaration shard: {output}")
+    progress = CountedProgress(
+        current().emit,
+        "declaration_index.sqlite",
+        f"Writing declaration shard {output.stem[:20]}",
+        4,
+        phase="declaration-index",
+    )
+    progress.start()
     with sqlite3.connect(output) as connection:
         connection.executescript(
             f"""
@@ -171,6 +199,7 @@ def _write_shard(
             ) WITHOUT ROWID;
             """
         )
+        progress.advance("schema")
         metadata = {
             "schema": DECLARATION_SHARD_SCHEMA,
             "shard_id": shard_id,
@@ -184,12 +213,15 @@ def _write_shard(
             for name in sorted(declarations)
         ]
         connection.executemany("INSERT INTO decl VALUES (?, ?, ?, ?)", rows)
+        progress.advance("declarations")
         connection.executemany(
             "INSERT INTO suffix VALUES (?, ?)",
             sorted((name.rsplit(".", 1)[-1], name) for name in declarations),
         )
         connection.commit()
+        progress.advance("suffix index")
         connection.execute("VACUUM")
+        progress.advance("vacuum")
     DeclarationIndex(output, expected_shard_id=shard_id)
 
 

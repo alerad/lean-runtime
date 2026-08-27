@@ -18,7 +18,7 @@ from typing import Any
 import zstandard
 
 from .errors import DownloadUnavailable, EnvironmentError, ToolchainError
-from .events import EventEmitter
+from .events import EventEmitter, current
 from .locking import FileLock
 from .oci import (
     OCIRegistryClient,
@@ -45,6 +45,7 @@ from .oci_protocol import (
     platform_matches as _platform_matches,
 )
 from .policies import format_byte_size
+from .progress import CountedProgress
 from .serialization import canonical_json_bytes
 from .store import EnvironmentStore, platform_compatibility
 from .toolchain_slim import SlimManifest, materialize, verify_capabilities
@@ -73,13 +74,31 @@ def _json_object(data: bytes, label: str) -> dict[str, Any]:
 
 
 def _write_layer(root: Path, output: Path) -> None:
+    scan = CountedProgress(
+        current().emit,
+        "toolchain.layer_scan",
+        "Scanning check toolchain layer",
+        1,
+        phase="toolchain",
+    )
+    scan.start()
+    paths = sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())
+    scan.advance(f"{len(paths)} entries")
+    progress = CountedProgress(
+        current().emit,
+        "toolchain.layer_write",
+        "Compressing check toolchain layer",
+        len(paths),
+        phase="toolchain",
+    )
+    progress.start()
     compressor = zstandard.ZstdCompressor(level=10, write_checksum=True, threads=0)
     with (
         output.open("wb") as raw,
         compressor.stream_writer(raw, closefd=False) as compressed,
         tarfile.open(fileobj=compressed, mode="w|", format=tarfile.PAX_FORMAT) as archive,
     ):
-        for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        for path in paths:
             relative = path.relative_to(root).as_posix()
             stat = path.lstat()
             info = tarfile.TarInfo(relative + ("/" if path.is_dir() else ""))
@@ -110,6 +129,7 @@ def _write_layer(root: Path, output: Path) -> None:
                     archive.addfile(info, source)
             else:
                 raise ToolchainError(f"check toolchain contains unsupported entry: {path}")
+            progress.advance(relative)
 
 
 def _safe_member(name: str) -> PurePosixPath:
@@ -120,6 +140,12 @@ def _safe_member(name: str) -> PurePosixPath:
 
 
 def _extract_layer(layer: Path, destination: Path) -> None:
+    current().emit(
+        "toolchain.layer_extract_started",
+        "Extracting published check toolchain",
+        phase="toolchain",
+        bytes=layer.stat().st_size,
+    )
     total = count = 0
     seen: set[PurePosixPath] = set()
     if destination.is_symlink():

@@ -24,6 +24,7 @@ from .events import EventEmitter
 from .oci import OCIRegistryClient, OCIRepository, RegistryCredential
 from .oci_protocol import MANIFEST_MEDIA_TYPE, blob_descriptor_path, digest_path, json_object
 from .policies import format_byte_size
+from .progress import CountedProgress
 from .serialization import canonical_json_bytes
 from .store import EnvironmentStore
 
@@ -121,6 +122,7 @@ class OCIDeclarationIndexPublisher:
         repository: OCIRepository,
         *,
         credential: RegistryCredential | None = None,
+        events: EventEmitter | None = None,
     ) -> None:
         self.repository = repository
         selected = credential or RegistryCredential.discover(repository)
@@ -129,6 +131,7 @@ class OCIDeclarationIndexPublisher:
             username=selected.username,
             password=selected.password,
         )
+        self.events = events or EventEmitter()
 
     def publish(
         self, sources: Sequence[DeclarationShardSource], *, lock_id: str
@@ -142,10 +145,25 @@ class OCIDeclarationIndexPublisher:
             shards: list[DeclarationShard] = []
             layers: list[dict[str, Any]] = []
             compressed_paths: list[Path] = []
+            total_source_bytes = sum(
+                item.path.expanduser().resolve().stat().st_size for item in sources
+            )
+            compression = CountedProgress(
+                self.events.emit,
+                "declaration_index.compress",
+                "Hashing and compressing declaration shards",
+                total_source_bytes * 2,
+                phase="declaration-index",
+                unit="bytes",
+            )
+            compression.start()
+            processed_bytes = 0
             for position, source in enumerate(sources):
                 selected_path = source.path.expanduser().resolve()
                 DeclarationIndex(selected_path, expected_shard_id=source.shard_id)
                 sqlite_digest = digest_path(selected_path)
+                processed_bytes += selected_path.stat().st_size
+                compression.advance(source.package, to=processed_bytes)
                 compressed = root / f"{position:04d}-{source.shard_id}.sqlite.zst"
                 with (
                     selected_path.open("rb") as raw,
@@ -156,6 +174,8 @@ class OCIDeclarationIndexPublisher:
                 ):
                     while chunk := raw.read(1024 * 1024):
                         encoder.write(chunk)
+                        processed_bytes += len(chunk)
+                        compression.advance(source.package, to=processed_bytes)
                 layer = blob_descriptor_path(
                     compressed,
                     DECLARATION_INDEX_LAYER_MEDIA_TYPE,
@@ -188,6 +208,14 @@ class OCIDeclarationIndexPublisher:
                 )
             )
             config_descriptor = blob_descriptor_path(config, DECLARATION_INDEX_CONFIG_MEDIA_TYPE)
+            uploads = CountedProgress(
+                self.events.emit,
+                "declaration_index.upload",
+                "Uploading declaration shards",
+                len(compressed_paths) + 1,
+                phase="declaration-index",
+            )
+            uploads.start()
             for path, descriptor in zip(
                 (config, *compressed_paths), (config_descriptor, *layers), strict=True
             ):
@@ -198,6 +226,7 @@ class OCIDeclarationIndexPublisher:
                     reused_bytes += path.stat().st_size
                 else:
                     uploaded_bytes += path.stat().st_size
+                uploads.advance(path.name)
             manifest = canonical_json_bytes(
                 {
                     "schemaVersion": 2,
@@ -341,6 +370,14 @@ class OCIDeclarationIndexLibrary:
             )
         sources: dict[str, Path] = {}
         temporaries: list[Path] = []
+        unpacking = CountedProgress(
+            self.events.emit,
+            "declaration_index.unpack",
+            "Verifying declaration shards",
+            len(missing),
+            phase="declaration-index",
+        )
+        unpacking.start()
         try:
             for shard in missing:
                 descriptor = descriptors[shard.layer_digest]
@@ -383,6 +420,7 @@ class OCIDeclarationIndexLibrary:
                     raise EnvironmentError("declaration shard SQLite digest mismatch")
                 DeclarationIndex(temporary, expected_shard_id=shard.shard_id)
                 sources[shard.shard_id] = temporary
+                unpacking.advance(shard.package)
             self.store.publish_declaration_index_shards(
                 lock_id,
                 shards,

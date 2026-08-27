@@ -29,7 +29,7 @@ from .bundles import (
 from .diagnostics import error_diagnostic, parse_diagnostics
 from .environments import InteractiveSession
 from .errors import DownloadUnavailable, EnvironmentError, PolicyError
-from .events import EventEmitter
+from .events import EventEmitter, current
 from .locking import FileLock
 from .models import ExecutionProvenance, ExecutionResult, PhaseTiming
 from .oci import (
@@ -55,6 +55,7 @@ from .oci_protocol import (
     require_media_type as _require_media_type,
 )
 from .policies import ExecutionPolicy
+from .progress import CountedProgress
 from .serialization import canonical_json_bytes, sha256_id, write_json_atomic
 from .store import EnvironmentStore, clone_tree, platform_compatibility, platform_record
 
@@ -86,8 +87,26 @@ def _relative_executable(value: str) -> str:
 
 
 def _file_inventory(root: Path) -> dict[str, dict[str, Any]]:
+    scan = CountedProgress(
+        current().emit,
+        "program.payload_scan",
+        f"Scanning program payload {root.name}",
+        1,
+        phase="program",
+    )
+    scan.start()
+    paths = sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())
+    scan.advance(f"{len(paths)} entries")
+    progress = CountedProgress(
+        current().emit,
+        "program.payload_inventory",
+        "Hashing program payload",
+        len(paths),
+        phase="program",
+    )
+    progress.start()
     inventory: dict[str, dict[str, Any]] = {}
-    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+    for path in paths:
         relative = path.relative_to(root).as_posix()
         if path.is_symlink():
             target = os.readlink(path)
@@ -104,6 +123,7 @@ def _file_inventory(root: Path) -> dict[str, dict[str, Any]]:
             }
         elif not path.is_dir():
             raise EnvironmentError(f"program contains unsupported entry: {relative}")
+        progress.advance(relative)
     if not inventory:
         raise EnvironmentError("program payload must not be empty")
     return inventory
@@ -694,9 +714,19 @@ class ProgramLibrary:
             ]
             manifest_data = manifest_path.read_bytes()
             manifest = _json_object(manifest_data, "program manifest")
-            for item in [manifest["config"], *manifest["layers"]]:
+            upload_items = [manifest["config"], *manifest["layers"]]
+            uploads = CountedProgress(
+                self.events.emit,
+                "program.upload",
+                "Uploading program",
+                len(upload_items),
+                phase="program",
+            )
+            uploads.start()
+            for item in upload_items:
                 blob = entries["blobs/sha256/" + str(item["digest"]).removeprefix("sha256:")]
                 self.client.upload_blob(blob, str(item["digest"]))
+                uploads.advance(blob.name)
             digest = self.client.publish_manifest(
                 str(descriptor["digest"]), manifest_data, MANIFEST_MEDIA_TYPE
             )

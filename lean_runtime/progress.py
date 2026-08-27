@@ -110,6 +110,7 @@ class CountedProgress:
         total: int,
         *,
         phase: str | None = None,
+        unit: str | None = None,
         clock: Callable[[], float] = time.monotonic,
         interval: float = 0.2,
     ) -> None:
@@ -119,9 +120,14 @@ class CountedProgress:
         self.total = max(total, 0)
         self.current = 0
         self._phase = phase
+        self._unit = unit
         self._clock = clock
         self._interval = interval
         self._last_at: float | None = None
+
+    def start(self, detail: str = "") -> None:
+        """Announce the work before its first potentially slow step."""
+        self._emit_current(detail, self._clock())
 
     def advance(self, detail: str = "", *, to: int | None = None) -> None:
         self.current = min(self.total, self.current + 1 if to is None else to)
@@ -129,16 +135,24 @@ class CountedProgress:
         due = self._last_at is None or now - self._last_at >= self._interval
         if not due and self.current < self.total:
             return
+        self._emit_current(detail, now)
+
+    def _emit_current(self, detail: str, now: float) -> None:
         self._last_at = now
         suffix = f" {detail}" if detail else ""
+        data: dict[str, Any] = {
+            "label": self.label,
+            "current": self.current,
+            "total": self.total,
+            "detail": detail[:_MAX_LINE],
+        }
+        if self._unit is not None:
+            data["unit"] = self._unit
         self._emit(
             self.kind,
             f"{self.label}: {self.current}/{self.total}{suffix}",
             phase=self._phase,
-            label=self.label,
-            current=self.current,
-            total=self.total,
-            detail=detail[:_MAX_LINE],
+            **data,
         )
 
 

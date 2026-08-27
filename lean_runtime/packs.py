@@ -18,7 +18,9 @@ import zstandard
 
 from .capsules import ArtifactCapability, CapsuleArtifact, CapsuleManifest
 from .errors import EnvironmentError
+from .events import current
 from .locking import FileLock
+from .progress import CountedProgress
 
 PACK_SCHEMA = "lean-runtime-sparse-pack/1"
 PACK_MEDIA_TYPE = "application/vnd.lean-runtime.sparse-pack.v1+zstd"
@@ -224,52 +226,65 @@ def build_sparse_packs(
 
     output.mkdir(parents=True, exist_ok=True)
     compressor = zstandard.ZstdCompressor(level=10, write_checksum=True, threads=0)
+    plans = [
+        (package, capability, shard_index, tuple(_frame_groups(shard, target_frame_bytes)))
+        for (package, capability), modules in sorted(grouped.items())
+        for shard_index, shard in enumerate(_pack_shards(sorted(modules)))
+    ]
+    progress = CountedProgress(
+        current().emit,
+        "capsule.pack_progress",
+        "Compressing capsule frames",
+        sum(len(groups) for _package, _capability, _index, groups in plans),
+        phase="capsule",
+    )
+    progress.start()
     packs: list[SparsePack] = []
-    for (package, capability), modules in sorted(grouped.items()):
-        for shard_index, shard in enumerate(_pack_shards(sorted(modules))):
-            temporary = output / (f".{package}-{capability}-{shard_index}-{os.getpid()}.partial")
-            frames: list[PackFrame] = []
-            offset = 0
-            try:
-                with temporary.open("wb") as handle:
-                    for group in _frame_groups(shard, target_frame_bytes):
-                        frame_artifacts = tuple(item for _name, items in group for item in items)
-                        raw = _encode_frame(workspace, frame_artifacts)
-                        if len(raw) > MAX_FRAME_BYTES:
-                            raise EnvironmentError(
-                                f"capsule frame exceeds {MAX_FRAME_BYTES} bytes uncompressed"
-                            )
-                        compressed = compressor.compress(raw)
-                        handle.write(compressed)
-                        frames.append(
-                            PackFrame(
-                                offset,
-                                len(compressed),
-                                len(raw),
-                                _digest(compressed),
-                                tuple(name for name, _items in group),
-                                tuple(item.path for item in frame_artifacts),
-                            )
+    for package, capability, shard_index, groups in plans:
+        temporary = output / (f".{package}-{capability}-{shard_index}-{os.getpid()}.partial")
+        frames: list[PackFrame] = []
+        offset = 0
+        try:
+            with temporary.open("wb") as handle:
+                for group in groups:
+                    frame_artifacts = tuple(item for _name, items in group for item in items)
+                    raw = _encode_frame(workspace, frame_artifacts)
+                    if len(raw) > MAX_FRAME_BYTES:
+                        raise EnvironmentError(
+                            f"capsule frame exceeds {MAX_FRAME_BYTES} bytes uncompressed"
                         )
-                        offset += len(compressed)
-                digest = _digest_path(temporary)
-                destination = output / f"{digest.removeprefix('sha256:')}.lrpack"
-                if destination.exists():
-                    temporary.unlink()
-                else:
-                    temporary.replace(destination)
-                packs.append(
-                    SparsePack(
-                        package,
-                        capability,
-                        digest,
-                        destination.stat().st_size,
-                        tuple(frames),
-                        destination,
+                    compressed = compressor.compress(raw)
+                    handle.write(compressed)
+                    frames.append(
+                        PackFrame(
+                            offset,
+                            len(compressed),
+                            len(raw),
+                            _digest(compressed),
+                            tuple(name for name, _items in group),
+                            tuple(item.path for item in frame_artifacts),
+                        )
                     )
+                    offset += len(compressed)
+                    progress.advance(f"{package}/{capability}")
+            digest = _digest_path(temporary)
+            destination = output / f"{digest.removeprefix('sha256:')}.lrpack"
+            if destination.exists():
+                temporary.unlink()
+            else:
+                temporary.replace(destination)
+            packs.append(
+                SparsePack(
+                    package,
+                    capability,
+                    digest,
+                    destination.stat().st_size,
+                    tuple(frames),
+                    destination,
                 )
-            finally:
-                temporary.unlink(missing_ok=True)
+            )
+        finally:
+            temporary.unlink(missing_ok=True)
     return tuple(packs)
 
 

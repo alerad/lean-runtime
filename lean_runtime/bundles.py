@@ -13,10 +13,11 @@ import tarfile
 import tempfile
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Protocol
 
 import zstandard
 
@@ -82,6 +83,53 @@ SOURCE_TREE_INVENTORY = ".lean-runtime-source-tree.json"
 MAX_CAPSULE_CONFIG_BYTES = 64 * 1024**2
 
 
+class _BinaryReader(Protocol):
+    def read(self, size: int = -1) -> bytes: ...
+
+    def readinto(self, buffer: Any) -> int | None: ...
+
+    def seek(self, offset: int, whence: int = 0) -> int: ...
+
+    def tell(self) -> int: ...
+
+
+class _ProgressReader:
+    """Report bytes after a consumer has actually read them."""
+
+    def __init__(
+        self, handle: _BinaryReader, progress: CountedProgress, *, offset: int = 0
+    ) -> None:
+        self._handle = handle
+        self._progress = progress
+        self._offset = offset
+        self._furthest = offset
+
+    def _report(self) -> None:
+        position = self._offset + self._handle.tell()
+        if position > self._furthest:
+            self._furthest = position
+            self._progress.advance(to=position)
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._handle.read(size)
+        self._report()
+        return data
+
+    def readinto(self, buffer: Any) -> int:
+        count = self._handle.readinto(buffer)
+        self._report()
+        return count if count is not None else 0
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return self._handle.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self._handle.tell()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._handle, name)
+
+
 @dataclass(frozen=True, slots=True)
 class PortableCopyInfo:
     environment_id: str
@@ -131,7 +179,16 @@ def _tree_entries(
     excluded_names: frozenset[str] = frozenset(),
     omit_volatile_build_metadata: bool = False,
 ) -> Iterable[tuple[Path, str]]:
+    scan = CountedProgress(
+        current().emit,
+        "bundle.tree_scan",
+        f"Scanning {root.name}",
+        1,
+        phase="bundle",
+    )
+    scan.start()
     paths = sorted(root.rglob("*"), key=lambda value: value.relative_to(root).as_posix())
+    scan.advance(f"{len(paths)} entries")
     progress = CountedProgress(
         current().emit,
         "bundle.tree_inventory",
@@ -139,9 +196,10 @@ def _tree_entries(
         len(paths),
         phase="bundle",
     )
+    progress.start()
     for path in paths:
-        progress.advance()
         if excluded is not None and (path == excluded or excluded in path.parents):
+            progress.advance(path.relative_to(root).as_posix())
             continue
         relative = path.relative_to(root)
         if relative.parts and relative.parts[0] in excluded_names:
@@ -155,8 +213,10 @@ def _tree_entries(
                 or relative.name.endswith(".rsp")
             )
         ):
+            progress.advance(relative.as_posix())
             continue
         yield path, relative.as_posix()
+        progress.advance(relative.as_posix())
 
 
 def _write_tar_gzip(
@@ -229,6 +289,18 @@ def _oci_archive(entries: dict[str, bytes]) -> bytes:
 
 
 def _write_oci_archive(entries: dict[str, Path], output: Path) -> None:
+    ordered = sorted(entries.items())
+    total = sum(path.stat().st_size for _name, path in ordered)
+    progress = CountedProgress(
+        current().emit,
+        "bundle.archive_write",
+        "Writing portable archive",
+        total,
+        phase="bundle",
+        unit="bytes",
+    )
+    progress.start()
+    written = 0
     with (
         output.open("wb") as raw_output,
         gzip.GzipFile(
@@ -236,11 +308,13 @@ def _write_oci_archive(entries: dict[str, Path], output: Path) -> None:
         ) as compressed,
         tarfile.open(fileobj=compressed, mode="w|", format=tarfile.PAX_FORMAT) as archive,
     ):
-        for name, path in sorted(entries.items()):
+        for name, path in ordered:
             info = _normalized_info(name, mode=0o644)
             info.size = path.stat().st_size
             with path.open("rb") as handle:
-                archive.addfile(info, handle)
+                archive.addfile(info, _ProgressReader(handle, progress, offset=written))
+            written += info.size
+            progress.advance(name, to=written)
 
 
 def _safe_name(name: str) -> PurePosixPath:
@@ -325,16 +399,32 @@ def _extract_layer(data: bytes | Path, destination: Path) -> None:
     if destination.is_symlink():
         raise EnvironmentError("bundle extraction destination must not be a symlink")
     destination.mkdir(parents=True, exist_ok=True)
+    progress: CountedProgress | None = None
+    raw_handle: Any = None
     try:
         if isinstance(data, Path):
-            archive = tarfile.open(data, mode="r:gz")  # noqa: SIM115
+            raw_handle = data.open("rb")
+            progress = CountedProgress(
+                current().emit,
+                "bundle.layer_extract",
+                f"Extracting {destination.name}",
+                data.stat().st_size,
+                phase="bundle",
+                unit="bytes",
+            )
+            progress.start()
+            archive = tarfile.open(  # noqa: SIM115
+                fileobj=_ProgressReader(raw_handle, progress), mode="r:gz"
+            )
         else:
             archive = tarfile.open(  # noqa: SIM115
                 fileobj=io.BytesIO(data), mode="r:gz"
             )
     except (tarfile.TarError, OSError) as exc:
+        if raw_handle is not None:
+            raw_handle.close()
         raise EnvironmentError("bundle layer is not a valid gzip tar archive") from exc
-    with archive:
+    with archive, raw_handle if raw_handle is not None else nullcontext():
         for member in archive:
             count += 1
             total += member.size
@@ -363,6 +453,8 @@ def _extract_layer(data: bytes | Path, destination: Path) -> None:
                 target.symlink_to(member.linkname)
             else:
                 raise EnvironmentError(f"unsupported bundle member: {member.name!r}")
+    if progress is not None:
+        progress.advance(to=progress.total)
 
 
 def _git_object_id(kind: str, data: bytes) -> str:
@@ -1122,11 +1214,26 @@ class EnvironmentBundles:
         entries: dict[str, Path] = {}
         total = 0
         count = 0
+        byte_progress = CountedProgress(
+            current().emit,
+            "bundle.archive_extract",
+            f"Reading {bundle.name}",
+            bundle.stat().st_size,
+            phase="bundle",
+            unit="bytes",
+        )
+        byte_progress.start()
+        raw_handle: Any = None
         try:
-            archive = tarfile.open(bundle, mode="r:gz")  # noqa: SIM115
+            raw_handle = bundle.open("rb")
+            archive = tarfile.open(  # noqa: SIM115
+                fileobj=_ProgressReader(raw_handle, byte_progress), mode="r:gz"
+            )
         except (tarfile.TarError, OSError) as exc:
+            if raw_handle is not None:
+                raw_handle.close()
             raise EnvironmentError(f"could not read OCI bundle: {bundle}") from exc
-        with archive:
+        with archive, raw_handle:
             for member in archive:
                 count += 1
                 if count > MAX_FILES:
@@ -1146,6 +1253,7 @@ class EnvironmentBundles:
                 with path.open("wb") as output:
                     shutil.copyfileobj(source, output)
                 entries[member.name] = path
+        byte_progress.advance(to=byte_progress.total)
         return entries
 
     def _import_capsule_layout(

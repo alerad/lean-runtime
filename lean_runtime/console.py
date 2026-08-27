@@ -152,6 +152,7 @@ class ConsoleRenderer:
                     event.data["current"],
                     event.data["total"],
                     str(event.data.get("detail") or ""),
+                    bytes_unit=event.data.get("unit") == "bytes",
                 )
 
     def note(self, message: str) -> None:
@@ -392,7 +393,11 @@ class ConsoleRenderer:
             return
         self._render_count_progress(label, current, total, str(event.data.get(detail_key) or ""))
 
-    def _render_count_progress(self, label: str, current: int, total: int, detail: str) -> None:
+    def _render_count_progress(
+        self, label: str, current: int, total: int, detail: str, *, bytes_unit: bool = False
+    ) -> None:
+        if total <= 0:
+            return
         current = min(current, total)
         if self.mode == "tty":
             now = self._clock()
@@ -406,10 +411,15 @@ class ConsoleRenderer:
             filled = _BAR_WIDTH * current // total
             bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
             suffix = f" · {_truncate(detail, _DETAIL_WIDTH)}" if detail else ""
-            plain = f"{label} [{bar}] {current}/{total}{suffix}"
+            amount = (
+                f"{format_byte_size(current)}/{format_byte_size(total)}"
+                if bytes_unit
+                else f"{current}/{total}"
+            )
+            plain = f"{label} [{bar}] {amount}{suffix}"
             styled = (
                 f"{label} [{self.style.cyan(bar)}] "
-                f"{self.style.bold(f'{current}/{total}')}{self.style.dim(suffix)}"
+                f"{self.style.bold(amount)}{self.style.dim(suffix)}"
             )
             self._draw_line(plain, styled)
             if current >= total:
@@ -421,7 +431,12 @@ class ConsoleRenderer:
             self._count_checkpoint = _PLAIN_CHECKPOINT_PERCENT
         percent = current * 100 // total
         while self._count_checkpoint <= percent:
-            self._print(f"{label}: {self._count_checkpoint}% ({current}/{total})")
+            amount = (
+                f"{format_byte_size(current)}/{format_byte_size(total)}"
+                if bytes_unit
+                else f"{current}/{total}"
+            )
+            self._print(f"{label}: {self._count_checkpoint}% ({amount})")
             self._count_checkpoint += _PLAIN_CHECKPOINT_PERCENT
 
     # -- low-level output -----------------------------------------------

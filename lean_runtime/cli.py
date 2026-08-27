@@ -1970,9 +1970,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             if declined is not None:
                 return declined
-            di_publication = OCIDeclarationIndexPublisher(di_repository).publish(
-                tuple(di_item.source for di_item in built.shards), lock_id=lock.lock_id
-            )
+            di_publication = OCIDeclarationIndexPublisher(
+                di_repository, events=runtime.events
+            ).publish(tuple(di_item.source for di_item in built.shards), lock_id=lock.lock_id)
             if args.sign:
                 CosignVerifier(executable=runtime.verification_executable).sign(
                     di_repository, di_publication.manifest_digest

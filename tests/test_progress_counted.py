@@ -51,6 +51,38 @@ def test_counted_progress_advance_to_and_zero_total() -> None:
     assert collected[-1].data["current"] == 0 and collected[-1].data["total"] == 0
 
 
+def test_counted_progress_can_announce_zero_before_work() -> None:
+    collected, emitter = _collect()
+    progress = CountedProgress(emitter.emit, "demo.count", "Working", 2)
+    progress.start("starting")
+    progress.advance("first")
+    progress.advance("second")
+    assert [event.data["current"] for event in collected] == [0, 2]
+    assert collected[0].message == "Working: 0/2 starting"
+
+
+def test_renderer_formats_byte_counted_progress() -> None:
+    stream = io.StringIO()
+    renderer = ConsoleRenderer(stream=stream, mode="plain", color=False)
+    renderer(
+        RuntimeEvent(
+            kind="bundle.archive_write",
+            message="x",
+            data={
+                "label": "Writing archive",
+                "current": 512,
+                "total": 1024,
+                "unit": "bytes",
+            },
+        )
+    )
+    renderer.close()
+    assert stream.getvalue().splitlines() == [
+        "Writing archive: 25% (512 B/1 KiB)",
+        "Writing archive: 50% (512 B/1 KiB)",
+    ]
+
+
 def test_current_emitter_is_null_until_activated() -> None:
     assert events.current().callback is None or isinstance(events.current(), EventEmitter)
     collected, emitter = _collect()
@@ -82,7 +114,8 @@ def test_source_snapshot_digest_reports_counted_progress(tmp_path: Path) -> None
         events._current_emitter.reset(token)
     assert digest.startswith("sha256:")
     counted = [event for event in collected if event.kind == "source.snapshot_digest"]
-    assert counted and counted[-1].data["current"] == counted[-1].data["total"] == 2
+    assert [event.data["current"] for event in counted] == [0, 2]
+    assert counted[-1].data["current"] == counted[-1].data["total"] == 2
     assert counted[-1].data["label"] == "Hashing tree"
     assert counted[-1].phase == "fingerprint"
 
