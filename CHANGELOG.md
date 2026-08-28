@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Keep ordinary project builds and checks local to their declared graph. Opening,
+  checking, or building a project no longer silently enrolls it in the global
+  dependency-donor registry; `project scan` and `adopt` remain the explicit
+  enrollment operations. Registered donors are indexed and rejected by Git URL
+  and commit before their Lake manifests or path dependencies are inspected, so
+  unrelated remembered projects are never recursively hashed. Legacy registries
+  acquire the URL index through one lightweight migration pass.
+- Bound repeated project-build preparation: use clean tracked Git blob identities
+  and Git pathspec inventory instead of rereading whole source trees (while still
+  content-hashing dirty and untracked files), reuse managed-package tree hashes,
+  pass the existing workspace digest into identifier suggestions, and skip
+  Mathlib cache hydration once its build tree is already ready. These changes
+  preserve provenance while removing redundant reads and subprocesses from warm
+  builds and failures.
 - Hydrate Mathlib's upstream build cache when `new` has no exact shared project
   or downloadable environment to seed from. The cold-start fallback previously
   opened the catalog environment without enabling the trusted URL-keyed

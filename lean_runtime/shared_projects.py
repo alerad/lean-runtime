@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from ._git import git_command
 from ._paths import is_link, remove_tree
-from .errors import ProjectError
+from .errors import EnvironmentError, ProjectError
 from .events import EventEmitter
 from .locking import FileLock
 from .package_ids import (
@@ -575,6 +575,7 @@ class SharedProjectManager:
         self.home.mkdir(parents=True, exist_ok=True)
         with FileLock(self.locks / "project-seeds.lock", timeout=30):
             roots: list[str] = []
+            records: dict[str, dict[str, str]] = {}
             try:
                 value = json.loads(self.seed_registry.read_text(encoding="utf-8"))
                 if (
@@ -583,14 +584,38 @@ class SharedProjectManager:
                     and isinstance(value.get("roots"), list)
                 ):
                     roots = [str(item) for item in value["roots"] if isinstance(item, str)]
+                    raw_records = value.get("projects", [])
+                    if isinstance(raw_records, list):
+                        records = {
+                            str(item["root"]): {
+                                key: str(item[key])
+                                for key in ("root", "remote", "head")
+                                if key in item and isinstance(item[key], str)
+                            }
+                            for item in raw_records
+                            if isinstance(item, dict) and isinstance(item.get("root"), str)
+                        }
             except (OSError, json.JSONDecodeError):
                 pass
             selected = str(context.root.resolve())
             roots = [root for root in roots if root != selected and Path(root).is_dir()]
             roots.append(selected)
+            records = {root: records[root] for root in roots if root in records}
+            record = {"root": selected}
+            remote = _git_remote(context.root)
+            head = _git_head(context.root)
+            if remote is not None:
+                record["remote"] = _canonical_git_url(remote)
+            if head is not None:
+                record["head"] = head
+            records[selected] = record
             write_json_atomic(
                 self.seed_registry,
-                {"schema": PROJECT_SEED_REGISTRY_SCHEMA, "roots": roots},
+                {
+                    "schema": PROJECT_SEED_REGISTRY_SCHEMA,
+                    "roots": roots,
+                    "projects": [records[root] for root in roots if root in records],
+                },
             )
 
     def remembered_roots(self) -> tuple[Path, ...]:
@@ -610,6 +635,72 @@ class SharedProjectManager:
             for item in reversed(value["roots"])
             if isinstance(item, str) and Path(item).is_dir()
         )
+
+    def remembered_roots_for_urls(self, urls: set[str]) -> tuple[Path, ...]:
+        """Return roots whose recorded or observed Git remote is requested.
+
+        New registry entries carry this cheap index. Legacy entries are probed
+        once for compatibility, but no Lake manifests or project trees are read.
+        """
+        canonical = {_canonical_git_url(url) for url in urls}
+        if not canonical:
+            return ()
+        try:
+            value = json.loads(self.seed_registry.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            value = {}
+        raw_records = value.get("projects", []) if isinstance(value, dict) else []
+        recorded = {
+            str(item["root"]): str(item["remote"])
+            for item in raw_records
+            if isinstance(item, dict)
+            and isinstance(item.get("root"), str)
+            and isinstance(item.get("remote"), str)
+        }
+        selected: list[Path] = []
+        discovered: dict[str, str] = {}
+        for root in self.remembered_roots():
+            remote = recorded.get(str(root))
+            if remote is None:
+                remote = _git_remote(root)
+                if remote is not None:
+                    remote = _canonical_git_url(remote)
+                    discovered[str(root)] = remote
+            if remote is not None and _canonical_git_url(remote) in canonical:
+                selected.append(root)
+        if discovered:
+            # Upgrade legacy roots lazily so the one cheap Git-remote pass is
+            # not repeated by every future CLI invocation.
+            with suppress(
+                OSError, EnvironmentError, json.JSONDecodeError, KeyError, TypeError
+            ), FileLock(self.locks / "project-seeds.lock", timeout=0.1):
+                current = json.loads(self.seed_registry.read_text(encoding="utf-8"))
+                roots = [
+                    str(item)
+                    for item in current.get("roots", [])
+                    if isinstance(item, str) and Path(item).is_dir()
+                ]
+                current_records = {
+                    str(item["root"]): dict(item)
+                    for item in current.get("projects", [])
+                    if isinstance(item, dict) and isinstance(item.get("root"), str)
+                }
+                for root_text, remote in discovered.items():
+                    if root_text in roots:
+                        current_records.setdefault(root_text, {"root": root_text})[
+                            "remote"
+                        ] = remote
+                write_json_atomic(
+                    self.seed_registry,
+                    {
+                        "schema": PROJECT_SEED_REGISTRY_SCHEMA,
+                        "roots": roots,
+                        "projects": [
+                            current_records[root] for root in roots if root in current_records
+                        ],
+                    },
+                )
+        return tuple(selected)
 
     def registered_graph_seeds(
         self,
@@ -717,24 +808,34 @@ class SharedProjectManager:
             }
         selected: dict[str, RememberedPackageSeed] = {}
         scores: dict[str, tuple[bool, int]] = {}
-        for root in self.remembered_roots():
+        requested = {
+            (_canonical_git_url(str(entry.get("url"))), str(entry.get("rev")))
+            for entry in entries
+            if entry.get("type") == "git"
+            and isinstance(entry.get("url"), str)
+            and isinstance(entry.get("rev"), str)
+        }
+        requested_urls = {url for url, _revision in requested}
+        for root in self.remembered_roots_for_urls(requested_urls):
             if root.resolve() == context.root.resolve():
+                continue
+            # Reject unrelated repositories before loading their Lake graph. In
+            # particular, resolving a producer graph can hash arbitrarily large
+            # path dependencies, which is never relevant when URL/HEAD differ.
+            remote = _git_remote(root)
+            head = _git_head(root)
+            if (
+                remote is None
+                or head is None
+                or (_canonical_git_url(remote), head) not in requested
+                or not _git_clean_project_seed(root)
+            ):
                 continue
             try:
                 producer = discover_project(root)
-                producer_manifest = _load_manifest(producer)
-                producer_entries = producer_manifest["packages"]
-                producer_resolved = _resolved_path_entries(producer, producer_entries)
             except ProjectError:
                 continue
-            remote = _git_remote(producer.root)
-            head = _git_head(producer.root)
-            if remote is None or head is None or not _git_clean_project_seed(producer.root):
-                continue
-            producer_effective = {
-                str(entry["name"]): _entry_identity(identity_entry)
-                for entry, identity_entry in zip(producer_entries, producer_resolved, strict=True)
-            }
+            producer_effective: dict[str, dict[str, Any]] | None = None
             for entry in entries:
                 if entry.get("type") != "git":
                     continue
@@ -776,6 +877,22 @@ class SharedProjectManager:
                         f"consumer {context.toolchain}"
                     )
                 else:
+                    if producer_effective is None:
+                        try:
+                            producer_manifest = _load_manifest(producer)
+                            producer_entries = producer_manifest["packages"]
+                            producer_resolved = _resolved_path_entries(
+                                producer, producer_entries
+                            )
+                        except ProjectError:
+                            producer_effective = {}
+                        else:
+                            producer_effective = {
+                                str(producer_entry["name"]): _entry_identity(identity_entry)
+                                for producer_entry, identity_entry in zip(
+                                    producer_entries, producer_resolved, strict=True
+                                )
+                            }
                     dependency_names = _dependency_names(
                         source_package,
                         str(entry.get("manifestFile", "lake-manifest.json")),
@@ -1040,7 +1157,7 @@ class SharedProjectManager:
         candidates = [seed] if seed is not None else []
         if self.sources.is_dir():
             candidates.extend(path for path in self.sources.iterdir() if path.is_dir())
-        candidates.extend(self.remembered_roots())
+        candidates.extend(self.remembered_roots_for_urls({_canonical_git_url(url)}))
         for candidate in candidates:
             if (
                 candidate is not None

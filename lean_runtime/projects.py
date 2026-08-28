@@ -14,6 +14,7 @@ import threading
 import urllib.parse
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -29,6 +30,7 @@ from .errors import ProjectError, ProjectNotFoundError
 from .events import current
 from .models import ExecutionResult, PackageProvenance, ProjectProvenance
 from .policies import ExecutionPolicy
+from .serialization import write_json_atomic
 from .toolchains import normalize_toolchain
 
 if TYPE_CHECKING:
@@ -440,7 +442,7 @@ class ProjectContext:
                     result.append((source_root, root_parts))
         return tuple(result)
 
-    def source_digest(self) -> str:
+    def source_digest(self, *, blob_cache_path: Path | None = None) -> str:
         """Hash only the content Lake compiles: configuration and module sources.
 
         Unlike :func:`source_snapshot_digest`, which fingerprints a whole tree,
@@ -450,16 +452,53 @@ class ProjectContext:
         changes, which is what the header cache keys on.
         """
         digest = hashlib.sha256()
+        try:
+            cache_document = (
+                json.loads(blob_cache_path.read_text(encoding="utf-8"))
+                if blob_cache_path
+                else {}
+            )
+            cached_blobs = (
+                cache_document.get("blobs", {})
+                if cache_document.get("schema") == "lean-runtime-git-blob-digests/1"
+                else {}
+            )
+            if not isinstance(cached_blobs, dict):
+                cached_blobs = {}
+        except (OSError, json.JSONDecodeError, AttributeError):
+            cached_blobs = {}
+        observed_blobs = dict(cached_blobs)
+        tracked_blobs: dict[str, str] = {}
+        tracked_status = _git(self.root, "status", "--porcelain", "--untracked-files=no")
+        if tracked_status == "":
+            index = _git(self.root, "ls-files", "--stage", "-z")
+            if index is not None:
+                for record in index.split("\0"):
+                    metadata, separator, raw_path = record.partition("\t")
+                    fields = metadata.split()
+                    if separator and len(fields) == 3 and fields[2] == "0":
+                        tracked_blobs[Path(raw_path).as_posix()] = fields[1]
 
         def add_file(path: Path) -> None:
             try:
-                mode = path.stat().st_mode & 0o111
+                stat = path.stat()
+                mode = stat.st_mode & 0o111
                 relative = path.relative_to(self.root).as_posix()
-                with path.open("rb") as handle:
-                    digest.update(b"file\0" + relative.encode() + b"\0")
-                    digest.update(str(mode).encode() + b"\0")
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        digest.update(chunk)
+                blob = tracked_blobs.get(relative)
+                content_digest = cached_blobs.get(blob) if blob is not None else None
+                if not isinstance(content_digest, str):
+                    content_digest = None
+                if content_digest is None:
+                    content = hashlib.sha256()
+                    with path.open("rb") as handle:
+                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                            content.update(chunk)
+                    content_digest = content.hexdigest()
+                    if blob is not None:
+                        observed_blobs[blob] = content_digest
+                digest.update(b"file-v2\0" + relative.encode() + b"\0")
+                digest.update(str(mode).encode() + b"\0")
+                digest.update(content_digest.encode() + b"\0")
             except OSError:
                 return
 
@@ -469,6 +508,30 @@ class ProjectContext:
                 add_file(candidate)
         seen: set[Path] = set()
         module_files, directories_to_walk = self._source_locations()
+        if directories_to_walk == (self.root,):
+            # Opaque Lake configuration cannot describe its source roots to us.
+            # In a Git checkout, let Git apply the recursive pathspec instead of
+            # walking every dataset/build/tooling directory in Python.
+            inventory = _git(
+                self.root,
+                "ls-files",
+                "--cached",
+                "--others",
+                "--",
+                "*.lean",
+                ":(exclude).lake/**",
+            )
+            if inventory is not None:
+                candidates: list[Path] = []
+                for raw in inventory.splitlines():
+                    relative = Path(raw)
+                    if relative.is_absolute() or ".." in relative.parts:
+                        continue
+                    candidate = self.root / relative
+                    if candidate.is_file() and not is_link(candidate):
+                        candidates.append(candidate)
+                module_files = tuple(sorted(candidates, key=lambda path: path.as_posix()))
+                directories_to_walk = ()
         for path in module_files:
             if path.is_file() and not is_link(path):
                 seen.add(path)
@@ -489,6 +552,15 @@ class ProjectContext:
                         continue
                     seen.add(path)
                     add_file(path)
+        if blob_cache_path is not None and observed_blobs != cached_blobs:
+            with suppress(OSError):
+                write_json_atomic(
+                    blob_cache_path,
+                    {
+                        "schema": "lean-runtime-git-blob-digests/1",
+                        "blobs": observed_blobs,
+                    },
+                )
         return "sha256:" + digest.hexdigest()
 
     def _source_locations(self) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
@@ -515,7 +587,7 @@ class ProjectContext:
         path = self.root / "lake-manifest.json"
         return path if path.is_file() else None
 
-    def provenance(self) -> ProjectProvenance:
+    def provenance(self, *, blob_cache_path: Path | None = None) -> ProjectProvenance:
         manifest = self.current_manifest()
         revision = _git(self.root, "rev-parse", "HEAD")
         status = _git(self.root, "status", "--porcelain", "--untracked-files=normal")
@@ -530,7 +602,7 @@ class ProjectContext:
             pass
         return ProjectProvenance(
             root=str(self.root),
-            workspace_digest=self.source_digest(),
+            workspace_digest=self.source_digest(blob_cache_path=blob_cache_path),
             lakefile_digest=_file_digest(self.lakefile) or "",
             manifest_digest=_file_digest(manifest) if manifest is not None else None,
             git_revision=revision,
@@ -561,7 +633,20 @@ class ProjectContext:
             if not all(isinstance(item, str) for item in (name, url, revision)):
                 continue
             package = self.root / packages_dir / str(name)
-            tree_hash = _git(package, "rev-parse", f"{revision}^{{tree}}") or ""
+            tree_hash = ""
+            try:
+                marker = json.loads(
+                    (package / ".lean-runtime-package.json").read_text(encoding="utf-8")
+                )
+                source = marker.get("artifact_key", {}).get("source", {})
+                if source.get("revision") == revision and isinstance(
+                    source.get("tree_hash"), str
+                ):
+                    tree_hash = str(source["tree_hash"])
+            except (OSError, json.JSONDecodeError, AttributeError):
+                pass
+            if not tree_hash:
+                tree_hash = _git(package, "rev-parse", f"{revision}^{{tree}}") or ""
             result.append(
                 PackageProvenance(
                     name=str(name),

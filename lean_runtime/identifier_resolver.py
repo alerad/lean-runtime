@@ -22,7 +22,13 @@ class IdentifierResolver:
         self.root = home / "identifier-indexes"
         self._memory: dict[str, dict[str, tuple[str, ...]]] = {}
 
-    def suggestions(self, context: ProjectContext, result: ExecutionResult) -> tuple[str, ...]:
+    def suggestions(
+        self,
+        context: ProjectContext,
+        result: ExecutionResult,
+        *,
+        workspace_digest: str | None = None,
+    ) -> tuple[str, ...]:
         unknown = tuple(
             dict.fromkeys(
                 match.group("name")
@@ -32,7 +38,9 @@ class IdentifierResolver:
         )
         if not unknown:
             return ()
-        workspace = context.provenance().workspace_digest.removeprefix("sha256:")
+        workspace = (workspace_digest or context.provenance().workspace_digest).removeprefix(
+            "sha256:"
+        )
         index = self._index(context, workspace)
         hints: list[str] = []
         for requested in unknown:

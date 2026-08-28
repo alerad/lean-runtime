@@ -9,6 +9,7 @@ its artifact cache without changing the public ``Runtime`` API.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -36,6 +37,7 @@ from .policies import ExecutionPolicy
 from .project_sharing import project_sharing_enabled
 from .projects import ProjectContext
 from .serialization import sha256_text
+from .shared_projects import SharedProjectWorkspace
 
 _MISSING_MODULE = re.compile(
     r"object file .*? of module [`'\"]?(?P<module>[A-Za-z_][A-Za-z0-9_'.]*)[`'\"]? "
@@ -103,7 +105,14 @@ class ProjectExecutor:
             root=str(context.root),
         )
         started = time.monotonic()
-        provenance = context.provenance()
+        runtime_home = vars(self.runtime).get("home")
+        if isinstance(runtime_home, Path):
+            cache_name = hashlib.sha256(str(context.root).encode()).hexdigest() + ".json"
+            provenance = context.provenance(
+                blob_cache_path=runtime_home / "project-fingerprints" / cache_name
+            )
+        else:  # Preserve the small executor seam used by embedders and tests.
+            provenance = context.provenance()
         elapsed = time.monotonic() - started
         self.runtime.events.emit(
             "project.fingerprint_finished",
@@ -245,7 +254,9 @@ class ProjectExecutor:
 
         with self._bootstrap_guard(context):
             result = self._build_missing_local_import(context, text, run(), run, policy, cancel)
-        return self._with_identifier_hints(context, result)
+        return self._with_identifier_hints(
+            context, result, workspace_digest=provenance.workspace_digest
+        )
 
     def check_source(
         self,
@@ -300,7 +311,9 @@ class ProjectExecutor:
                 result = self._build_missing_local_import(
                     context, source, run(), run, policy, cancel
                 )
-            return self._with_identifier_hints(context, result)
+            return self._with_identifier_hints(
+                context, result, workspace_digest=provenance.workspace_digest
+            )
 
     def _build_missing_local_import(
         self,
@@ -356,10 +369,48 @@ class ProjectExecutor:
         )
 
     def _with_identifier_hints(
-        self, context: ProjectContext, result: ExecutionResult
+        self,
+        context: ProjectContext,
+        result: ExecutionResult,
+        *,
+        workspace_digest: str,
     ) -> ExecutionResult:
-        hints = self.runtime.identifier_resolver.suggestions(context, result)
+        hints = self.runtime.identifier_resolver.suggestions(
+            context, result, workspace_digest=workspace_digest
+        )
         return result if not hints else replace(result, hints=hints)
+
+    def _dependency_build_ready(
+        self,
+        context: ProjectContext,
+        workspace: SharedProjectWorkspace | None,
+        package_name: str,
+    ) -> bool:
+        """Avoid rerunning remote cache hydration for an already-built package."""
+        manifest = context.current_manifest()
+        try:
+            document = json.loads(manifest.read_text(encoding="utf-8")) if manifest else {}
+            entries = document.get("packages", [])
+            entry = next(
+                item
+                for item in entries
+                if isinstance(item, dict) and item.get("name") == package_name
+            )
+            subdir = Path(str(entry.get("subDir") or ""))
+            if workspace is None:
+                packages_dir = context.root / str(
+                    document.get("packagesDir", ".lake/packages")
+                )
+                package = packages_dir / package_name
+            else:
+                index = workspace.packages.index(package_name)
+                package = (
+                    self.runtime.shared_projects.packages / workspace.package_ids[index]
+                )
+            lean_build = package / subdir / ".lake" / "build" / "lib" / "lean"
+            return lean_build.is_dir()
+        except (OSError, ValueError, StopIteration, TypeError, AttributeError):
+            return False
 
     def build(
         self,
@@ -420,6 +471,11 @@ class ProjectExecutor:
                 self.runtime.lake_cache.dependency_accelerators(package_provenance)
                 if restore_artifacts and policy.network != "disabled"
                 else ()
+            )
+            accelerators = tuple(
+                accelerator
+                for accelerator in accelerators
+                if not self._dependency_build_ready(context, workspace, accelerator[0])
             )
             for package, requested in accelerators:
                 self.runtime.events.emit(

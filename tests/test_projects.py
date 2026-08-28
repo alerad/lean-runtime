@@ -472,6 +472,53 @@ def test_project_build_can_disable_dependency_artifact_restoration(tmp_path: Pat
     assert ("lake", "build") in toolchains.calls
 
 
+def test_project_build_skips_dependency_hydration_when_build_is_ready(tmp_path: Path) -> None:
+    source = _project_with_mathlib_manifest(tmp_path / "project")
+    lean_build = (
+        tmp_path
+        / "project"
+        / ".lake"
+        / "packages"
+        / "mathlib"
+        / ".lake"
+        / "build"
+        / "lib"
+        / "lean"
+    )
+    lean_build.mkdir(parents=True)
+    toolchains = ArtifactProjectToolchains(tmp_path / "runtime")
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=toolchains,
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    result = runtime.build(source, shared=False)
+
+    assert result.ok
+    assert ("lake", "exe", "cache", "get") not in toolchains.calls
+    assert ("lake", "build") in toolchains.calls
+
+
+def test_normal_project_use_does_not_enroll_a_global_seed(tmp_path: Path) -> None:
+    source = _project(tmp_path / "project")
+    (tmp_path / "project" / "lake-manifest.json").write_text(
+        json.dumps({"version": "1.2.0", "packages": []})
+    )
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+
+    runtime.project(source)
+    runtime.build(source, shared=False, artifact_cache=False)
+
+    assert runtime.shared_projects.remembered_roots() == ()
+    assert runtime.scan_projects(source, recursive=False).projects == (source.parents[1],)
+    assert runtime.shared_projects.remembered_roots() == (source.parents[1],)
+
+
 def test_project_build_offline_policy_skips_dependency_artifact_restoration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1076,6 +1123,80 @@ def test_dirty_remembered_project_is_not_a_package_seed(tmp_path: Path) -> None:
     manifest = json.loads(context.current_manifest().read_text())
 
     assert not runtime.shared_projects.registered_package_seeds(context, manifest["packages"])
+
+
+def test_unrelated_remembered_project_is_rejected_before_path_hashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unrelated = tmp_path / "unrelated"
+    unrelated_source = _project(unrelated)
+    path_dependency = unrelated / "local-data"
+    path_dependency.mkdir()
+    (path_dependency / "large.bin").write_bytes(b"x" * 4096)
+    (unrelated / "lake-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": "1.2.0",
+                "packages": [
+                    {"name": "local-data", "type": "path", "dir": "local-data"}
+                ],
+            }
+        )
+    )
+    subprocess.run(git_command("init", "--quiet", str(unrelated)), check=True)
+    subprocess.run(
+        git_command(
+            "-C", str(unrelated), "remote", "add", "origin", "https://example.invalid/other"
+        ),
+        check=True,
+    )
+    subprocess.run(git_command("-C", str(unrelated), "add", "."), check=True)
+    subprocess.run(
+        git_command(
+            "-C",
+            str(unrelated),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ),
+        check=True,
+    )
+    consumer_source = _project(tmp_path / "consumer")
+    consumer_manifest = {
+        "version": "1.2.0",
+        "packages": [
+            {
+                "name": "wanted",
+                "type": "git",
+                "url": "https://example.invalid/wanted",
+                "rev": "a" * 40,
+            }
+        ],
+    }
+    (tmp_path / "consumer" / "lake-manifest.json").write_text(json.dumps(consumer_manifest))
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        toolchains=ProjectToolchains(tmp_path / "runtime"),
+        libraries=[],  # type: ignore[arg-type]
+    )
+    runtime.shared_projects.remember_project(discover_project(unrelated_source))
+
+    def reject_hash(_path: Path) -> str:
+        raise AssertionError("unrelated path dependency was hashed")
+
+    monkeypatch.setattr("lean_runtime.shared_projects.source_snapshot_digest", reject_hash)
+
+    context = discover_project(consumer_source)
+    assert runtime.shared_projects.registered_package_seeds(
+        context, consumer_manifest["packages"]
+    ) == {}
+    registry = json.loads(runtime.shared_projects.seed_registry.read_text())
+    assert registry["projects"][0]["remote"] == "https://example.invalid/other"
 
 
 def test_adoption_does_not_mistake_the_parent_repository_for_a_package(tmp_path: Path) -> None:
@@ -1907,6 +2028,62 @@ def test_project_source_digest_walks_whole_tree_without_declared_targets(
     (root / "Anywhere").mkdir()
     (root / "Anywhere" / "Module.lean").write_text("example : True := trivial\n")
     assert context.provenance().workspace_digest != original
+
+
+def test_project_source_digest_reuses_clean_git_blob_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _project(tmp_path / "project")
+    subprocess.run(git_command("init", "--quiet", str(tmp_path / "project")), check=True)
+    subprocess.run(git_command("-C", str(tmp_path / "project"), "add", "."), check=True)
+    subprocess.run(
+        git_command(
+            "-C",
+            str(tmp_path / "project"),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ),
+        check=True,
+    )
+    context = discover_project(source)
+    cache = tmp_path / "runtime" / "project-fingerprints" / "project.json"
+    original = context.source_digest(blob_cache_path=cache)
+    original_open = Path.open
+
+    def guarded_open(path: Path, *args: object, **kwargs: object):
+        if path == source and args and args[0] == "rb":
+            raise AssertionError("unchanged source content was read again")
+        return original_open(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+
+    assert context.source_digest(blob_cache_path=cache) == original
+
+
+def test_opaque_git_project_uses_git_source_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "lean-toolchain").write_text("leanprover/lean4:v4.32.0\n")
+    (root / "lakefile.lean").write_text("import Lake\nopen Lake DSL\npackage sample\n")
+    source = root / "Sample.lean"
+    source.write_text("example : True := trivial\n")
+    subprocess.run(git_command("init", "--quiet", str(root)), check=True)
+    context = discover_project(source)
+
+    def reject_walk(*_args: object, **_kwargs: object):
+        raise AssertionError("opaque Git project was recursively walked in Python")
+
+    monkeypatch.setattr("lean_runtime.projects.os.walk", reject_walk)
+
+    assert context.source_digest().startswith("sha256:")
 
 
 def test_project_source_roots_include_globs_and_exe_roots(tmp_path: Path) -> None:

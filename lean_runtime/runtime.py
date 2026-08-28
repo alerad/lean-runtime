@@ -1501,7 +1501,6 @@ class Runtime:
     ) -> ExecutionResult:
         """Build an existing trusted Lake project outside the environment store."""
         context = discover_project(project)
-        self.shared_projects.remember_project(context)
         if toolchain is not None:
             context = replace(context, toolchain=normalize_toolchain(toolchain))
         selected_shared = project_sharing_enabled(context.root) if shared is None else shared
@@ -1529,7 +1528,6 @@ class Runtime:
     ) -> ExecutionResult:
         """Check all declared local libraries through Lake's dependency ordering."""
         context = discover_project(project)
-        self.shared_projects.remember_project(context)
         if toolchain is not None:
             context = replace(context, toolchain=normalize_toolchain(toolchain))
         selected_policy = policy or ExecutionPolicy(
@@ -2436,7 +2434,6 @@ class Runtime:
         context = discover_project(path)
         if toolchain is not None:
             context = replace(context, toolchain=normalize_toolchain(toolchain))
-        self.shared_projects.remember_project(context)
         return ProjectEnvironment(self, context)
 
     def inspect_project_publication(
