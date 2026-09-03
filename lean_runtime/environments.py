@@ -58,10 +58,17 @@ ENVIRONMENT_SCHEMA = "lean-runtime-published-environment/1"
 EXECUTION_SCHEMA = "lean-runtime-execution/1"
 CAPTURE_SCHEMA = "lean-runtime-execution-capture/1"
 T = TypeVar("T")
+_STAGING_NONCE_LENGTH = 12
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _environment_staging_path(store: EnvironmentStore) -> Path:
+    """Return a collision-resistant stage without exhausting Windows' path budget."""
+    nonce = uuid.uuid4().hex[:_STAGING_NONCE_LENGTH]
+    return store.environments / f".staging-{nonce}"
 
 
 def _lean_path(value: str) -> str:
@@ -1263,7 +1270,10 @@ class EnvironmentManager:
         accelerate: bool = False,
         cancel: threading.Event | None,
     ) -> None:
-        stage = self.store.environments / f".staging-{os.getpid()}-{uuid.uuid4().hex}"
+        # Mathlib artifacts can have paths over 150 characters below the workspace.
+        # Keep this internal component short so leantar remains below legacy MAX_PATH
+        # on Windows; the final environment identity is unaffected by the stage name.
+        stage = _environment_staging_path(self.store)
         workspace = stage / "workspace"
         try:
             self.events.emit(
