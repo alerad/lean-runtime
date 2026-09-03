@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Shorten source-build environment staging names so deeply nested Mathlib
+  artifacts remain below legacy `MAX_PATH` while `leantar` hydrates the cache
+  on Windows. The previous PID plus full-UUID name put some artifacts at
+  exactly 260 characters, where hydration failed with `os error 3` and forced
+  users toward a full Mathlib source build.
 - Hydrate Mathlib's upstream build cache when `new` has no exact shared project
   or downloadable environment to seed from. The cold-start fallback previously
   opened the catalog environment without enabling the trusted URL-keyed

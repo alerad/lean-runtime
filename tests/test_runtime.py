@@ -4,7 +4,7 @@ import json
 import os
 import sys
 import threading
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -18,7 +18,11 @@ from lean_runtime import (
     ToolchainError,
 )
 from lean_runtime.backends import BackendResult, LocalBackend
-from lean_runtime.environments import Environment, EnvironmentManager
+from lean_runtime.environments import (
+    Environment,
+    EnvironmentManager,
+    _environment_staging_path,
+)
 from lean_runtime.runtime import _bundled_lock_for_references
 from lean_runtime.store import EnvironmentStore
 
@@ -238,6 +242,30 @@ def test_core_environment_never_installs_the_full_toolchain(tmp_path: Path) -> N
     environment = runtime.open_toolchain("v4.32.2")
     assert environment.check("example : True := by trivial").ok
     assert toolchains.full_installs == []
+
+
+def test_environment_stage_preserves_windows_artifact_path_budget(tmp_path: Path) -> None:
+    store = EnvironmentStore(tmp_path / "runtime")
+    stage = _environment_staging_path(store)
+
+    assert stage.parent == store.environments
+    assert stage.name.startswith(".staging-")
+    assert len(stage.name) == len(".staging-") + 12
+
+    # This is the path that failed at exactly MAX_PATH with the previous
+    # `.staging-{pid}-{full_uuid}` name during Mathlib cache extraction.
+    windows_stage = (
+        PureWindowsPath(r"C:\Users\userx\AppData\Local\lean-runtime\environments") / stage.name
+    )
+    artifact = windows_stage / (
+        "workspace/.lake/packages/mathlib/.lake/build/lib/lean/Mathlib/Analysis/"
+        "SpecialFunctions/ContinuousFunctionalCalculus/Rpow/"
+        "RingInverseOrder.olean.private.hash"
+    )
+    previous_stage = windows_stage.parent / (".staging-48876-" + "a" * 32)
+    previous_artifact = previous_stage / artifact.relative_to(windows_stage)
+    assert len(str(previous_artifact)) >= 260
+    assert len(str(artifact)) < 260
 
 
 def test_capsule_rejects_build_and_execute_before_running_lean(tmp_path: Path) -> None:
