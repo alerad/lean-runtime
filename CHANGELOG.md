@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Announce subprocess commands and working directories, stream artifact
+  hydration and environment-build output, and report exit codes with elapsed
+  time. With `--verbose`, Lake now runs with `--verbose` and its complete live
+  output is retained alongside the resolved executable path.
 - Shorten source-build environment staging names so deeply nested Mathlib
   artifacts remain below legacy `MAX_PATH` while `leantar` hydrates the cache
   on Windows. The previous PID plus full-UUID name put some artifacts at

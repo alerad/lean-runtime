@@ -13,6 +13,7 @@ from lean_runtime import (
     EnvironmentLock,
     EnvironmentSpec,
     ExecutionJob,
+    LockedPackage,
     ResolutionError,
     Runtime,
     ToolchainError,
@@ -266,6 +267,68 @@ def test_environment_stage_preserves_windows_artifact_path_budget(tmp_path: Path
     previous_artifact = previous_stage / artifact.relative_to(windows_stage)
     assert len(str(previous_artifact)) >= 260
     assert len(str(artifact)) < 260
+
+
+def test_source_materialization_observes_hydration_and_traces_verbose_lake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = EnvironmentStore(tmp_path / "runtime")
+    toolchains = FakeToolchains(tmp_path / "runtime")
+    manager = EnvironmentManager(
+        store,
+        toolchains,  # type: ignore[arg-type]
+        LocalBackend(),
+        verbose=True,
+    )
+    package = LockedPackage(
+        name="sample",
+        url="https://example.test/sample.git",
+        revision="a" * 40,
+        source_id="source_" + "b" * 64,
+        tree_hash="c" * 40,
+        artifact_command=("lake", "exe", "cache", "get"),
+    )
+    store.source_path(package.source_id).mkdir(parents=True)
+    lock = EnvironmentLock(
+        toolchain="leanprover/lean4:v4.33.1",
+        spec_digest="spec_" + "d" * 64,
+        root_lakefile='name = "test"\n',
+        root_module="",
+        manifest={"version": "1.1.0", "packagesDir": ".lake/packages", "packages": []},
+        packages=(package,),
+    )
+    monkeypatch.setattr(
+        toolchains,
+        "command",
+        lambda _toolchain, executable, *args: [f"/resolved/{executable}", *args],
+    )
+    calls: list[dict[str, object]] = []
+
+    def run_process(**kwargs: object) -> BackendResult:
+        calls.append(kwargs)
+        return BackendResult(0, "trace output", "", 0.25, False, False, False, ())
+
+    monkeypatch.setattr(manager, "_run_process", run_process)
+    destination = store.environment_path("env_" + "e" * 64)
+    manager._materialize(
+        lock,
+        "env_" + "e" * 64,
+        destination,
+        "release",
+        build_timeout=30,
+        accelerate=False,
+        cancel=None,
+    )
+
+    assert [call["logical_command"] for call in calls] == [
+        ["lake", "exe", "cache", "get"],
+        ["lake", "build"],
+    ]
+    assert [call["command"] for call in calls] == [
+        ["/resolved/lake", "--verbose", "exe", "cache", "get"],
+        ["/resolved/lake", "--verbose", "build"],
+    ]
+    assert [call["phase"] for call in calls] == ["artifact_hydration", "build"]
 
 
 def test_capsule_rejects_build_and_execute_before_running_lean(tmp_path: Path) -> None:

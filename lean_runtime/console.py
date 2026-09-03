@@ -10,6 +10,7 @@ from typing import Any, Literal, TextIO
 
 from .events import RuntimeEvent
 from .policies import format_byte_size
+from .progress import command_text
 
 RenderMode = Literal["tty", "plain", "quiet"]
 
@@ -374,6 +375,25 @@ class ConsoleRenderer:
             text = _truncate(line, _OUTPUT_WIDTH)
             self._draw_line(text, self.style.dim(text))
 
+    def _render_process_started(self, event: RuntimeEvent) -> None:
+        logical = event.data.get("logical_command")
+        command = command_text(logical) if isinstance(logical, list) else ""
+        self._print(f"Running: {command or event.message.removeprefix('Running: ')}")
+        cwd = event.data.get("cwd")
+        if cwd:
+            self._print(f"Working directory: {cwd}")
+
+    def _render_process_finished(self, event: RuntimeEvent) -> None:
+        logical = event.data.get("logical_command")
+        command = command_text(logical) if isinstance(logical, list) else "command"
+        exit_code = event.data.get("exit_code", "?")
+        elapsed = event.data.get("elapsed_seconds")
+        timing = f" in {elapsed:.2f}s" if isinstance(elapsed, (int, float)) else ""
+        self._print(f"Finished: {command} (exit {exit_code}){timing}")
+
+    def _render_process_failed(self, event: RuntimeEvent) -> None:
+        self._print(self.style.red(event.message))
+
     def _render_adopt_inspect_started(self, event: RuntimeEvent) -> None:
         self._count_from(event, "Inspecting projects", "name")
 
@@ -442,6 +462,30 @@ class ConsoleRenderer:
     # -- low-level output -----------------------------------------------
 
     def _verbose_line(self, event: RuntimeEvent) -> None:
+        if event.kind == "process.started":
+            logical = event.data.get("logical_command", [])
+            resolved = event.data.get("command", [])
+            logical_text = command_text(logical) if isinstance(logical, list) else str(logical)
+            resolved_text = command_text(resolved) if isinstance(resolved, list) else str(resolved)
+            self._print("Running: " + logical_text)
+            self._print("Resolved: " + resolved_text)
+            self._print("Working directory: " + str(event.data.get("cwd", "")))
+            return
+        if event.kind == "process.output":
+            self._print(str(event.data.get("line") or event.message))
+            return
+        if event.kind == "process.progress":
+            current = event.data.get("current")
+            total = event.data.get("total")
+            detail = event.data.get("detail", "")
+            self._print(f"[{current}/{total}] {detail}".rstrip())
+            return
+        if event.kind == "process.finished":
+            self._render_process_finished(event)
+            return
+        if event.kind == "process.failed":
+            self._render_process_failed(event)
+            return
         parts = [f"{event.kind}: {event.message}"]
         if event.current_bytes is not None and event.total_bytes is not None:
             parts.append(

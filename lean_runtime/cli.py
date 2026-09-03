@@ -1941,6 +1941,7 @@ def main(argv: list[str] | None = None) -> int:
         runtime = Runtime(
             home=args.home,
             on_event=renderer,
+            verbose=args.verbose,
             availability=selected_availability,
             libraries=args.libraries,
             max_download_bytes=selected_download_limit,

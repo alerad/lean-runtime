@@ -43,6 +43,7 @@ from .models import (
     PhaseTiming,
 )
 from .policies import ExecutionPolicy
+from .progress import ObservedProcess
 from .references import artifact_accelerators
 from .serialization import sha256_id, write_json_atomic
 from .store import (
@@ -1143,11 +1144,13 @@ class EnvironmentManager:
         toolchains: ToolchainManager,
         backend: Backend,
         events: EventEmitter | None = None,
+        verbose: bool = False,
     ) -> None:
         self.store = store
         self.toolchains = toolchains
         self.backend = backend
         self.events = events or EventEmitter()
+        self.verbose = verbose
         self.sparse_acquirer: (
             Callable[[EnvironmentLock, tuple[str, ...], frozenset[str]], None] | None
         ) = None
@@ -1316,9 +1319,15 @@ class EnvironmentManager:
                 )
                 command = list(requested_command)
                 if command[0] in {"lake", "lean"}:
-                    command = self.toolchains.command(lock.toolchain, command[0], *command[1:])
-                result = self.backend.execute(
-                    command,
+                    arguments = (
+                        ("--verbose", *command[1:])
+                        if self.verbose and command[0] == "lake"
+                        else tuple(command[1:])
+                    )
+                    command = self.toolchains.command(lock.toolchain, command[0], *arguments)
+                result = self._run_process(
+                    command=command,
+                    logical_command=list(requested_command),
                     cwd=workspace,
                     environment=(
                         self.toolchains.environment_for(lock.toolchain)
@@ -1327,6 +1336,7 @@ class EnvironmentManager:
                     ),
                     policy=build_policy,
                     cancel=cancel,
+                    phase="artifact_hydration",
                 )
                 hydration.append(
                     {
@@ -1346,13 +1356,16 @@ class EnvironmentManager:
                         output=result.stdout + result.stderr,
                     )
             if lock.packages:
-                command = self.toolchains.command(lock.toolchain, "lake", "build")
-                result = self.backend.execute(
-                    command,
+                lake_arguments = ("--verbose", "build") if self.verbose else ("build",)
+                command = self.toolchains.command(lock.toolchain, "lake", *lake_arguments)
+                result = self._run_process(
+                    command=command,
+                    logical_command=["lake", "build"],
                     cwd=workspace,
                     environment=self.toolchains.environment_for(lock.toolchain),
                     policy=build_policy,
                     cancel=cancel,
+                    phase="build",
                 )
                 if result.exit_code:
                     raise MaterializationError(
@@ -1397,6 +1410,41 @@ class EnvironmentManager:
                 # Git's read-only pack files also fails on Windows.
                 with suppress(OSError):
                     remove_tree(stage)
+
+    def _run_process(
+        self,
+        *,
+        command: list[str],
+        logical_command: list[str],
+        cwd: Path,
+        environment: Mapping[str, str],
+        policy: ExecutionPolicy,
+        cancel: threading.Event | None,
+        phase: str,
+    ) -> BackendResult:
+        observed = ObservedProcess(
+            self.events.emit,
+            command=command,
+            logical_command=logical_command,
+            cwd=cwd,
+            phase=phase,
+            verbose=self.verbose,
+        )
+        observed.start()
+        try:
+            result = self.backend.execute(
+                command,
+                cwd=cwd,
+                environment=environment,
+                policy=policy,
+                cancel=cancel,
+                **observed.arguments(self.backend),
+            )
+        except BaseException as exc:
+            observed.failed(exc)
+            raise
+        observed.finish(result)
+        return result
 
     def _ensure_sources(self, lock: EnvironmentLock) -> None:
         """Acquire exact locked sources without invoking Lake resolution."""

@@ -79,7 +79,7 @@ from .oci import (
 from .policies import ExecutionPolicy, parse_byte_size
 from .profiling import ProfileReport, run_profile
 from .programs import ProgramInfo, ProgramLibrary, ProgramManager, ReadyProgram
-from .progress import OutputProgress, observer_arguments
+from .progress import ObservedProcess, OutputProgress, observer_arguments
 from .project_execution import ProjectExecutor
 from .project_sharing import (
     AdoptionBatchResult,
@@ -245,6 +245,7 @@ class Runtime:
         libraries: Sequence[str] | None = None,
         max_download_bytes: int | None = None,
         allow_source_build: bool = True,
+        verbose: bool = False,
         publisher_verification: str = "ignore",
         trusted_publisher: str | None = None,
         trusted_issuer: str | None = None,
@@ -266,6 +267,7 @@ class Runtime:
                 "required publisher verification needs trusted_publisher and trusted_issuer"
             )
         self.events = EventEmitter(on_event)
+        self.verbose = verbose
         activate(self.events)
         self.toolchains = toolchains or ToolchainManager(home, events=self.events)
         self.home = self.toolchains.home
@@ -280,7 +282,7 @@ class Runtime:
         self.project_executor = ProjectExecutor(self)
         self.resolver = EnvironmentResolver(self.toolchains, self.store, self.backend, self.events)
         self.environments = EnvironmentManager(
-            self.store, self.toolchains, self.backend, self.events
+            self.store, self.toolchains, self.backend, self.events, verbose=verbose
         )
         self.bundles = EnvironmentBundles(self.store, self.toolchains, self.backend, self.events)
         self.programs = ProgramManager(self.store, self.backend, self.events)
@@ -2769,19 +2771,33 @@ class Runtime:
                 "nonce": os.urandom(16).hex(),
             },
         )
-        observer_label = str(request_command[0]) if request_command else Path(command[0]).name
-        observer = OutputProgress(self.events.emit, label=observer_label)
-        raw = self.backend.execute(
-            command,
+        resolved_command = list(command)
+        if self.verbose and request_command[:1] == ["lake"] and "--verbose" not in resolved_command:
+            resolved_command.insert(1, "--verbose")
+        observed = ObservedProcess(
+            self.events.emit,
+            command=resolved_command,
+            logical_command=request_command,
             cwd=cwd,
-            environment=dict(environment)
-            if environment is not None
-            else self.toolchains.environment,
-            policy=policy,
-            cancel=cancel,
-            **self._output_observer_arguments(observer),
+            phase="execution",
+            verbose=self.verbose,
         )
-        observer.finish()
+        observed.start()
+        try:
+            raw = self.backend.execute(
+                resolved_command,
+                cwd=cwd,
+                environment=dict(environment)
+                if environment is not None
+                else self.toolchains.environment,
+                policy=policy,
+                cancel=cancel,
+                **observed.arguments(self.backend),
+            )
+        except BaseException as exc:
+            observed.failed(exc)
+            raise
+        observed.finish(raw)
         output = "\n".join(part for part in (raw.stdout, raw.stderr) if part)
         diagnostics = map_diagnostic_paths(parse_diagnostics(output), path_map)
         if raw.timed_out:
@@ -2807,7 +2823,7 @@ class Runtime:
             ok=raw.exit_code == 0,
             exit_code=raw.exit_code,
             toolchain=toolchain,
-            command=tuple(command),
+            command=tuple(resolved_command),
             cwd=str(cwd),
             stdout=raw.stdout,
             stderr=raw.stderr,

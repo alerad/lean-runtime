@@ -10,14 +10,23 @@ get`` and similar chatty-but-unstructured tools from looking hung.
 from __future__ import annotations
 
 import inspect
+import os
 import re
+import shlex
+import subprocess
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 _LAKE_STEP = re.compile(r"^\s*(?:[✔✖⚠√×!?]\s*)?\[(\d+)/(\d+)\]\s*(?P<detail>.*?)\s*$")
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _MAX_LINE = 200
+
+
+def command_text(command: tuple[str, ...] | list[str]) -> str:
+    """Render an argv sequence for diagnostics without executing through a shell."""
+    return subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command)
 
 
 class OutputProgress:
@@ -33,15 +42,19 @@ class OutputProgress:
         emit: Callable[..., None],
         *,
         label: str,
+        phase: str = "execution",
         clock: Callable[[], float] = time.monotonic,
         progress_interval: float = 0.1,
         output_interval: float = 1.0,
+        max_line: int | None = _MAX_LINE,
     ) -> None:
         self._emit = emit
         self._label = label
+        self._phase = phase
         self._clock = clock
         self._progress_interval = progress_interval
         self._output_interval = output_interval
+        self._max_line = max_line
         self._last_progress_at: float | None = None
         self._last_output_at: float | None = None
         self._pending_step: tuple[int, int, str] | None = None
@@ -51,10 +64,14 @@ class OutputProgress:
         text = _ANSI.sub("", text).strip()
         if not text:
             return
+        rendered = text if self._max_line is None else text[: self._max_line]
         now = self._clock()
         match = _LAKE_STEP.match(text)
         if match is not None:
-            step = (int(match.group(1)), int(match.group(2)), match.group("detail")[:_MAX_LINE])
+            detail = match.group("detail")
+            if self._max_line is not None:
+                detail = detail[: self._max_line]
+            step = (int(match.group(1)), int(match.group(2)), detail)
             self._pending_step = step
             due = (
                 self._last_progress_at is None
@@ -67,10 +84,10 @@ class OutputProgress:
             self._last_output_at = now
             self._emit(
                 "process.output",
-                f"{self._label}: {text[:_MAX_LINE]}",
-                phase="execution",
+                f"{self._label}: {rendered}",
+                phase=self._phase,
                 label=self._label,
-                line=text[:_MAX_LINE],
+                line=rendered,
             )
 
     def finish(self) -> None:
@@ -91,8 +108,81 @@ class OutputProgress:
         self._emit(
             "process.progress",
             f"{self._label}: {current}/{total} {detail}".rstrip(),
-            phase="execution",
+            phase=self._phase,
             **data,
+        )
+
+
+class ObservedProcess:
+    """Emit lifecycle and live-output events around one backend execution."""
+
+    def __init__(
+        self,
+        emit: Callable[..., None],
+        *,
+        command: list[str],
+        logical_command: list[str],
+        cwd: Path,
+        phase: str,
+        verbose: bool = False,
+    ) -> None:
+        self._emit = emit
+        self.command = command
+        self.logical_command = logical_command
+        self.cwd = cwd
+        self.phase = phase
+        label = logical_command[0] if logical_command else Path(command[0]).name
+        self.output = OutputProgress(
+            emit,
+            label=label,
+            phase=phase,
+            progress_interval=0.0 if verbose else 0.1,
+            output_interval=0.0 if verbose else 1.0,
+            max_line=None if verbose else _MAX_LINE,
+        )
+
+    def start(self) -> None:
+        logical = command_text(self.logical_command)
+        self._emit(
+            "process.started",
+            f"Running: {logical}",
+            phase=self.phase,
+            logical_command=list(self.logical_command),
+            command=list(self.command),
+            cwd=str(self.cwd),
+        )
+
+    def arguments(self, backend: Any) -> dict[str, Any]:
+        return observer_arguments(backend, self.output)
+
+    def finish(self, result: Any) -> None:
+        self.output.finish()
+        logical = command_text(self.logical_command)
+        self._emit(
+            "process.finished",
+            f"Finished: {logical}",
+            phase=self.phase,
+            logical_command=list(self.logical_command),
+            command=list(self.command),
+            cwd=str(self.cwd),
+            exit_code=result.exit_code,
+            elapsed_seconds=result.elapsed_seconds,
+            timed_out=result.timed_out,
+            cancelled=result.cancelled,
+            output_truncated=result.output_truncated,
+        )
+
+    def failed(self, error: BaseException) -> None:
+        self.output.finish()
+        logical = command_text(self.logical_command)
+        self._emit(
+            "process.failed",
+            f"Failed to run: {logical}",
+            phase=self.phase,
+            logical_command=list(self.logical_command),
+            command=list(self.command),
+            cwd=str(self.cwd),
+            error=type(error).__name__,
         )
 
 

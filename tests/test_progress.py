@@ -8,11 +8,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from lean_runtime.backends import LocalBackend
+import pytest
+
+from lean_runtime.backends import BackendResult, LocalBackend
 from lean_runtime.console import ConsoleRenderer
 from lean_runtime.events import EventEmitter, RuntimeEvent
 from lean_runtime.policies import ExecutionPolicy
-from lean_runtime.progress import OutputProgress
+from lean_runtime.progress import ObservedProcess, OutputProgress
 from lean_runtime.project_sharing import plan_adoption
 from lean_runtime.runtime import Runtime
 from lean_runtime.shared_projects import SharedProjectManager
@@ -68,6 +70,53 @@ def test_other_output_becomes_a_throttled_heartbeat() -> None:
     assert [event.kind for event in events] == ["process.output", "process.output"]
     assert events[0].data["line"] == "Attempting to download 6931 file(s)"
     assert events[1].message == "lake: Unpacked in 1234 ms"
+
+
+def test_observed_process_emits_command_output_and_completion(tmp_path: Path) -> None:
+    events, emitter = _collect()
+    observed = ObservedProcess(
+        emitter.emit,
+        command=["/runtime/toolchain/bin/lake", "build"],
+        logical_command=["lake", "build"],
+        cwd=tmp_path,
+        phase="build",
+        verbose=True,
+    )
+    observed.start()
+    observed.output.line("first trace")
+    observed.output.line("second trace")
+    observed.finish(BackendResult(0, "", "", 1.25, False, False, False, ()))
+
+    assert [event.kind for event in events] == [
+        "process.started",
+        "process.output",
+        "process.output",
+        "process.finished",
+    ]
+    assert events[0].data["logical_command"] == ["lake", "build"]
+    assert events[0].data["command"] == ["/runtime/toolchain/bin/lake", "build"]
+    assert events[0].data["cwd"] == str(tmp_path)
+    assert events[1].phase == "build"
+    assert events[-1].data["exit_code"] == 0
+    assert events[-1].data["elapsed_seconds"] == 1.25
+
+
+def test_verbose_observed_process_retains_complete_output_lines(tmp_path: Path) -> None:
+    events, emitter = _collect()
+    observed = ObservedProcess(
+        emitter.emit,
+        command=["/runtime/toolchain/bin/lake", "--verbose", "build"],
+        logical_command=["lake", "build"],
+        cwd=tmp_path,
+        phase="build",
+        verbose=True,
+    )
+    line = "trace: " + "x" * 400
+    observed.output.line(line)
+
+    assert events[0].kind == "process.output"
+    assert events[0].data["line"] == line
+    assert events[0].phase == "build"
 
 
 # -- backend streaming ---------------------------------------------------------
@@ -126,6 +175,34 @@ def test_runtime_only_passes_on_output_to_backends_that_accept_it(tmp_path: Path
     assert legacy._output_observer_arguments(observer) == {}
 
 
+def test_verbose_runtime_adds_lake_trace_flag_and_records_resolved_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[RuntimeEvent] = []
+    runtime = Runtime(home=tmp_path / "runtime", on_event=events.append, verbose=True)
+    commands: list[list[str]] = []
+
+    def execute(command: list[str], **_kwargs: Any) -> BackendResult:
+        commands.append(command)
+        return BackendResult(0, "", "", 0.01, False, False, False, ())
+
+    monkeypatch.setattr(runtime.backend, "execute", execute)
+    result = runtime._raw_result(
+        ["/runtime/toolchain/bin/lake", "build"],
+        cwd=tmp_path,
+        toolchain="leanprover/lean4:v4.33.1",
+        source_digest="source",
+        policy=ExecutionPolicy(),
+        logical_command=["lake", "build"],
+    )
+
+    assert commands == [["/runtime/toolchain/bin/lake", "--verbose", "build"]]
+    assert result.command == tuple(commands[0])
+    started = next(event for event in events if event.kind == "process.started")
+    assert started.data["logical_command"] == ["lake", "build"]
+    assert started.data["command"] == commands[0]
+
+
 # -- console rendering ---------------------------------------------------------
 
 
@@ -177,6 +254,50 @@ def test_tty_mode_shows_subprocess_output_in_place_and_plain_mode_stays_quiet() 
         _event("process.output", line="Decompressing 6931 file(s)")
     )
     assert plain.getvalue() == ""
+
+
+def test_process_lifecycle_is_announced_and_verbose_mode_keeps_output() -> None:
+    plain = io.StringIO()
+    renderer = ConsoleRenderer(stream=plain, mode="plain", color=False)
+    renderer(
+        _event(
+            "process.started",
+            logical_command=["lake", "build"],
+            command=["/toolchain/bin/lake", "build"],
+            cwd="/workspace",
+        )
+    )
+    renderer(
+        _event(
+            "process.finished",
+            logical_command=["lake", "build"],
+            exit_code=0,
+            elapsed_seconds=1.25,
+        )
+    )
+    assert plain.getvalue().splitlines() == [
+        "Running: lake build",
+        "Working directory: /workspace",
+        "Finished: lake build (exit 0) in 1.25s",
+    ]
+
+    verbose = io.StringIO()
+    detailed = ConsoleRenderer(stream=verbose, mode="plain", color=False, verbose=True)
+    detailed(
+        _event(
+            "process.started",
+            logical_command=["lake", "build"],
+            command=["/toolchain/bin/lake", "--verbose", "build"],
+            cwd="/workspace",
+        )
+    )
+    detailed(_event("process.output", line="trace: lean -o Demo.olean Demo.lean"))
+    assert verbose.getvalue().splitlines() == [
+        "Running: lake build",
+        "Resolved: /toolchain/bin/lake --verbose build",
+        "Working directory: /workspace",
+        "trace: lean -o Demo.olean Demo.lean",
+    ]
 
 
 def test_adopt_and_detach_events_render_as_counted_progress() -> None:

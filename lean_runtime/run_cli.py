@@ -521,6 +521,7 @@ def run(
         runtime = Runtime(
             home=arguments.home,
             on_event=observe,
+            verbose=arguments.verbose,
             availability=availability,
             libraries=libraries,
             max_download_bytes=arguments.max_download,
