@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from lean_runtime import Runtime
+import pytest
+
+from lean_runtime import Runtime, ToolchainError
 from lean_runtime.events import EventEmitter
 from lean_runtime.health import repair
 
@@ -16,8 +18,19 @@ def test_event_emitter_is_structured() -> None:
     assert events[0].to_dict()["message"] == "Building"
 
 
-def test_doctor_and_empty_store_status_do_not_install_tools(tmp_path: Path) -> None:
+@pytest.mark.parametrize("installed", [False, True])
+def test_doctor_and_empty_store_status_do_not_install_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: bool
+) -> None:
     runtime = Runtime(home=tmp_path)
+
+    def elan_path(*, bootstrap: bool = True) -> Path:
+        assert not bootstrap, "doctor must not install Elan"
+        if not installed:
+            raise ToolchainError("Elan is not installed")
+        return tmp_path / ("elan.exe" if os.name == "nt" else "elan")
+
+    monkeypatch.setattr(runtime.toolchains, "elan_path", elan_path)
     report = runtime.doctor()
     assert {check.name for check in report.checks} == {
         "git",
@@ -30,8 +43,11 @@ def test_doctor_and_empty_store_status_do_not_install_tools(tmp_path: Path) -> N
         "cleanup",
     }
     elan = next(check for check in report.checks if check.name == "elan")
-    assert report.ok
-    assert elan.status in {"pass", "warning"}
+    # POSIX can bootstrap Elan later; Windows requires an existing executable.
+    expected = "pass" if installed else "fail" if os.name == "nt" else "warning"
+    assert elan.status == expected
+    assert all(check.status != "fail" for check in report.checks if check.name != "elan")
+    assert report.ok is (expected != "fail")
     status = runtime.store_status()
     assert status.environments == 0
     assert status.sources == 0
