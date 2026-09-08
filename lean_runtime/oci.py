@@ -481,9 +481,15 @@ class OCIRegistryClient:
                     mode = "ab" if offset else "wb"
                     last_progress = 0.0
                     with response, temporary.open(mode) as output:
-                        while chunk := response.read(1024 * 1024):
-                            if cancel is not None and cancel.is_set():
-                                raise EnvironmentError("OCI blob download was cancelled")
+                        while True:
+                            _check_cancelled(cancel, "OCI blob download")
+                            # read(n) waits to fill n bytes even on a slowly
+                            # streaming response. read1 returns available data
+                            # so cancellation is observed between socket reads.
+                            chunk = response.read1(1024 * 1024)
+                            _check_cancelled(cancel, "OCI blob download")
+                            if not chunk:
+                                break
                             written += len(chunk)
                             if written > size:
                                 raise EnvironmentError("OCI blob exceeds its declared size")
@@ -587,7 +593,15 @@ class OCIRegistryClient:
                     expected = f"bytes {offset}-{offset + size - 1}/{total}"
                     if content_range != expected:
                         raise EnvironmentError("OCI registry returned a mismatched byte range")
-                    data = bytes(response.read(size + 1))
+                    downloaded = bytearray()
+                    while len(downloaded) < size + 1:
+                        _check_cancelled(cancel, "OCI range download")
+                        chunk = response.read1(min(1024 * 1024, size + 1 - len(downloaded)))
+                        _check_cancelled(cancel, "OCI range download")
+                        if not chunk:
+                            break
+                        downloaded.extend(chunk)
+                    data = bytes(downloaded)
             except urllib.error.HTTPError as exc:
                 if attempt == _BLOB_INTEGRITY_ATTEMPTS or (
                     exc.code not in {408, 429} and not 500 <= exc.code < 600

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Exercise Windows unit tests, macOS real-Lean integration, and clean anonymous
+  Mathlib consumption of the PR checkout in CI. Add active HTTP cancellation
+  and descendant-termination regressions; cancellation now checks between
+  available HTTP chunks, and POSIX shutdown kills surviving descendants even
+  when the direct child exits first.
+
 - Make store lifecycle guarantees consistent across every execution path.
   Every cross-process lock now comes from one registry under `<home>/.locks`
   (`LockPaths`), so shared-project package locks and store cleanup finally

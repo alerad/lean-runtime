@@ -5,12 +5,14 @@ import signal
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from pathlib import Path
 
 import pytest
 
 from lean_runtime._process import ResourceLimits, run_git, run_process
+from lean_runtime.locking import FileLock
 
 PY = sys.executable
 
@@ -49,7 +51,7 @@ def test_observer_exceptions_do_not_break_execution() -> None:
         raise RuntimeError("observer bug")
 
     outcome = run_process([PY, "-c", "print('hi')"], on_output=explode, timeout=30)
-    assert outcome.ok and outcome.stdout == "hi\n"
+    assert outcome.ok and outcome.stdout.splitlines() == ["hi"]
 
 
 def test_timeout_stops_the_process_tree() -> None:
@@ -65,6 +67,58 @@ def test_cancel_event_stops_the_process() -> None:
     threading.Timer(0.2, cancel.set).start()
     outcome = run_process([PY, "-c", "import time; time.sleep(30)"], cancel=cancel, timeout=30)
     assert outcome.cancelled and outcome.exit_code == 130
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group signal escalation")
+@pytest.mark.parametrize("interruption", ["timeout", "cancel"])
+def test_shutdown_kills_a_descendant_even_when_the_parent_exits_first(
+    tmp_path: Path, interruption: str
+) -> None:
+    lock = tmp_path / "descendant.lock"
+    ready = tmp_path / "ready"
+    descendant = (
+        "import os, signal, sys, time\n"
+        "from pathlib import Path\n"
+        "from lean_runtime.locking import FileLock\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "with FileLock(Path(sys.argv[1])):\n"
+        "    Path(sys.argv[2]).write_text(str(os.getpid()))\n"
+        "    time.sleep(30)\n"
+    )
+    parent = (
+        "import subprocess, sys, time;"
+        "subprocess.Popen([sys.executable, '-c', sys.argv[1], *sys.argv[2:]],"
+        " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL);"
+        "time.sleep(30)"
+    )
+    cancel = threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            run_process,
+            [PY, "-c", parent, descendant, str(lock), str(ready)],
+            timeout=5 if interruption == "timeout" else 15,
+            cancel=cancel,
+        )
+        try:
+            deadline = time.monotonic() + 4
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert ready.exists(), "descendant never acquired its lock"
+            if interruption == "cancel":
+                cancel.set()
+            outcome = future.result(timeout=10)
+            assert outcome.cancelled is (interruption == "cancel")
+            assert outcome.timed_out is (interruption == "timeout")
+            # A returned result is insufficient: the descendant must have died
+            # and released its OS lock, even though it ignored SIGTERM and did
+            # not inherit stdout/stderr (so pipe cleanup cannot rescue us).
+            with FileLock(lock, timeout=2):
+                pass
+        finally:
+            cancel.set()
+            if ready.exists():
+                with suppress(ProcessLookupError):
+                    os.kill(int(ready.read_text()), signal.SIGKILL)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")

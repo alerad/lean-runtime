@@ -242,6 +242,11 @@ def shutdown(process: subprocess.Popen[Any], *, grace_seconds: float = 2.0) -> N
     except subprocess.TimeoutExpired:
         kill_tree(process)
         process.wait()
+    else:
+        # Reaping the parent does not imply that its descendants exited.
+        # They may ignore SIGTERM and close their pipes, bypassing reader cleanup.
+        if os.name != "nt":
+            kill_tree(process)
 
 
 def _join_readers(
