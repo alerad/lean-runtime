@@ -92,8 +92,7 @@ def test_detached_grandchild_cannot_block_pipe_cleanup(
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(8)'],"
         " start_new_session=True);"
         "pathlib.Path(sys.argv[1]).write_text(str(child.pid));"
-        "print('parent ready', flush=True);"
-        + ("time.sleep(30)" if timeout is not None else "")
+        "print('parent ready', flush=True);" + ("time.sleep(30)" if timeout is not None else "")
     )
     started = time.monotonic()
     try:
