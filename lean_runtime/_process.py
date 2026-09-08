@@ -14,6 +14,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -209,7 +210,7 @@ def spawn_options(limits: ResourceLimits | None) -> dict[str, Any]:
 def stop_tree(process: subprocess.Popen[Any]) -> None:
     """Ask the child's whole process group to terminate."""
     try:
-        if os.name == "nt":
+        if sys.platform == "win32":
             process.terminate()
         else:
             os.killpg(process.pid, signal.SIGTERM)
@@ -223,7 +224,7 @@ def stop_tree(process: subprocess.Popen[Any]) -> None:
 def kill_tree(process: subprocess.Popen[Any]) -> None:
     """Kill the child's whole process group without waiting."""
     try:
-        if os.name == "nt":
+        if sys.platform == "win32":
             process.kill()
         else:
             os.killpg(process.pid, signal.SIGKILL)

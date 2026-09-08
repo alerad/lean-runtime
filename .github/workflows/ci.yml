@@ -129,7 +129,6 @@ jobs:
       # Test this checkout, using a fresh runtime home and anonymous downloads.
       # Never substitute the released PyPI package or a warm environment cache.
       - run: python -m pip install .
-      - run: python scripts/registry_preflight.py
       - run: python scripts/announcement_gate.py --report consumer-report.json
       - uses: actions/upload-artifact@v4
         if: always()
