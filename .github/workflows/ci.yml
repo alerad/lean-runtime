@@ -46,7 +46,7 @@ jobs:
           path: test-results.xml
           if-no-files-found: error
 
-  integration:
+  integration_tests:
     strategy:
       fail-fast: false
       matrix:
@@ -104,6 +104,18 @@ jobs:
       - run: python -m pip install build
       - run: python -m build
       - run: python scripts/smoke_wheel.py dist/*.whl --lean
+
+  # Preserve the original status-check name for branch protection while the
+  # real integration job now runs on multiple platforms.
+  integration:
+    needs: integration_tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every integration platform to pass
+        env:
+          RESULT: ${{ needs.integration_tests.result }}
+        run: test "$RESULT" = success
 
   consumer:
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
