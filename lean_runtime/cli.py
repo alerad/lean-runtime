@@ -1927,936 +1927,847 @@ def main(argv: list[str] | None = None) -> int:
         heartbeat_seconds=2.0,
     )
     try:
-        if args.command == "completion":
-            print(_completion_script(args.shell), end="")
-            return 0
-        selected_availability = (
-            "local" if args.command in {"init", "update"} and args.offline else args.availability
-        )
-        selected_download_limit = (
-            parse_byte_size(args.max_download)
-            if args.command in {"init", "update"} and args.max_download is not None
-            else None
-        )
-        runtime = Runtime(
-            home=args.home,
-            on_event=renderer,
-            availability=selected_availability,
-            libraries=args.libraries,
-            max_download_bytes=selected_download_limit,
-            publisher_verification=args.publisher_verification,
-            trusted_publisher=args.trusted_publisher,
-            trusted_issuer=args.trusted_issuer,
-            verification_tool=args.verification_tool,
-        )
-        if args.command == "declaration-index-build":
-            lock = EnvironmentLock.load(args.lock)
-            built = build_declaration_index(
-                runtime,
-                lock,
-                args.output,
-                weights_path=args.weights,
-            )
-            _json(built.to_dict())
-            return 0
-        if args.command == "declaration-index-publish":
-            lock = EnvironmentLock.load(args.lock)
-            built = load_declaration_index_build(args.build, expected_lock_id=lock.lock_id)
-            di_repository = OCIRepository.parse(args.library)
-            declined = _gate_mutation(
-                f"Publish {len(built.shards)} declaration shard(s) for {lock.lock_id} "
-                f"to {di_repository.display}",
-                yes=args.yes,
-            )
-            if declined is not None:
-                return declined
-            di_publication = OCIDeclarationIndexPublisher(
-                di_repository, events=runtime.events
-            ).publish(tuple(di_item.source for di_item in built.shards), lock_id=lock.lock_id)
-            if args.sign:
-                CosignVerifier(executable=runtime.verification_executable).sign(
-                    di_repository, di_publication.manifest_digest
-                )
-            _json(di_publication.to_dict())
-            return 0
-        if args.command == "declaration-index-inspect":
-            built = load_declaration_index_build(args.build)
-            indexes = []
-            for di_item in built.shards:
-                di_source = di_item.source
-                shard = DeclarationShard(
-                    di_source.shard_id,
-                    di_source.package,
-                    di_source.source_id,
-                    di_source.toolchain,
-                    di_source.subdir,
-                    di_source.module_roots,
-                    di_source.namespace_roots,
-                    "sha256:" + "0" * 64,
-                    di_source.path.stat().st_size,
-                    "sha256:" + "0" * 64,
-                    1,
-                )
-                indexes.append(
-                    (
-                        shard,
-                        DeclarationIndex(di_source.path, expected_shard_id=di_source.shard_id),
-                    )
-                )
-            index_set = DeclarationIndexSet(built.lock_id, tuple(indexes))
-            di_match = index_set.resolve(args.resolve) if args.resolve else None
-            _json(
-                {
-                    "lock_id": built.lock_id,
-                    "shards": len(built.shards),
-                    "declarations": index_set.declaration_count,
-                    "match": (
-                        {
-                            "name": di_match.name,
-                            "module": di_match.module,
-                            "kind": di_match.kind,
-                            "weight": di_match.weight,
-                        }
-                        if di_match is not None
-                        else None
-                    ),
-                }
-            )
-            return 0
-        if args.command == "catalog-build":
-            os.environ.setdefault("MATHLIB_NO_CACHE_ON_UPDATE", "1")
-            catalog_result = build_catalog_file(
-                args.manifest,
-                args.output,
-                runtime=Runtime(home=args.home, libraries=()),
-                previous_path=args.previous,
-            )
-            print(
-                f"wrote {args.output}: {len(catalog_result.entries)} environments, "
-                f"{sum(len(entry.modules) for entry in catalog_result.entries)} "
-                f"module records, {catalog_result.digest}"
-            )
-            return 0
-        if args.command == "init":
-            init_plan = runtime.plan_project_init(
-                args.path,
-                name=args.name,
-                mathlib=args.mathlib,
-                toolchain=args.toolchain,
-                seed_from=args.seed_from,
-            )
-            if args.plan:
-                if args.json:
-                    _json(init_plan.to_dict())
-                else:
-                    _render_init_plan(init_plan)
-                return 0 if init_plan.ready else 1
-            if not init_plan.ready:
-                raise ProjectError(
-                    "project cannot be initialized:\n- " + "\n- ".join(init_plan.blockers)
-                )
-            if init_plan.action != "create":
-                raise ProjectError(
-                    f"{init_plan.root} is already a Lake project; use `lean-runtime adopt`"
-                )
-            if not args.json:
-                _render_init_plan(init_plan)
-            if not _confirm("Create this project?", yes=args.yes, json_mode=args.json):
-                if args.json:
-                    _json({**init_plan.to_dict(), "created": False})
-                else:
-                    print("No changes made. Use --yes for non-interactive creation.")
-                return _declined_exit(json_mode=args.json)
-            init_result = runtime.init_project(
-                args.path,
-                name=args.name,
-                mathlib=args.mathlib,
-                toolchain=args.toolchain,
-                agents=args.agents,
-                ci=args.ci,
-                seed_from=args.seed_from,
-            )
-            if args.json:
-                _json(init_result.to_dict())
-            else:
-                verb = "Ready" if init_plan.action == "create" else "Attached"
-                print(f"{verb}: {init_result.root}")
-                print(f"Shared packages: {init_result.packages}")
-                if args.agents:
-                    print(f"Agent guide: {init_result.root / 'AGENTS.md'}")
-                project_name = init_plan.project_name or init_result.root.name
-                # Lake capitalizes the module directory during `lake init`, so derive
-                # the hint from the file it actually created rather than the raw name.
-                created = sorted(
-                    path
-                    for path in init_result.root.glob("*/Basic.lean")
-                    if not path.parent.name.startswith(".")
-                )
-                module_file = (
-                    created[0].relative_to(init_result.root)
-                    if created
-                    else Path(project_name) / "Basic.lean"
-                )
-                print(f"Next: cd {init_result.root} && lean-runtime check {module_file.as_posix()}")
-            return 0
-        if args.command == "scan":
-            scan_result = runtime.scan_projects(args.path, recursive=args.recursive)
-            if args.json:
-                _json(scan_result.to_dict())
-            else:
-                print(f"Registered {len(scan_result.projects)} Lake project(s)")
-                for project_root in scan_result.projects:
-                    print(f"  {project_root}")
-            return 0
-        if args.command == "update":
-            update_plan = runtime.plan_project_update(args.path, seed_from=args.seed_from)
-            if not args.json:
-                _render_update_plan(update_plan)
-            if args.plan or not update_plan.changed or not update_plan.ready:
-                if args.json:
-                    _json({**update_plan.to_dict(), "applied": False})
-                return 0 if update_plan.ready else 1
-            apply_update = args.yes
-            if not apply_update and sys.stdin.isatty() and not args.json:
-                answer = input("Apply this update? [Y/n] ").strip().lower()
-                apply_update = answer in {"", "y", "yes"}
-            if not apply_update:
-                if args.json:
-                    _json({**update_plan.to_dict(), "applied": False})
-                else:
-                    print("No changes made. Re-run with --yes to apply noninteractively.")
-                return _declined_exit(json_mode=args.json)
-            runtime.update_project(args.path, seed_from=args.seed_from)
-            if args.json:
-                _json({**update_plan.to_dict(), "applied": True})
-            else:
-                print(f"Updated and attached: {update_plan.root}")
-            return 0
-        if args.command == "publish-project":
-            plan = runtime.inspect_project_publication(args.path, check_remote=True)
-            if not plan.ready:
-                if args.json:
-                    _json({**plan.to_dict(), "configured": False})
-                else:
-                    print(f"Project: {plan.root}")
-                    for blocker in plan.blockers:
-                        print(f"  blocker: {blocker}")
-                return 1
-            if len(plan.modules) != 1:
-                raise ProjectError(
-                    "publication requires exactly one library root; use `project export` "
-                    "for explicit multi-root publication"
-                )
-            repository = plan.repository or ""
-            match = re.search(r"github\.com[/:]([^/]+)/([^/.]+)(?:\.git)?$", repository)
-            if match is None:
-                raise ProjectError("publish currently requires a GitHub origin")
-            owner, repository_name = match.groups()
-            module = plan.modules[0]
-            library = f"ghcr.io/{owner.lower()}/{repository_name.lower()}-lean"
-            output = plan.root / ".github/workflows/publish-lean-environment.yml"
-            if args.json:
-                preview = {
-                    "project": str(plan.root),
-                    "module": module,
-                    "library": library,
-                    "workflow": str(output),
-                }
-            else:
-                print(f"Project:  {plan.root}")
-                print(f"Module:   {module}")
-                print(f"Publish:  {library}")
-                print(f"Workflow: {output}")
-            if not _confirm("Configure publication?", yes=args.yes, json_mode=args.json):
-                if args.json:
-                    _json({**preview, "configured": False})
-                else:
-                    print("No changes made. Use --yes for non-interactive configuration.")
-                return _declined_exit(json_mode=args.json)
-            if output.exists():
-                raise ProjectError(f"publication workflow already exists: {output}")
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(
-                project_publication_workflow(library=library, module=module), encoding="utf-8"
-            )
-            if args.json:
-                _json({**preview, "configured": True})
-            else:
-                print(f"Created {output}")
-            return 0
-        if args.command == "attach":
-            if args.recursive is None:
-                args.recursive = not _path_is_project_root(args.path)
-            adoption_plan = runtime.plan_project_adoption(args.path, recursive=args.recursive)
-            if args.dry_run:
-                if args.json:
-                    _json(adoption_plan.to_dict())
-                else:
-                    _render_adoption_plan(adoption_plan)
-                return 0 if adoption_plan.blocked == 0 else 1
-            if not args.json:
-                _render_adoption_plan(adoption_plan)
-            if not adoption_plan.ready:
-                return 1
-            if not _confirm("Adopt these projects?", yes=args.yes, json_mode=args.json):
-                if args.json:
-                    _json({**adoption_plan.to_dict(), "applied": False})
-                else:
-                    print("No changes made. Use --yes for non-interactive adoption.")
-                return _declined_exit(json_mode=args.json)
-            adoption_result = runtime.attach_projects(
-                args.path,
-                recursive=args.recursive,
-                plan=adoption_plan,
-            )
-            # Adoption is the canonical moment a repository becomes agent-ready,
-            # including re-runs against already-attached projects.
-            agent_guides = (
-                [
-                    guide
-                    for attached in adoption_result.results
-                    if (guide := runtime.write_agents_guide(attached.root)) is not None
-                ]
-                if args.agents
-                else []
-            )
-            if args.json:
-                _json(
-                    {
-                        **adoption_result.to_dict(),
-                        "agent_guides": [str(guide) for guide in agent_guides],
-                    }
-                )
-            else:
-                _render_adoption_plan(adoption_result.plan)
-                for attached in adoption_result.results:
-                    print(
-                        f"{attached.action}: {attached.root} · "
-                        f"{format_byte_size(attached.reclaimed_bytes)} replaced"
-                    )
-                for guide in agent_guides:
-                    print(f"Agent guide: {guide}")
-                for root, message in adoption_result.failures:
-                    print(f"failed: {root}: {message}", file=sys.stderr)
-            return 0 if adoption_result.ok else 1
-        if args.command == "detach":
-            detachment_plan = runtime.plan_project_detachment(args.path)
-            if args.dry_run:
-                if args.json:
-                    _json(detachment_plan.to_dict())
-                else:
-                    print(
-                        f"Would materialize {len(detachment_plan.packages)} independent "
-                        f"package copy/copies for {detachment_plan.root}"
-                    )
-                    print(
-                        f"Maximum additional space: "
-                        f"{format_byte_size(detachment_plan.materialize_bytes)} · "
-                        f"{format_byte_size(detachment_plan.bytes_free)} free"
-                    )
-                    for blocker in detachment_plan.blockers:
-                        print(f"  blocker: {blocker}")
-                return 0 if detachment_plan.ready else 1
-            if not args.json:
-                print(
-                    f"Materialize {len(detachment_plan.packages)} independent package "
-                    f"copy/copies for {detachment_plan.root}"
-                )
-            if not detachment_plan.ready:
-                return 1
-            if not _confirm("Stop sharing dependencies?", yes=args.yes, json_mode=args.json):
-                if args.json:
-                    _json({**detachment_plan.to_dict(), "applied": False})
-                else:
-                    print("No changes made. Use --yes for non-interactive operation.")
-                return _declined_exit(json_mode=args.json)
-            detach_result = runtime.detach_project(args.path)
-            if args.json:
-                _json(detach_result.to_dict())
-            else:
-                print(
-                    f"Detached {detach_result.root}; "
-                    f"materialized {detach_result.packages} package(s)"
-                )
-            return 0
-        if args.command == "project":
-            if args.project_command == "inspect":
-                plan = runtime.inspect_project_publication(
-                    args.path, module=args.module, check_remote=args.check_remote
-                )
-                if args.json:
-                    _json(plan.to_dict())
-                else:
-                    print(f"Project: {plan.package}")
-                    print(f"Root: {plan.root}")
-                    print(f"Toolchain: {plan.toolchain}")
-                    print(f"Repository: {plan.repository or 'unavailable'}")
-                    print(f"Revision: {plan.revision or 'unavailable'}")
-                    print(f"Import roots: {', '.join(plan.modules)}")
-                    print(f"Selected: {plan.selected_module or 'none'}")
-                    print(f"Ready to publish: {'yes' if plan.ready else 'no'}")
-                    for blocker in plan.blockers:
-                        print(f"  - {blocker}")
-                # `project info` is an inspection command. Publication readiness is
-                # reported as data; it is not a condition for successful inspection.
+        try:
+            if args.command == "completion":
+                print(_completion_script(args.shell), end="")
                 return 0
-            if args.project_command == "lock":
-                lock = runtime.prepare_project(args.path, module=args.module, timeout=args.timeout)
-                output = args.output or discover_project(args.path).root / "environment.lock.json"
-                lock.write(output)
-                _json(
-                    {
-                        "lock_id": lock.lock_id,
-                        "toolchain": lock.toolchain,
-                        "output": str(output),
-                    }
-                )
-                return 0
-            if args.project_command == "export":
-                info = runtime.export_project(
-                    args.path,
+            selected_availability = (
+                "local"
+                if args.command in {"init", "update"} and args.offline
+                else args.availability
+            )
+            selected_download_limit = (
+                parse_byte_size(args.max_download)
+                if args.command in {"init", "update"} and args.max_download is not None
+                else None
+            )
+            runtime = Runtime(
+                home=args.home,
+                on_event=renderer,
+                availability=selected_availability,
+                libraries=args.libraries,
+                max_download_bytes=selected_download_limit,
+                publisher_verification=args.publisher_verification,
+                trusted_publisher=args.trusted_publisher,
+                trusted_issuer=args.trusted_issuer,
+                verification_tool=args.verification_tool,
+            )
+            if args.command == "declaration-index-build":
+                lock = EnvironmentLock.load(args.lock)
+                built = build_declaration_index(
+                    runtime,
+                    lock,
                     args.output,
-                    module=args.module,
-                    timeout=args.timeout,
-                    accelerate=not args.no_accelerate,
+                    weights_path=args.weights,
                 )
-                _json(info.to_dict())
+                _json(built.to_dict())
                 return 0
-            plan = runtime.inspect_project_publication(args.path, module=args.module)
-            invalid = [
-                blocker for blocker in plan.blockers if not blocker.startswith("checkout is dirty")
-            ]
-            if invalid:
-                raise ValueError("cannot generate publication workflow:\n- " + "\n- ".join(invalid))
-            output = args.output or plan.root / ".github/workflows/publish-lean-environment.yml"
-            if output.exists() and not args.force:
-                raise ValueError(f"workflow already exists: {output}; pass --force to replace")
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(
-                project_publication_workflow(library=args.library, module=args.module),
-                encoding="utf-8",
-            )
-            print(f"Created {output}")
-            return 0
-        if args.command == "toolchain-install":
-            print(runtime.toolchains.ensure_full(args.toolchain))
-            return 0
-        if args.command in {"toolchain-list", "toolchain-info"}:
-            toolchains = runtime.toolchains.available_toolchains()
-            if args.command == "toolchain-info":
-                selected = runtime.toolchains.ensure(args.toolchain)
-                toolchains = (selected,)
-            toolchain_payload = [
-                {
-                    "toolchain": name,
-                    "full": (
-                        runtime.toolchains._full_toolchain_dir(name) / "bin" / "lake"
-                    ).is_file(),
-                    "slim": runtime.toolchains.has_slim(name),
-                }
-                for name in toolchains
-            ]
-            if args.json:
-                _json(toolchain_payload)
-            elif toolchain_payload:
-                for toolchain_record in toolchain_payload:
-                    capabilities = "full" if toolchain_record["full"] else "check-only"
-                    print(f"{toolchain_record['toolchain']}  {capabilities}")
-            else:
-                print("No Lean toolchains available.")
-            return 0
-        if args.command == "prepare":
-            lock = runtime.prepare(EnvironmentSpec.load(args.spec), timeout=args.timeout)
-            if args.output:
-                lock.write(args.output)
-                print(lock.lock_id)
-            else:
-                _json(lock.to_dict())
-            if args.timings:
-                print(
-                    render_timings(
-                        (
-                            PhaseTiming(
-                                "resolution", round((time.monotonic() - operation_started) * 1000)
-                            ),
-                        )
-                    ),
-                    file=sys.stderr,
-                )
-            return 0
-        if args.command in {"open", "acquire"}:
-            if args.command == "acquire" and args.download_only:
-                runtime.availability = "required"
-            environment = runtime.open_exact(
-                EnvironmentLock.load(args.lock),
-                name=args.name,
-                build_timeout=args.timeout,
-                accelerate=args.accelerate,
-                # Acquire means the whole environment: demanding the root
-                # module keeps a sparse capsule from satisfying it with an
-                # empty closure that only looks ready.
-                import_roots=(ROOT_MODULE,),
-            )
-            _json(environment.inspect().to_dict())
-            if args.timings:
-                print(
-                    render_timings(
-                        (
-                            PhaseTiming(
-                                "environment_open",
-                                round((time.monotonic() - operation_started) * 1000),
-                            ),
-                        )
-                    ),
-                    file=sys.stderr,
-                )
-            return 0
-        if args.command == "download":
-            runtime.availability = "required"
-            environment = runtime.open_exact(
-                EnvironmentLock.load(args.lock),
-                name=args.name,
-                import_roots=(ROOT_MODULE,),
-            )
-            _json(environment.inspect().to_dict())
-            return 0
-        if args.command == "publish-environment":
-            timeout_override = args.timeout
-            publisher = runtime.begin_publication(
-                args.publish_to,
-                auth_timeout=timeout_override if timeout_override is not None else 10,
-                registry_timeout=timeout_override if timeout_override is not None else 30,
-            )
-            access = publisher.check_access()
-            if args.check_access:
-                _json(
-                    envelope(_schema_for(args.command), ok=True, data=access.to_dict())
-                    if args.json
-                    else access.to_dict()
-                )
-                return 0
-            if args.lock is None:
-                raise ValueError("publish environment requires LOCK unless --check-access is used")
-            declined = _gate_mutation(
-                f"Build and publish the environment locked by {args.lock} to {args.publish_to}",
-                yes=args.yes,
-                json_mode=args.json,
-            )
-            if declined is not None:
-                return declined
-            environment = runtime.open_exact(
-                EnvironmentLock.load(args.lock),
-                name=args.name,
-                build_timeout=timeout_override if timeout_override is not None else 1800,
-                accelerate=args.accelerate,
-            )
-            publication = runtime.publish_environment(
-                environment.id,
-                args.publish_to,
-                tags=args.tag,
-                finalize=not args.platform_only,
-                sign=args.sign,
-                attest=args.attest,
-                publisher=publisher,
-            ).to_dict()
-            publication["consumer_command"] = (
-                f"LEAN_RUNTIME_LIBRARIES={args.publish_to} lean-runtime env acquire "
-                f"{args.lock} --download-only"
-            )
-            _json(
-                envelope(_schema_for(args.command), ok=True, data=publication)
-                if args.json
-                else publication
-            )
-            return 0
-        if args.command == "finalize-environment":
-            descriptors = []
-            for path in args.platform_results:
-                value = json.loads(path.read_text(encoding="utf-8"))
-                descriptor = value.get("computer_record") if isinstance(value, dict) else None
-                if not isinstance(descriptor, dict):
-                    raise ValueError(f"invalid platform result: {path}")
-                descriptors.append(descriptor)
-            if args.sign:
-                digest = runtime.finalize_publication(
-                    args.library, args.lock_id, descriptors, tags=args.tag, sign=True
-                )
-            else:
-                digest = runtime.finalize_publication(
-                    args.library, args.lock_id, descriptors, tags=args.tag
-                )
-            _json({"exact_environment_id": args.lock_id, "publication_id": digest})
-            return 0
-        if args.command == "publish-toolchain":
-            declined = _gate_mutation(
-                f"Publish toolchain {args.toolchain} for this platform to {args.library}",
-                yes=args.yes,
-            )
-            if declined is not None:
-                return declined
-            _json(runtime.publish_toolchain(args.toolchain, args.library).to_dict())
-            return 0
-        if args.command == "finalize-toolchain":
-            descriptors = []
-            for path in args.platform_results:
-                value = json.loads(path.read_text(encoding="utf-8"))
-                descriptor = value.get("descriptor") if isinstance(value, dict) else None
-                if not isinstance(descriptor, dict):
-                    raise ValueError(f"invalid toolchain platform result: {path}")
-                descriptors.append(descriptor)
-            digest = runtime.finalize_toolchain_publication(
-                args.toolchain, args.library, descriptors, sign=args.sign
-            )
-            _json({"toolchain": args.toolchain, "publication_id": digest})
-            return 0
-        if args.command == "copy-save":
-            _json(runtime.save_portable_copy(args.environment, args.output).to_dict())
-            return 0
-        if args.command == "copy-open":
-            environment = runtime.open_portable_copy(
-                args.copy, name=args.name, probe=not args.no_probe
-            )
-            _json(environment.inspect().to_dict())
-            return 0
-        if args.command == "program-create":
-            provenance = None
-            if args.provenance_file is not None:
-                value = json.loads(args.provenance_file.read_text(encoding="utf-8"))
-                if not isinstance(value, dict) or not all(
-                    isinstance(key, str) and isinstance(item, str) for key, item in value.items()
-                ):
-                    raise ValueError("program provenance file must contain a JSON string object")
-                provenance = value
-            program = runtime.create_program(
-                args.payload,
-                command=args.program_command,
-                source_revision=args.source_revision,
-                source_environment_id=args.source_environment_id,
-                source_lock_id=args.source_lock_id,
-                toolchain=args.toolchain,
-                capability_id=args.capability_id,
-                provenance=provenance,
-            )
-            _json(
-                {
-                    "program_id": program.id,
-                    "description": program.description.to_dict(),
-                    "location": str(program.root),
-                }
-            )
-            return 0
-        if args.command == "program-info":
-            ready_program = runtime.program(args.program_id)
-            _json(
-                {
-                    "program_id": ready_program.id,
-                    "description": ready_program.description.to_dict(),
-                    "location": str(ready_program.root),
-                }
-            )
-            return 0
-        if args.command == "program-run":
-            ready_program = runtime.program(args.program_id)
-            command = (*ready_program.description.command, *args.arguments)
-            with ready_program.spawn_interactive(command) as session:
-                for line in sys.stdin:
-                    print(session.request_line(line.rstrip("\n")))
-            program_result = session.close()
-            return 0 if program_result.ok else 1
-        if args.command == "program-save":
-            _json(runtime.save_program_copy(args.program_id, args.output).to_dict())
-            return 0
-        if args.command == "program-open":
-            program = runtime.open_program_copy(args.copy)
-            _json({"program_id": program.id, "description": program.description.to_dict()})
-            return 0
-        if args.command == "program-download":
-            program = runtime.download_program(
-                args.library,
-                args.reference,
-                expected_source_revision=args.source_revision,
-            )
-            _json({"program_id": program.id, "description": program.description.to_dict()})
-            return 0
-        if args.command == "publish-program":
-            declined = _gate_mutation(
-                f"Publish program {args.program_id} to {args.library}", yes=args.yes
-            )
-            if declined is not None:
-                return declined
-            _json(
-                runtime.publish_program(
-                    args.program_id,
-                    args.library,
-                    tags=args.tag,
-                    sign=args.sign,
-                ).to_dict()
-            )
-            return 0
-        if args.command == "finalize-program":
-            descriptors = []
-            for path in args.computer_results:
-                value = json.loads(path.read_text(encoding="utf-8"))
-                descriptor = value.get("computer_record") if isinstance(value, dict) else None
-                if not isinstance(descriptor, dict):
-                    raise ValueError(f"invalid program computer result: {path}")
-                descriptors.append(descriptor)
-            digest = runtime.finalize_program_publication(
-                args.library,
-                args.source_revision,
-                descriptors,
-                tags=args.tag,
-                sign=args.sign,
-            )
-            _json({"source_revision": args.source_revision, "publication_id": digest})
-            return 0
-        if args.command == "inspect":
-            subject_path = Path(args.environment).expanduser()
-            if args.explain and subject_path.is_file():
-                lock = EnvironmentLock.load(subject_path)
-                payload: dict[str, Any] = {
-                    "subject": str(subject_path),
-                    "subject_kind": "lock",
-                    "lock_id": lock.lock_id,
-                    "environment": None,
-                    "package_locks": [],
-                    "decisions": [item.to_dict() for item in runtime.explain(args.environment)],
-                }
-            else:
-                environment = runtime.environment(args.environment)
-                payload = {
-                    "subject": args.environment,
-                    "subject_kind": "environment",
-                    "lock_id": environment.lock.lock_id,
-                    "environment": environment.inspect().to_dict(),
-                    "package_locks": [],
-                    "decisions": [],
-                }
-                if args.packages:
-                    payload["package_locks"] = [
-                        package.to_dict() for package in environment.lock.packages
-                    ]
-                if args.explain:
-                    payload["decisions"] = [
-                        item.to_dict() for item in runtime.explain(args.environment)
-                    ]
-            _json(envelope("lean-runtime.inspect/v1", ok=True, data=payload))
-            return 0
-        if args.command == "status":
-            status_payload = _status_report(runtime, args)
-            if args.json:
-                _json(serialize_status_v1(status_payload))
-            else:
-                _render_status(status_payload, display_subject=args.subject)
-            return 0
-        if args.command == "environments":
-            records = runtime.list_environments()
-            if args.json:
-                _json(list(records))
-            else:
-                _render_environments(records)
-            return 0
-        if args.command == "storage":
-            if args.verify and not args.json:
-                print("Verifying storage ledger…", file=sys.stderr)
-            status = runtime.store_status(verify=args.verify)
-            if args.json:
-                _json(status.to_dict())
-            else:
-                _render_storage(status)
-            return 0
-        if args.command == "toolchain-slim":
-            if args.prune_original:
+            if args.command == "declaration-index-publish":
+                lock = EnvironmentLock.load(args.lock)
+                built = load_declaration_index_build(args.build, expected_lock_id=lock.lock_id)
+                di_repository = OCIRepository.parse(args.library)
                 declined = _gate_mutation(
-                    f"Remove the full toolchain {args.toolchain} after materializing "
-                    "its slim check-only copy",
+                    f"Publish {len(built.shards)} declaration shard(s) for {lock.lock_id} "
+                    f"to {di_repository.display}",
                     yes=args.yes,
                 )
                 if declined is not None:
                     return declined
-            manifest = runtime.toolchains.materialize_slim(args.toolchain)
-            if args.prune_original:
-                runtime.toolchains.prune_original(args.toolchain)
-            _json(
-                {
-                    **manifest.to_dict(),
-                    "path": str(runtime.toolchains.slim_path(args.toolchain)),
-                    "pruned_original": args.prune_original,
-                }
-            )
-            return 0
-        if args.command == "doctor":
-            doctor_report = runtime.doctor()
-            if args.yes or (
-                not doctor_report.ok
-                and _confirm("Apply safe repairs?", yes=False, json_mode=args.json)
-            ):
-                doctor_report = runtime.doctor_fix()
-            if args.json:
-                _json(doctor_report.to_dict())
-            else:
-                _render_doctor(doctor_report)
-            return 0 if doctor_report.ok else 2
-        if args.command == "verify":
-            report = runtime.verify(args.subject, offline=args.offline, rebuild=args.rebuild)
-            if args.json:
-                _json(serialize_verify_v1(report))
-            elif report.ok:
-                print(f"✓ {args.subject} verified")
-                if args.verbose:
-                    for check in report.checks:
-                        marker = "-" if check.skipped else "✓" if check.ok else "!"
-                        print(f"{marker} {check.code.replace('_', ' ')}")
-            else:
-                failure = report.failures[0]
-                print(f"✗ {args.subject} failed verification", file=sys.stderr)
-                print(
-                    str((failure.details or {}).get("message", failure.code)),
-                    file=sys.stderr,
-                )
-            return 0 if report.ok else 1
-        if args.command == "compare":
-            difference = runtime.compare(args.left, args.right)
-            if args.json:
-                _json(serialize_comparison_v1(difference))
-            elif difference.equal:
-                print("Contexts are identical.")
-            else:
-                print(difference.summary)
-                for item in difference.changes:
-                    print(f"{item.path}\n  {item.before} -> {item.after}")
-            return 0
-        if args.command == "profile":
-            profile_report = runtime.profile(
-                args.environment, args.file, warmup=args.warmup, repeat=args.repeat
-            )
-            if args.json:
-                _json(serialize_profile_v1(profile_report))
-            else:
-                stats = profile_report.statistics()
-                print(f"Profile: {args.file.name}")
-                print(f"Samples: {len(profile_report.results)}")
-                for name in ("min", "median", "mean", "p95", "max"):
-                    value = stats[name]
-                    if value is not None:
-                        print(f"  {name:<6} {value:g} ms")
-            return 0 if profile_report.ok else 1
-        if args.command == "matrix":
-            contexts = load_matrix(args.configuration)
-            matrix_result = runtime.check_matrix(
-                args.file.read_text(encoding="utf-8"),
-                contexts=contexts,
-                filename=args.file.name,
-                base=args.configuration.parent,
-                concurrency=args.concurrency,
-            )
-            if args.json:
-                _json(serialize_matrix_v1(matrix_result))
-            else:
-                print("Context\tVerdict\tTime\tEnvironment")
-                for entry in matrix_result.entries:
-                    result = entry.result
-                    print(
-                        f"{entry.context}\t{result.verdict}\t"
-                        f"{result.elapsed_seconds:.2f}s\t{result.environment_id or '-'}"
+                di_publication = OCIDeclarationIndexPublisher(
+                    di_repository, events=runtime.events
+                ).publish(tuple(di_item.source for di_item in built.shards), lock_id=lock.lock_id)
+                if args.sign:
+                    CosignVerifier(executable=runtime.verification_executable).sign(
+                        di_repository, di_publication.manifest_digest
                     )
-            return 0 if matrix_result.ok else 1
-        if args.command == "replay":
-            capture = ExecutionCapture.load(args.capture)
-            result = runtime.replay_capture(capture)
-            _emit_result(result, args.json)
-            if capture.expected_ok is not None and result.ok != capture.expected_ok:
-                return 1
-            return 0 if result.ok else 1
-        if args.command == "clean":
-            execute_cleanup = False
-            cleanup_preview = runtime.clean(
-                dry_run=True,
-                minimum_age_seconds=args.minimum_age_hours * 3600,
-                keep_last=args.keep_last,
-            )
-            preview_downloads = (
-                runtime.clean_downloads(
-                    dry_run=True,
-                    minimum_age_seconds=args.minimum_age_hours * 3600,
-                )
-                if args.include_downloads
-                else None
-            )
-            preview_scratch = runtime.clean_scratch(
-                dry_run=True,
-                minimum_age_seconds=min(args.minimum_age_hours * 3600, 3600),
-            )
-            preview_project_artifacts = runtime.clean_legacy_project_artifacts(dry_run=True)
-            if not args.json:
-                _render_cleanup(
-                    cleanup_preview,
-                    preview_downloads,
-                    preview_scratch,
-                    preview_project_artifacts,
-                )
-            has_candidates = bool(
-                cleanup_preview.candidates
-                or (preview_downloads and preview_downloads.candidates)
-                or preview_scratch.candidates
-                or preview_project_artifacts.candidates
-            )
-            if has_candidates and not args.dry_run:
-                execute_cleanup = _confirm("Remove these files?", yes=args.yes, json_mode=args.json)
-            gc_report = runtime.clean(
-                dry_run=not execute_cleanup,
-                minimum_age_seconds=args.minimum_age_hours * 3600,
-                keep_last=args.keep_last,
-            )
-            gc_downloads = (
-                runtime.clean_downloads(
-                    dry_run=not execute_cleanup,
-                    minimum_age_seconds=args.minimum_age_hours * 3600,
-                )
-                if args.include_downloads
-                else None
-            )
-            gc_scratch = runtime.clean_scratch(
-                dry_run=not execute_cleanup,
-                minimum_age_seconds=min(args.minimum_age_hours * 3600, 3600),
-            )
-            gc_project_artifacts = runtime.clean_legacy_project_artifacts(
-                dry_run=not execute_cleanup
-            )
-            if args.json:
-                gc_payload: dict[str, Any] = {
-                    "environments": gc_report.to_dict(),
-                    "downloaded_files": gc_downloads.to_dict() if gc_downloads else None,
-                    "scratch": gc_scratch.to_dict(),
-                    "project_artifacts": gc_project_artifacts.to_dict(),
-                }
+                _json(di_publication.to_dict())
+                return 0
+            if args.command == "declaration-index-inspect":
+                built = load_declaration_index_build(args.build)
+                indexes = []
+                for di_item in built.shards:
+                    di_source = di_item.source
+                    shard = DeclarationShard(
+                        di_source.shard_id,
+                        di_source.package,
+                        di_source.source_id,
+                        di_source.toolchain,
+                        di_source.subdir,
+                        di_source.module_roots,
+                        di_source.namespace_roots,
+                        "sha256:" + "0" * 64,
+                        di_source.path.stat().st_size,
+                        "sha256:" + "0" * 64,
+                        1,
+                    )
+                    indexes.append(
+                        (
+                            shard,
+                            DeclarationIndex(di_source.path, expected_shard_id=di_source.shard_id),
+                        )
+                    )
+                index_set = DeclarationIndexSet(built.lock_id, tuple(indexes))
+                di_match = index_set.resolve(args.resolve) if args.resolve else None
                 _json(
-                    envelope(
-                        "lean-runtime.cleanup/v1",
-                        ok=True,
-                        data=gc_payload,
-                    )
+                    {
+                        "lock_id": built.lock_id,
+                        "shards": len(built.shards),
+                        "declarations": index_set.declaration_count,
+                        "match": (
+                            {
+                                "name": di_match.name,
+                                "module": di_match.module,
+                                "kind": di_match.kind,
+                                "weight": di_match.weight,
+                            }
+                            if di_match is not None
+                            else None
+                        ),
+                    }
                 )
-            elif execute_cleanup:
-                _render_cleanup(gc_report, gc_downloads, gc_scratch, gc_project_artifacts)
-            return 0
-        if args.command == "check":
-            if args.across is not None:
-                if (
-                    len(args.inputs) != 1
-                    or args.package_refs
-                    or args.include
-                    or args.project
-                    or args.environment
+                return 0
+            if args.command == "catalog-build":
+                os.environ.setdefault("MATHLIB_NO_CACHE_ON_UPDATE", "1")
+                catalog_result = build_catalog_file(
+                    args.manifest,
+                    args.output,
+                    runtime=Runtime(home=args.home, libraries=()),
+                    previous_path=args.previous,
+                )
+                print(
+                    f"wrote {args.output}: {len(catalog_result.entries)} environments, "
+                    f"{sum(len(entry.modules) for entry in catalog_result.entries)} "
+                    f"module records, {catalog_result.digest}"
+                )
+                return 0
+            if args.command == "init":
+                init_plan = runtime.plan_project_init(
+                    args.path,
+                    name=args.name,
+                    mathlib=args.mathlib,
+                    toolchain=args.toolchain,
+                    seed_from=args.seed_from,
+                )
+                if args.plan:
+                    if args.json:
+                        _json(init_plan.to_dict())
+                    else:
+                        _render_init_plan(init_plan)
+                    return 0 if init_plan.ready else 1
+                if not init_plan.ready:
+                    raise ProjectError(
+                        "project cannot be initialized:\n- " + "\n- ".join(init_plan.blockers)
+                    )
+                if init_plan.action != "create":
+                    raise ProjectError(
+                        f"{init_plan.root} is already a Lake project; use `lean-runtime adopt`"
+                    )
+                if not args.json:
+                    _render_init_plan(init_plan)
+                if not _confirm("Create this project?", yes=args.yes, json_mode=args.json):
+                    if args.json:
+                        _json({**init_plan.to_dict(), "created": False})
+                    else:
+                        print("No changes made. Use --yes for non-interactive creation.")
+                    return _declined_exit(json_mode=args.json)
+                init_result = runtime.init_project(
+                    args.path,
+                    name=args.name,
+                    mathlib=args.mathlib,
+                    toolchain=args.toolchain,
+                    agents=args.agents,
+                    ci=args.ci,
+                    seed_from=args.seed_from,
+                )
+                if args.json:
+                    _json(init_result.to_dict())
+                else:
+                    verb = "Ready" if init_plan.action == "create" else "Attached"
+                    print(f"{verb}: {init_result.root}")
+                    print(f"Shared packages: {init_result.packages}")
+                    if args.agents:
+                        print(f"Agent guide: {init_result.root / 'AGENTS.md'}")
+                    project_name = init_plan.project_name or init_result.root.name
+                    # Lake capitalizes the module directory during `lake init`, so derive
+                    # the hint from the file it actually created rather than the raw name.
+                    created = sorted(
+                        path
+                        for path in init_result.root.glob("*/Basic.lean")
+                        if not path.parent.name.startswith(".")
+                    )
+                    module_file = (
+                        created[0].relative_to(init_result.root)
+                        if created
+                        else Path(project_name) / "Basic.lean"
+                    )
+                    print(
+                        f"Next: cd {init_result.root} && lean-runtime check "
+                        f"{module_file.as_posix()}"
+                    )
+                return 0
+            if args.command == "scan":
+                scan_result = runtime.scan_projects(args.path, recursive=args.recursive)
+                if args.json:
+                    _json(scan_result.to_dict())
+                else:
+                    print(f"Registered {len(scan_result.projects)} Lake project(s)")
+                    for project_root in scan_result.projects:
+                        print(f"  {project_root}")
+                return 0
+            if args.command == "update":
+                update_plan = runtime.plan_project_update(args.path, seed_from=args.seed_from)
+                if not args.json:
+                    _render_update_plan(update_plan)
+                if args.plan or not update_plan.changed or not update_plan.ready:
+                    if args.json:
+                        _json({**update_plan.to_dict(), "applied": False})
+                    return 0 if update_plan.ready else 1
+                apply_update = args.yes
+                if not apply_update and sys.stdin.isatty() and not args.json:
+                    answer = input("Apply this update? [Y/n] ").strip().lower()
+                    apply_update = answer in {"", "y", "yes"}
+                if not apply_update:
+                    if args.json:
+                        _json({**update_plan.to_dict(), "applied": False})
+                    else:
+                        print("No changes made. Re-run with --yes to apply noninteractively.")
+                    return _declined_exit(json_mode=args.json)
+                runtime.update_project(args.path, seed_from=args.seed_from)
+                if args.json:
+                    _json({**update_plan.to_dict(), "applied": True})
+                else:
+                    print(f"Updated and attached: {update_plan.root}")
+                return 0
+            if args.command == "publish-project":
+                plan = runtime.inspect_project_publication(args.path, check_remote=True)
+                if not plan.ready:
+                    if args.json:
+                        _json({**plan.to_dict(), "configured": False})
+                    else:
+                        print(f"Project: {plan.root}")
+                        for blocker in plan.blockers:
+                            print(f"  blocker: {blocker}")
+                    return 1
+                if len(plan.modules) != 1:
+                    raise ProjectError(
+                        "publication requires exactly one library root; use `project export` "
+                        "for explicit multi-root publication"
+                    )
+                repository = plan.repository or ""
+                match = re.search(r"github\.com[/:]([^/]+)/([^/.]+)(?:\.git)?$", repository)
+                if match is None:
+                    raise ProjectError("publish currently requires a GitHub origin")
+                owner, repository_name = match.groups()
+                module = plan.modules[0]
+                library = f"ghcr.io/{owner.lower()}/{repository_name.lower()}-lean"
+                output = plan.root / ".github/workflows/publish-lean-environment.yml"
+                if args.json:
+                    preview = {
+                        "project": str(plan.root),
+                        "module": module,
+                        "library": library,
+                        "workflow": str(output),
+                    }
+                else:
+                    print(f"Project:  {plan.root}")
+                    print(f"Module:   {module}")
+                    print(f"Publish:  {library}")
+                    print(f"Workflow: {output}")
+                if not _confirm("Configure publication?", yes=args.yes, json_mode=args.json):
+                    if args.json:
+                        _json({**preview, "configured": False})
+                    else:
+                        print("No changes made. Use --yes for non-interactive configuration.")
+                    return _declined_exit(json_mode=args.json)
+                if output.exists():
+                    raise ProjectError(f"publication workflow already exists: {output}")
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(
+                    project_publication_workflow(library=library, module=module), encoding="utf-8"
+                )
+                if args.json:
+                    _json({**preview, "configured": True})
+                else:
+                    print(f"Created {output}")
+                return 0
+            if args.command == "attach":
+                if args.recursive is None:
+                    args.recursive = not _path_is_project_root(args.path)
+                adoption_plan = runtime.plan_project_adoption(args.path, recursive=args.recursive)
+                if args.dry_run:
+                    if args.json:
+                        _json(adoption_plan.to_dict())
+                    else:
+                        _render_adoption_plan(adoption_plan)
+                    return 0 if adoption_plan.blocked == 0 else 1
+                if not args.json:
+                    _render_adoption_plan(adoption_plan)
+                if not adoption_plan.ready:
+                    return 1
+                if not _confirm("Adopt these projects?", yes=args.yes, json_mode=args.json):
+                    if args.json:
+                        _json({**adoption_plan.to_dict(), "applied": False})
+                    else:
+                        print("No changes made. Use --yes for non-interactive adoption.")
+                    return _declined_exit(json_mode=args.json)
+                adoption_result = runtime.attach_projects(
+                    args.path,
+                    recursive=args.recursive,
+                    plan=adoption_plan,
+                )
+                # Adoption is the canonical moment a repository becomes agent-ready,
+                # including re-runs against already-attached projects.
+                agent_guides = (
+                    [
+                        guide
+                        for attached in adoption_result.results
+                        if (guide := runtime.write_agents_guide(attached.root)) is not None
+                    ]
+                    if args.agents
+                    else []
+                )
+                if args.json:
+                    _json(
+                        {
+                            **adoption_result.to_dict(),
+                            "agent_guides": [str(guide) for guide in agent_guides],
+                        }
+                    )
+                else:
+                    _render_adoption_plan(adoption_result.plan)
+                    for attached in adoption_result.results:
+                        print(
+                            f"{attached.action}: {attached.root} · "
+                            f"{format_byte_size(attached.reclaimed_bytes)} replaced"
+                        )
+                    for guide in agent_guides:
+                        print(f"Agent guide: {guide}")
+                    for root, message in adoption_result.failures:
+                        print(f"failed: {root}: {message}", file=sys.stderr)
+                return 0 if adoption_result.ok else 1
+            if args.command == "detach":
+                detachment_plan = runtime.plan_project_detachment(args.path)
+                if args.dry_run:
+                    if args.json:
+                        _json(detachment_plan.to_dict())
+                    else:
+                        print(
+                            f"Would materialize {len(detachment_plan.packages)} independent "
+                            f"package copy/copies for {detachment_plan.root}"
+                        )
+                        print(
+                            f"Maximum additional space: "
+                            f"{format_byte_size(detachment_plan.materialize_bytes)} · "
+                            f"{format_byte_size(detachment_plan.bytes_free)} free"
+                        )
+                        for blocker in detachment_plan.blockers:
+                            print(f"  blocker: {blocker}")
+                    return 0 if detachment_plan.ready else 1
+                if not args.json:
+                    print(
+                        f"Materialize {len(detachment_plan.packages)} independent package "
+                        f"copy/copies for {detachment_plan.root}"
+                    )
+                if not detachment_plan.ready:
+                    return 1
+                if not _confirm("Stop sharing dependencies?", yes=args.yes, json_mode=args.json):
+                    if args.json:
+                        _json({**detachment_plan.to_dict(), "applied": False})
+                    else:
+                        print("No changes made. Use --yes for non-interactive operation.")
+                    return _declined_exit(json_mode=args.json)
+                detach_result = runtime.detach_project(args.path)
+                if args.json:
+                    _json(detach_result.to_dict())
+                else:
+                    print(
+                        f"Detached {detach_result.root}; "
+                        f"materialized {detach_result.packages} package(s)"
+                    )
+                return 0
+            if args.command == "project":
+                if args.project_command == "inspect":
+                    plan = runtime.inspect_project_publication(
+                        args.path, module=args.module, check_remote=args.check_remote
+                    )
+                    if args.json:
+                        _json(plan.to_dict())
+                    else:
+                        print(f"Project: {plan.package}")
+                        print(f"Root: {plan.root}")
+                        print(f"Toolchain: {plan.toolchain}")
+                        print(f"Repository: {plan.repository or 'unavailable'}")
+                        print(f"Revision: {plan.revision or 'unavailable'}")
+                        print(f"Import roots: {', '.join(plan.modules)}")
+                        print(f"Selected: {plan.selected_module or 'none'}")
+                        print(f"Ready to publish: {'yes' if plan.ready else 'no'}")
+                        for blocker in plan.blockers:
+                            print(f"  - {blocker}")
+                    # `project info` is an inspection command. Publication readiness is
+                    # reported as data; it is not a condition for successful inspection.
+                    return 0
+                if args.project_command == "lock":
+                    lock = runtime.prepare_project(
+                        args.path, module=args.module, timeout=args.timeout
+                    )
+                    output = (
+                        args.output or discover_project(args.path).root / "environment.lock.json"
+                    )
+                    lock.write(output)
+                    _json(
+                        {
+                            "lock_id": lock.lock_id,
+                            "toolchain": lock.toolchain,
+                            "output": str(output),
+                        }
+                    )
+                    return 0
+                if args.project_command == "export":
+                    info = runtime.export_project(
+                        args.path,
+                        args.output,
+                        module=args.module,
+                        timeout=args.timeout,
+                        accelerate=not args.no_accelerate,
+                    )
+                    _json(info.to_dict())
+                    return 0
+                plan = runtime.inspect_project_publication(args.path, module=args.module)
+                invalid = [
+                    blocker
+                    for blocker in plan.blockers
+                    if not blocker.startswith("checkout is dirty")
+                ]
+                if invalid:
+                    raise ValueError(
+                        "cannot generate publication workflow:\n- " + "\n- ".join(invalid)
+                    )
+                output = args.output or plan.root / ".github/workflows/publish-lean-environment.yml"
+                if output.exists() and not args.force:
+                    raise ValueError(f"workflow already exists: {output}; pass --force to replace")
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(
+                    project_publication_workflow(library=args.library, module=args.module),
+                    encoding="utf-8",
+                )
+                print(f"Created {output}")
+                return 0
+            if args.command == "toolchain-install":
+                print(runtime.toolchains.ensure_full(args.toolchain))
+                return 0
+            if args.command in {"toolchain-list", "toolchain-info"}:
+                toolchains = runtime.toolchains.available_toolchains()
+                if args.command == "toolchain-info":
+                    selected = runtime.toolchains.ensure(args.toolchain)
+                    toolchains = (selected,)
+                toolchain_payload = [
+                    {
+                        "toolchain": name,
+                        "full": (
+                            runtime.toolchains._full_toolchain_dir(name) / "bin" / "lake"
+                        ).is_file(),
+                        "slim": runtime.toolchains.has_slim(name),
+                    }
+                    for name in toolchains
+                ]
+                if args.json:
+                    _json(toolchain_payload)
+                elif toolchain_payload:
+                    for toolchain_record in toolchain_payload:
+                        capabilities = "full" if toolchain_record["full"] else "check-only"
+                        print(f"{toolchain_record['toolchain']}  {capabilities}")
+                else:
+                    print("No Lean toolchains available.")
+                return 0
+            if args.command == "prepare":
+                lock = runtime.prepare(EnvironmentSpec.load(args.spec), timeout=args.timeout)
+                if args.output:
+                    lock.write(args.output)
+                    print(lock.lock_id)
+                else:
+                    _json(lock.to_dict())
+                if args.timings:
+                    print(
+                        render_timings(
+                            (
+                                PhaseTiming(
+                                    "resolution",
+                                    round((time.monotonic() - operation_started) * 1000),
+                                ),
+                            )
+                        ),
+                        file=sys.stderr,
+                    )
+                return 0
+            if args.command in {"open", "acquire"}:
+                if args.command == "acquire" and args.download_only:
+                    runtime.availability = "required"
+                environment = runtime.open_exact(
+                    EnvironmentLock.load(args.lock),
+                    name=args.name,
+                    build_timeout=args.timeout,
+                    accelerate=args.accelerate,
+                    # Acquire means the whole environment: demanding the root
+                    # module keeps a sparse capsule from satisfying it with an
+                    # empty closure that only looks ready.
+                    import_roots=(ROOT_MODULE,),
+                )
+                _json(environment.inspect().to_dict())
+                if args.timings:
+                    print(
+                        render_timings(
+                            (
+                                PhaseTiming(
+                                    "environment_open",
+                                    round((time.monotonic() - operation_started) * 1000),
+                                ),
+                            )
+                        ),
+                        file=sys.stderr,
+                    )
+                return 0
+            if args.command == "download":
+                runtime.availability = "required"
+                environment = runtime.open_exact(
+                    EnvironmentLock.load(args.lock),
+                    name=args.name,
+                    import_roots=(ROOT_MODULE,),
+                )
+                _json(environment.inspect().to_dict())
+                return 0
+            if args.command == "publish-environment":
+                timeout_override = args.timeout
+                publisher = runtime.begin_publication(
+                    args.publish_to,
+                    auth_timeout=timeout_override if timeout_override is not None else 10,
+                    registry_timeout=timeout_override if timeout_override is not None else 30,
+                )
+                access = publisher.check_access()
+                if args.check_access:
+                    _json(
+                        envelope(_schema_for(args.command), ok=True, data=access.to_dict())
+                        if args.json
+                        else access.to_dict()
+                    )
+                    return 0
+                if args.lock is None:
+                    raise ValueError(
+                        "publish environment requires LOCK unless --check-access is used"
+                    )
+                declined = _gate_mutation(
+                    f"Build and publish the environment locked by {args.lock} to {args.publish_to}",
+                    yes=args.yes,
+                    json_mode=args.json,
+                )
+                if declined is not None:
+                    return declined
+                environment = runtime.open_exact(
+                    EnvironmentLock.load(args.lock),
+                    name=args.name,
+                    build_timeout=timeout_override if timeout_override is not None else 1800,
+                    accelerate=args.accelerate,
+                )
+                publication = runtime.publish_environment(
+                    environment.id,
+                    args.publish_to,
+                    tags=args.tag,
+                    finalize=not args.platform_only,
+                    sign=args.sign,
+                    attest=args.attest,
+                    publisher=publisher,
+                ).to_dict()
+                publication["consumer_command"] = (
+                    f"LEAN_RUNTIME_LIBRARIES={args.publish_to} lean-runtime env acquire "
+                    f"{args.lock} --download-only"
+                )
+                _json(
+                    envelope(_schema_for(args.command), ok=True, data=publication)
+                    if args.json
+                    else publication
+                )
+                return 0
+            if args.command == "finalize-environment":
+                descriptors = []
+                for path in args.platform_results:
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                    descriptor = value.get("computer_record") if isinstance(value, dict) else None
+                    if not isinstance(descriptor, dict):
+                        raise ValueError(f"invalid platform result: {path}")
+                    descriptors.append(descriptor)
+                if args.sign:
+                    digest = runtime.finalize_publication(
+                        args.library, args.lock_id, descriptors, tags=args.tag, sign=True
+                    )
+                else:
+                    digest = runtime.finalize_publication(
+                        args.library, args.lock_id, descriptors, tags=args.tag
+                    )
+                _json({"exact_environment_id": args.lock_id, "publication_id": digest})
+                return 0
+            if args.command == "publish-toolchain":
+                declined = _gate_mutation(
+                    f"Publish toolchain {args.toolchain} for this platform to {args.library}",
+                    yes=args.yes,
+                )
+                if declined is not None:
+                    return declined
+                _json(runtime.publish_toolchain(args.toolchain, args.library).to_dict())
+                return 0
+            if args.command == "finalize-toolchain":
+                descriptors = []
+                for path in args.platform_results:
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                    descriptor = value.get("descriptor") if isinstance(value, dict) else None
+                    if not isinstance(descriptor, dict):
+                        raise ValueError(f"invalid toolchain platform result: {path}")
+                    descriptors.append(descriptor)
+                digest = runtime.finalize_toolchain_publication(
+                    args.toolchain, args.library, descriptors, sign=args.sign
+                )
+                _json({"toolchain": args.toolchain, "publication_id": digest})
+                return 0
+            if args.command == "copy-save":
+                _json(runtime.save_portable_copy(args.environment, args.output).to_dict())
+                return 0
+            if args.command == "copy-open":
+                environment = runtime.open_portable_copy(
+                    args.copy, name=args.name, probe=not args.no_probe
+                )
+                _json(environment.inspect().to_dict())
+                return 0
+            if args.command == "program-create":
+                provenance = None
+                if args.provenance_file is not None:
+                    value = json.loads(args.provenance_file.read_text(encoding="utf-8"))
+                    if not isinstance(value, dict) or not all(
+                        isinstance(key, str) and isinstance(item, str)
+                        for key, item in value.items()
+                    ):
+                        raise ValueError(
+                            "program provenance file must contain a JSON string object"
+                        )
+                    provenance = value
+                program = runtime.create_program(
+                    args.payload,
+                    command=args.program_command,
+                    source_revision=args.source_revision,
+                    source_environment_id=args.source_environment_id,
+                    source_lock_id=args.source_lock_id,
+                    toolchain=args.toolchain,
+                    capability_id=args.capability_id,
+                    provenance=provenance,
+                )
+                _json(
+                    {
+                        "program_id": program.id,
+                        "description": program.description.to_dict(),
+                        "location": str(program.root),
+                    }
+                )
+                return 0
+            if args.command == "program-info":
+                ready_program = runtime.program(args.program_id)
+                _json(
+                    {
+                        "program_id": ready_program.id,
+                        "description": ready_program.description.to_dict(),
+                        "location": str(ready_program.root),
+                    }
+                )
+                return 0
+            if args.command == "program-run":
+                ready_program = runtime.program(args.program_id)
+                command = (*ready_program.description.command, *args.arguments)
+                with ready_program.spawn_interactive(command) as session:
+                    for line in sys.stdin:
+                        print(session.request_line(line.rstrip("\n")))
+                program_result = session.close()
+                return 0 if program_result.ok else 1
+            if args.command == "program-save":
+                _json(runtime.save_program_copy(args.program_id, args.output).to_dict())
+                return 0
+            if args.command == "program-open":
+                program = runtime.open_program_copy(args.copy)
+                _json({"program_id": program.id, "description": program.description.to_dict()})
+                return 0
+            if args.command == "program-download":
+                program = runtime.download_program(
+                    args.library,
+                    args.reference,
+                    expected_source_revision=args.source_revision,
+                )
+                _json({"program_id": program.id, "description": program.description.to_dict()})
+                return 0
+            if args.command == "publish-program":
+                declined = _gate_mutation(
+                    f"Publish program {args.program_id} to {args.library}", yes=args.yes
+                )
+                if declined is not None:
+                    return declined
+                _json(
+                    runtime.publish_program(
+                        args.program_id,
+                        args.library,
+                        tags=args.tag,
+                        sign=args.sign,
+                    ).to_dict()
+                )
+                return 0
+            if args.command == "finalize-program":
+                descriptors = []
+                for path in args.computer_results:
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                    descriptor = value.get("computer_record") if isinstance(value, dict) else None
+                    if not isinstance(descriptor, dict):
+                        raise ValueError(f"invalid program computer result: {path}")
+                    descriptors.append(descriptor)
+                digest = runtime.finalize_program_publication(
+                    args.library,
+                    args.source_revision,
+                    descriptors,
+                    tags=args.tag,
+                    sign=args.sign,
+                )
+                _json({"source_revision": args.source_revision, "publication_id": digest})
+                return 0
+            if args.command == "inspect":
+                subject_path = Path(args.environment).expanduser()
+                if args.explain and subject_path.is_file():
+                    lock = EnvironmentLock.load(subject_path)
+                    payload: dict[str, Any] = {
+                        "subject": str(subject_path),
+                        "subject_kind": "lock",
+                        "lock_id": lock.lock_id,
+                        "environment": None,
+                        "package_locks": [],
+                        "decisions": [item.to_dict() for item in runtime.explain(args.environment)],
+                    }
+                else:
+                    environment = runtime.environment(args.environment)
+                    payload = {
+                        "subject": args.environment,
+                        "subject_kind": "environment",
+                        "lock_id": environment.lock.lock_id,
+                        "environment": environment.inspect().to_dict(),
+                        "package_locks": [],
+                        "decisions": [],
+                    }
+                    if args.packages:
+                        payload["package_locks"] = [
+                            package.to_dict() for package in environment.lock.packages
+                        ]
+                    if args.explain:
+                        payload["decisions"] = [
+                            item.to_dict() for item in runtime.explain(args.environment)
+                        ]
+                _json(envelope("lean-runtime.inspect/v1", ok=True, data=payload))
+                return 0
+            if args.command == "status":
+                status_payload = _status_report(runtime, args)
+                if args.json:
+                    _json(serialize_status_v1(status_payload))
+                else:
+                    _render_status(status_payload, display_subject=args.subject)
+                return 0
+            if args.command == "environments":
+                records = runtime.list_environments()
+                if args.json:
+                    _json(list(records))
+                else:
+                    _render_environments(records)
+                return 0
+            if args.command == "storage":
+                if args.verify and not args.json:
+                    print("Verifying storage ledger…", file=sys.stderr)
+                status = runtime.store_status(verify=args.verify)
+                if args.json:
+                    _json(status.to_dict())
+                else:
+                    _render_storage(status)
+                return 0
+            if args.command == "toolchain-slim":
+                if args.prune_original:
+                    declined = _gate_mutation(
+                        f"Remove the full toolchain {args.toolchain} after materializing "
+                        "its slim check-only copy",
+                        yes=args.yes,
+                    )
+                    if declined is not None:
+                        return declined
+                manifest = runtime.toolchains.materialize_slim(args.toolchain)
+                if args.prune_original:
+                    runtime.toolchains.prune_original(args.toolchain)
+                _json(
+                    {
+                        **manifest.to_dict(),
+                        "path": str(runtime.toolchains.slim_path(args.toolchain)),
+                        "pruned_original": args.prune_original,
+                    }
+                )
+                return 0
+            if args.command == "doctor":
+                doctor_report = runtime.doctor()
+                if args.yes or (
+                    not doctor_report.ok
+                    and _confirm("Apply safe repairs?", yes=False, json_mode=args.json)
                 ):
-                    raise ValueError("check --across requires exactly one FILE")
-                across_file = Path(args.inputs[0])
-                contexts = load_matrix(args.across)
+                    doctor_report = runtime.doctor_fix()
+                if args.json:
+                    _json(doctor_report.to_dict())
+                else:
+                    _render_doctor(doctor_report)
+                return 0 if doctor_report.ok else 2
+            if args.command == "verify":
+                report = runtime.verify(args.subject, offline=args.offline, rebuild=args.rebuild)
+                if args.json:
+                    _json(serialize_verify_v1(report))
+                elif report.ok:
+                    print(f"✓ {args.subject} verified")
+                    if args.verbose:
+                        for check in report.checks:
+                            marker = "-" if check.skipped else "✓" if check.ok else "!"
+                            print(f"{marker} {check.code.replace('_', ' ')}")
+                else:
+                    failure = report.failures[0]
+                    print(f"✗ {args.subject} failed verification", file=sys.stderr)
+                    print(
+                        str((failure.details or {}).get("message", failure.code)),
+                        file=sys.stderr,
+                    )
+                return 0 if report.ok else 1
+            if args.command == "compare":
+                difference = runtime.compare(args.left, args.right)
+                if args.json:
+                    _json(serialize_comparison_v1(difference))
+                elif difference.equal:
+                    print("Contexts are identical.")
+                else:
+                    print(difference.summary)
+                    for item in difference.changes:
+                        print(f"{item.path}\n  {item.before} -> {item.after}")
+                return 0
+            if args.command == "profile":
+                profile_report = runtime.profile(
+                    args.environment, args.file, warmup=args.warmup, repeat=args.repeat
+                )
+                if args.json:
+                    _json(serialize_profile_v1(profile_report))
+                else:
+                    stats = profile_report.statistics()
+                    print(f"Profile: {args.file.name}")
+                    print(f"Samples: {len(profile_report.results)}")
+                    for name in ("min", "median", "mean", "p95", "max"):
+                        value = stats[name]
+                        if value is not None:
+                            print(f"  {name:<6} {value:g} ms")
+                return 0 if profile_report.ok else 1
+            if args.command == "matrix":
+                contexts = load_matrix(args.configuration)
                 matrix_result = runtime.check_matrix(
-                    across_file.read_text(encoding="utf-8"),
+                    args.file.read_text(encoding="utf-8"),
                     contexts=contexts,
-                    filename=across_file.name,
-                    base=args.across.parent,
+                    filename=args.file.name,
+                    base=args.configuration.parent,
                     concurrency=args.concurrency,
                 )
                 if args.json:
@@ -2864,286 +2775,408 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     print("Context\tVerdict\tTime\tEnvironment")
                     for entry in matrix_result.entries:
+                        result = entry.result
                         print(
-                            f"{entry.context}\t{entry.result.verdict}\t"
-                            f"{entry.result.elapsed_seconds:.2f}s\t"
-                            f"{entry.result.environment_id or '-'}"
+                            f"{entry.context}\t{result.verdict}\t"
+                            f"{result.elapsed_seconds:.2f}s\t{result.environment_id or '-'}"
                         )
                 return 0 if matrix_result.ok else 1
-            if args.repeat is not None:
-                if len(args.inputs) != 1 or args.inputs[0] == "-" or args.include:
-                    raise ValueError("check --repeat requires exactly one FILE")
-                if args.lock_out is not None:
-                    raise ValueError(
-                        "check --repeat cannot write a lock; run one successful check first"
+            if args.command == "replay":
+                capture = ExecutionCapture.load(args.capture)
+                result = runtime.replay_capture(capture)
+                _emit_result(result, args.json)
+                if capture.expected_ok is not None and result.ok != capture.expected_ok:
+                    return 1
+                return 0 if result.ok else 1
+            if args.command == "clean":
+                execute_cleanup = False
+                cleanup_preview = runtime.clean(
+                    dry_run=True,
+                    minimum_age_seconds=args.minimum_age_hours * 3600,
+                    keep_last=args.keep_last,
+                )
+                preview_downloads = (
+                    runtime.clean_downloads(
+                        dry_run=True,
+                        minimum_age_seconds=args.minimum_age_hours * 3600,
                     )
-                if args.repeat < 1 or args.warmup < 0:
-                    raise ValueError(
-                        "check --repeat requires positive samples and nonnegative warmups"
+                    if args.include_downloads
+                    else None
+                )
+                preview_scratch = runtime.clean_scratch(
+                    dry_run=True,
+                    minimum_age_seconds=min(args.minimum_age_hours * 3600, 3600),
+                )
+                preview_project_artifacts = runtime.clean_legacy_project_artifacts(dry_run=True)
+                if not args.json:
+                    _render_cleanup(
+                        cleanup_preview,
+                        preview_downloads,
+                        preview_scratch,
+                        preview_project_artifacts,
                     )
-                repeated_file = Path(args.inputs[0])
-                repeated_source = repeated_file.read_text(encoding="utf-8")
-                selected_environment = None
-                using_lock = getattr(args, "_using_lock", None)
-                if args.environment is not None:
-                    selected_environment = runtime.subject_environment(args.environment)
-                elif using_lock is not None:
-                    selected_environment = runtime.open_exact(
-                        EnvironmentLock.load(Path(using_lock).expanduser().resolve())
+                has_candidates = bool(
+                    cleanup_preview.candidates
+                    or (preview_downloads and preview_downloads.candidates)
+                    or preview_scratch.candidates
+                    or preview_project_artifacts.candidates
+                )
+                if has_candidates and not args.dry_run:
+                    execute_cleanup = _confirm(
+                        "Remove these files?", yes=args.yes, json_mode=args.json
                     )
-                elif args.package_refs:
-                    selected_environment = runtime.open_references(
-                        args.package_refs, toolchain=args.toolchain
+                gc_report = runtime.clean(
+                    dry_run=not execute_cleanup,
+                    minimum_age_seconds=args.minimum_age_hours * 3600,
+                    keep_last=args.keep_last,
+                )
+                gc_downloads = (
+                    runtime.clean_downloads(
+                        dry_run=not execute_cleanup,
+                        minimum_age_seconds=args.minimum_age_hours * 3600,
                     )
-
-                def check_repeated_file() -> ExecutionResult:
-                    if selected_environment is not None:
-                        return selected_environment.check(
-                            repeated_source,
-                            filename=repeated_file.name,
-                            policy=_policy(args),
-                        )
-                    return runtime.check_file(
-                        repeated_file,
-                        project=args.project,
-                        toolchain=args.toolchain,
-                        policy=_policy(args),
-                    )
-
-                if os.environ.get(_HEADER_SNAPSHOTS_VARIABLE) is None:
-                    runtime.header_cache.enabled = True
-                for _ in range(args.warmup):
-                    warm = check_repeated_file()
-                    if not warm.ok:
-                        _emit_result(warm, args.json)
-                        return 2 if warm.timed_out else 1
-                repeated_started = time.monotonic()
-                samples = tuple(check_repeated_file() for _ in range(args.repeat))
-                profile_report = ProfileReport(
-                    str(repeated_file), args.warmup, samples, time.monotonic() - repeated_started
+                    if args.include_downloads
+                    else None
+                )
+                gc_scratch = runtime.clean_scratch(
+                    dry_run=not execute_cleanup,
+                    minimum_age_seconds=min(args.minimum_age_hours * 3600, 3600),
+                )
+                gc_project_artifacts = runtime.clean_legacy_project_artifacts(
+                    dry_run=not execute_cleanup
                 )
                 if args.json:
-                    _json(serialize_profile_v1(profile_report))
-                else:
-                    print(f"Profile: {repeated_file.name}")
-                    for name, value in profile_report.statistics().items():
-                        if value is not None:
-                            print(f"  {name:<6} {value:g} ms")
-                return 0 if profile_report.ok else 1
-            if args.watch:
-                if args.json:
-                    raise ValueError("check --watch does not support --json; use one-shot check")
-                if (
-                    args.package_refs
-                    or args.include
-                    or len(args.inputs) != 1
-                    or args.inputs[0] == "-"
+                    gc_payload: dict[str, Any] = {
+                        "environments": gc_report.to_dict(),
+                        "downloaded_files": gc_downloads.to_dict() if gc_downloads else None,
+                        "scratch": gc_scratch.to_dict(),
+                        "project_artifacts": gc_project_artifacts.to_dict(),
+                    }
+                    _json(
+                        envelope(
+                            "lean-runtime.cleanup/v1",
+                            ok=True,
+                            data=gc_payload,
+                        )
+                    )
+                elif execute_cleanup:
+                    _render_cleanup(gc_report, gc_downloads, gc_scratch, gc_project_artifacts)
+                return 0
+            if args.command == "check":
+                if args.across is not None:
+                    if (
+                        len(args.inputs) != 1
+                        or args.package_refs
+                        or args.include
+                        or args.project
+                        or args.environment
+                    ):
+                        raise ValueError("check --across requires exactly one FILE")
+                    across_file = Path(args.inputs[0])
+                    contexts = load_matrix(args.across)
+                    matrix_result = runtime.check_matrix(
+                        across_file.read_text(encoding="utf-8"),
+                        contexts=contexts,
+                        filename=across_file.name,
+                        base=args.across.parent,
+                        concurrency=args.concurrency,
+                    )
+                    if args.json:
+                        _json(serialize_matrix_v1(matrix_result))
+                    else:
+                        print("Context\tVerdict\tTime\tEnvironment")
+                        for entry in matrix_result.entries:
+                            print(
+                                f"{entry.context}\t{entry.result.verdict}\t"
+                                f"{entry.result.elapsed_seconds:.2f}s\t"
+                                f"{entry.result.environment_id or '-'}"
+                            )
+                    return 0 if matrix_result.ok else 1
+                if args.repeat is not None:
+                    if len(args.inputs) != 1 or args.inputs[0] == "-" or args.include:
+                        raise ValueError("check --repeat requires exactly one FILE")
+                    if args.lock_out is not None:
+                        raise ValueError(
+                            "check --repeat cannot write a lock; run one successful check first"
+                        )
+                    if args.repeat < 1 or args.warmup < 0:
+                        raise ValueError(
+                            "check --repeat requires positive samples and nonnegative warmups"
+                        )
+                    repeated_file = Path(args.inputs[0])
+                    repeated_source = repeated_file.read_text(encoding="utf-8")
+                    selected_environment = None
+                    using_lock = getattr(args, "_using_lock", None)
+                    if args.environment is not None:
+                        selected_environment = runtime.subject_environment(args.environment)
+                    elif using_lock is not None:
+                        selected_environment = runtime.open_exact(
+                            EnvironmentLock.load(Path(using_lock).expanduser().resolve())
+                        )
+                    elif args.package_refs:
+                        selected_environment = runtime.open_references(
+                            args.package_refs, toolchain=args.toolchain
+                        )
+
+                    def check_repeated_file() -> ExecutionResult:
+                        if selected_environment is not None:
+                            return selected_environment.check(
+                                repeated_source,
+                                filename=repeated_file.name,
+                                policy=_policy(args),
+                            )
+                        return runtime.check_file(
+                            repeated_file,
+                            project=args.project,
+                            toolchain=args.toolchain,
+                            policy=_policy(args),
+                        )
+
+                    if os.environ.get(_HEADER_SNAPSHOTS_VARIABLE) is None:
+                        runtime.header_cache.enabled = True
+                    for _ in range(args.warmup):
+                        warm = check_repeated_file()
+                        if not warm.ok:
+                            _emit_result(warm, args.json)
+                            return 2 if warm.timed_out else 1
+                    repeated_started = time.monotonic()
+                    samples = tuple(check_repeated_file() for _ in range(args.repeat))
+                    profile_report = ProfileReport(
+                        str(repeated_file),
+                        args.warmup,
+                        samples,
+                        time.monotonic() - repeated_started,
+                    )
+                    if args.json:
+                        _json(serialize_profile_v1(profile_report))
+                    else:
+                        print(f"Profile: {repeated_file.name}")
+                        for name, value in profile_report.statistics().items():
+                            if value is not None:
+                                print(f"  {name:<6} {value:g} ms")
+                    return 0 if profile_report.ok else 1
+                if args.watch:
+                    if args.json:
+                        raise ValueError(
+                            "check --watch does not support --json; use one-shot check"
+                        )
+                    if (
+                        args.package_refs
+                        or args.include
+                        or len(args.inputs) != 1
+                        or args.inputs[0] == "-"
+                    ):
+                        raise ValueError("check --watch requires exactly one project FILE")
+                    watched = Path(args.inputs[0]).expanduser().resolve()
+                    if not watched.is_file():
+                        raise ValueError(f"watched Lean file does not exist: {watched}")
+                    print(f"Watching {watched} · Ctrl-C to stop", flush=True)
+                    if os.environ.get(_HEADER_SNAPSHOTS_VARIABLE) is None:
+                        runtime.header_cache.enabled = True
+                    previous: tuple[int, int] | None = None
+                    while True:
+                        stat = watched.stat()
+                        signature = (stat.st_mtime_ns, stat.st_size)
+                        if signature != previous:
+                            previous = signature
+                            watched_result = runtime.check_file(
+                                watched,
+                                toolchain=args.toolchain,
+                                project=args.project,
+                                policy=_policy(args),
+                            )
+                            _emit_result(watched_result, False)
+                            sys.stdout.flush()
+                        time.sleep(args.watch_interval)
+                check_subject = (
+                    Path(args.inputs[-1]).name
+                    if args.inputs and args.inputs[-1] != "-"
+                    else "stdin"
+                    if args.inputs
+                    else Path(args.project or ".").resolve().name
+                )
+                runtime.events.emit("check.started", "Checking Lean input", subject=check_subject)
+                if args.project is not None and args.package_refs:
+                    raise ValueError("check cannot combine project and package contexts")
+                if args.environment is not None and (
+                    args.package_refs or args.project or args.toolchain
                 ):
-                    raise ValueError("check --watch requires exactly one project FILE")
-                watched = Path(args.inputs[0]).expanduser().resolve()
-                if not watched.is_file():
-                    raise ValueError(f"watched Lean file does not exist: {watched}")
-                print(f"Watching {watched} · Ctrl-C to stop", flush=True)
-                if os.environ.get(_HEADER_SNAPSHOTS_VARIABLE) is None:
-                    runtime.header_cache.enabled = True
-                previous: tuple[int, int] | None = None
-                while True:
-                    stat = watched.stat()
-                    signature = (stat.st_mtime_ns, stat.st_size)
-                    if signature != previous:
-                        previous = signature
-                        watched_result = runtime.check_file(
-                            watched,
+                    raise ValueError(
+                        "an environment context cannot be combined with another --using context"
+                    )
+                if not args.inputs:
+                    if args.package_refs or args.include:
+                        raise ValueError(
+                            "project-wide check does not accept package context or --include"
+                        )
+                    if args.environment is not None:
+                        raise ValueError("an environment context requires at least one FILE")
+                    try:
+                        result = runtime.check_project(
+                            args.project or Path("."),
+                            toolchain=args.toolchain,
+                            policy=_policy(args),
+                        )
+                    except ProjectNotFoundError as exc:
+                        if not sys.stdin.isatty():
+                            raise ProjectNotFoundError(
+                                f"{exc}\nTo check Lean source from stdin, pass '-': "
+                                "lean-runtime check - --using ENVIRONMENT"
+                            ) from exc
+                        raise
+                    source_file = None
+                elif args.package_refs:
+                    if len(args.inputs) != 1:
+                        raise ValueError("a package context expects exactly one FILE")
+                    environment = runtime.open_references(
+                        args.package_refs, toolchain=args.toolchain
+                    )
+                    source_file = Path(args.inputs[0])
+                elif "-" in args.inputs:
+                    if len(args.inputs) != 1:
+                        raise ValueError("stdin (-) must be the only check input")
+                    if args.environment is not None:
+                        environment = runtime.environment(args.environment)
+                        source_file = Path("-")
+                    else:
+                        if args.include:
+                            raise ValueError("local project checks do not accept --include")
+                        display_path = "<stdin>"
+                        stdin_project = args.project
+                        if stdin_project is None and args.toolchain is None:
+                            try:
+                                stdin_project = discover_project(Path.cwd()).root
+                            except ProjectNotFoundError:
+                                stdin_project = None
+                        result = runtime.check(
+                            sys.stdin.read(),
+                            toolchain=args.toolchain,
+                            project=stdin_project,
+                            policy=_policy(args),
+                        )
+                        source_file = None
+                else:
+                    selected_files = _expand_check_inputs(args.inputs)
+                    if len(selected_files) > 1:
+                        if args.include:
+                            raise ValueError("multi-file checks do not accept --include")
+                        return _run_check_batch(runtime, selected_files, args)
+                    if args.environment is not None:
+                        environment = runtime.environment(args.environment)
+                        source_file = selected_files[0]
+                    else:
+                        if args.include:
+                            raise ValueError("local project checks do not accept --include")
+                        result = runtime.check_file(
+                            selected_files[0],
                             toolchain=args.toolchain,
                             project=args.project,
                             policy=_policy(args),
                         )
-                        _emit_result(watched_result, False)
-                        sys.stdout.flush()
-                    time.sleep(args.watch_interval)
-            check_subject = (
-                Path(args.inputs[-1]).name
-                if args.inputs and args.inputs[-1] != "-"
-                else "stdin"
-                if args.inputs
-                else Path(args.project or ".").resolve().name
-            )
-            runtime.events.emit("check.started", "Checking Lean input", subject=check_subject)
-            if args.project is not None and args.package_refs:
-                raise ValueError("check cannot combine project and package contexts")
-            if args.environment is not None and (
-                args.package_refs or args.project or args.toolchain
-            ):
-                raise ValueError(
-                    "an environment context cannot be combined with another --using context"
-                )
-            if not args.inputs:
-                if args.package_refs or args.include:
-                    raise ValueError(
-                        "project-wide check does not accept package context or --include"
-                    )
-                if args.environment is not None:
-                    raise ValueError("an environment context requires at least one FILE")
-                try:
-                    result = runtime.check_project(
-                        args.project or Path("."), toolchain=args.toolchain, policy=_policy(args)
-                    )
-                except ProjectNotFoundError as exc:
-                    if not sys.stdin.isatty():
-                        raise ProjectNotFoundError(
-                            f"{exc}\nTo check Lean source from stdin, pass '-': "
-                            "lean-runtime check - --using ENVIRONMENT"
-                        ) from exc
-                    raise
-                source_file = None
-            elif args.package_refs:
-                if len(args.inputs) != 1:
-                    raise ValueError("a package context expects exactly one FILE")
-                environment = runtime.open_references(args.package_refs, toolchain=args.toolchain)
-                source_file = Path(args.inputs[0])
-            elif "-" in args.inputs:
-                if len(args.inputs) != 1:
-                    raise ValueError("stdin (-) must be the only check input")
-                if args.environment is not None:
-                    environment = runtime.environment(args.environment)
-                    source_file = Path("-")
-                else:
+                        source_file = None
+                if source_file is None:
+                    pass
+                elif str(source_file) == "-":
                     if args.include:
-                        raise ValueError("local project checks do not accept --include")
-                    display_path = "<stdin>"
-                    stdin_project = args.project
-                    if stdin_project is None and args.toolchain is None:
-                        try:
-                            stdin_project = discover_project(Path.cwd()).root
-                        except ProjectNotFoundError:
-                            stdin_project = None
-                    result = runtime.check(
-                        sys.stdin.read(),
-                        toolchain=args.toolchain,
-                        project=stdin_project,
+                        raise ValueError("stdin entrypoints cannot be combined with --include")
+                    result = environment.check(sys.stdin.read(), policy=_policy(args))
+                else:
+                    source_paths = [source_file, *args.include]
+                    files = {_cli_source_name(path): path.read_text() for path in source_paths}
+                    result = environment.check_files(
+                        files,
+                        entrypoint=_cli_source_name(source_file),
                         policy=_policy(args),
                     )
-                    source_file = None
             else:
-                selected_files = _expand_check_inputs(args.inputs)
-                if len(selected_files) > 1:
-                    if args.include:
-                        raise ValueError("multi-file checks do not accept --include")
-                    return _run_check_batch(runtime, selected_files, args)
-                if args.environment is not None:
-                    environment = runtime.environment(args.environment)
-                    source_file = selected_files[0]
-                else:
-                    if args.include:
-                        raise ValueError("local project checks do not accept --include")
-                    result = runtime.check_file(
-                        selected_files[0],
-                        toolchain=args.toolchain,
-                        project=args.project,
-                        policy=_policy(args),
+                result = runtime.build(
+                    args.project,
+                    targets=args.targets,
+                    toolchain=args.toolchain,
+                    timeout=args.timeout,
+                    shared=args.shared,
+                    artifact_cache=args.artifact_cache,
+                )
+        except KeyboardInterrupt:
+            renderer.close()
+            print("lean-runtime: interrupted", file=sys.stderr)
+            return 130
+        except (ResolutionError, MaterializationError) as exc:
+            renderer.close()
+            details = {
+                "phase": exc.phase,
+                "command": list(exc.command),
+                "exit_code": exc.exit_code,
+                "output": exc.output,
+            }
+            if getattr(args, "json", False):
+                _json(
+                    envelope(
+                        _schema_for(args.command),
+                        ok=False,
+                        data={},
+                        errors=[error("operation_failed", str(exc), details=details)],
                     )
-                    source_file = None
-            if source_file is None:
-                pass
-            elif str(source_file) == "-":
-                if args.include:
-                    raise ValueError("stdin entrypoints cannot be combined with --include")
-                result = environment.check(sys.stdin.read(), policy=_policy(args))
+                )
             else:
-                source_paths = [source_file, *args.include]
-                files = {_cli_source_name(path): path.read_text() for path in source_paths}
-                result = environment.check_files(
-                    files,
-                    entrypoint=_cli_source_name(source_file),
-                    policy=_policy(args),
+                _print_operation_failure(exc, verbose=args.verbose)
+            return 2
+        except PublicationError as exc:
+            renderer.close()
+            if getattr(args, "json", False):
+                _json(
+                    envelope(
+                        _schema_for(args.command),
+                        ok=False,
+                        data=exc.to_dict(),
+                        errors=[error("publication_failed", str(exc), details=exc.to_dict())],
+                    )
                 )
-        else:
-            result = runtime.build(
-                args.project,
-                targets=args.targets,
-                toolchain=args.toolchain,
-                timeout=args.timeout,
-                shared=args.shared,
-                artifact_cache=args.artifact_cache,
-            )
-    except KeyboardInterrupt:
-        renderer.close()
-        print("lean-runtime: interrupted", file=sys.stderr)
-        return 130
-    except (ResolutionError, MaterializationError) as exc:
-        renderer.close()
-        details = {
-            "phase": exc.phase,
-            "command": list(exc.command),
-            "exit_code": exc.exit_code,
-            "output": exc.output,
-        }
-        if getattr(args, "json", False):
-            _json(
-                envelope(
-                    _schema_for(args.command),
-                    ok=False,
-                    data={},
-                    errors=[error("operation_failed", str(exc), details=details)],
+            else:
+                _print_publication_failure(exc)
+            return exc.exit_code
+        except (
+            LeanRuntimeError,
+            DiscoveryError,
+            OSError,
+            UnicodeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
+            renderer.close()
+            if getattr(args, "json", False):
+                _json(
+                    envelope(
+                        _schema_for(args.command),
+                        ok=False,
+                        data={},
+                        errors=[error("invocation_failed", str(exc))],
+                    )
                 )
+            else:
+                print(f"lean-runtime: {exc}", file=sys.stderr)
+            return 2
+        if args.command == "check":
+            runtime.events.emit("check.completed", "Lean check completed", ok=result.ok)
+            total_ms = round((time.monotonic() - operation_started) * 1000)
+            accounted_ms = sum(timing.duration_ms for timing in result.timings)
+            result = replace(
+                result,
+                timings=(
+                    PhaseTiming("command_preparation", max(0, total_ms - accounted_ms)),
+                    *result.timings,
+                ),
             )
-        else:
-            _print_operation_failure(exc, verbose=args.verbose)
-        return 2
-    except PublicationError as exc:
         renderer.close()
-        if getattr(args, "json", False):
-            _json(
-                envelope(
-                    _schema_for(args.command),
-                    ok=False,
-                    data=exc.to_dict(),
-                    errors=[error("publication_failed", str(exc), details=exc.to_dict())],
-                )
-            )
-        else:
-            _print_publication_failure(exc)
-        return exc.exit_code
-    except (
-        LeanRuntimeError,
-        DiscoveryError,
-        OSError,
-        UnicodeError,
-        ValueError,
-        json.JSONDecodeError,
-    ) as exc:
+        _emit_result(result, args.json, display_path=display_path)
+        if args.timings:
+            print(render_timings(result.timings), file=sys.stderr)
+        if result.ok:
+            return 0
+        # A hit resource limit is an execution-policy outcome, not a verdict.
+        return 2 if result.timed_out else 1
+    finally:
         renderer.close()
-        if getattr(args, "json", False):
-            _json(
-                envelope(
-                    _schema_for(args.command),
-                    ok=False,
-                    data={},
-                    errors=[error("invocation_failed", str(exc))],
-                )
-            )
-        else:
-            print(f"lean-runtime: {exc}", file=sys.stderr)
-        return 2
-    if args.command == "check":
-        runtime.events.emit("check.completed", "Lean check completed", ok=result.ok)
-        total_ms = round((time.monotonic() - operation_started) * 1000)
-        accounted_ms = sum(timing.duration_ms for timing in result.timings)
-        result = replace(
-            result,
-            timings=(
-                PhaseTiming("command_preparation", max(0, total_ms - accounted_ms)),
-                *result.timings,
-            ),
-        )
-    renderer.close()
-    _emit_result(result, args.json, display_path=display_path)
-    if args.timings:
-        print(render_timings(result.timings), file=sys.stderr)
-    if result.ok:
-        return 0
-    # A hit resource limit is an execution-policy outcome, not a verdict.
-    return 2 if result.timed_out else 1
 
 
 if __name__ == "__main__":

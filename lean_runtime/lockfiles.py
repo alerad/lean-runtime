@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+from ._relpath import packages_directory, safe_relative_posix
 from .errors import EnvironmentError
-from .serialization import sha256_id, write_json_atomic
+from .serialization import freeze_json, sha256_id, thaw_json, write_json_atomic
 
 LOCK_SCHEMA = "lean-runtime-environment-lock/1"
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_'-]*")
@@ -56,11 +57,20 @@ class LockedPackage:
         if self.root_module is not None and _MODULE.fullmatch(self.root_module) is None:
             raise EnvironmentError(f"invalid root module for package {self.name!r}")
         if self.subdir is not None:
-            subdir = Path(self.subdir)
-            if not self.subdir or subdir.is_absolute() or ".." in subdir.parts:
-                raise EnvironmentError(f"unsafe package subdir in lock: {self.subdir!r}")
-        if any(not item or "\x00" in item for item in self.artifact_command):
+            try:
+                safe_relative_posix(self.subdir)
+            except ValueError as exc:
+                raise EnvironmentError(f"unsafe package subdir in lock: {self.subdir!r}") from exc
+        if not isinstance(self.artifact_command, tuple) or any(
+            not isinstance(item, str) or not item or "\x00" in item
+            for item in self.artifact_command
+        ):
             raise EnvironmentError(f"invalid artifact command for package {self.name!r}")
+
+    @property
+    def subdir_path(self) -> PurePosixPath | None:
+        """The validated package subdirectory, ready to join below the package root."""
+        return safe_relative_posix(self.subdir) if self.subdir is not None else None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -126,9 +136,33 @@ class EnvironmentLock:
             raise EnvironmentError("lock contains an invalid root Lake configuration")
         if "\x00" in self.root_module:
             raise EnvironmentError("lock contains invalid root Lean source")
+        if not isinstance(self.manifest, dict):
+            raise EnvironmentError("environment lock manifest must be an object")
+        if not isinstance(self.packages, tuple) or not all(
+            isinstance(item, LockedPackage) for item in self.packages
+        ):
+            raise EnvironmentError("environment lock packages must be locked packages")
         names = [package.name for package in self.packages]
         if len(names) != len(set(names)):
             raise EnvironmentError("lock contains duplicate package names")
+        try:
+            packages_directory(self.manifest)
+        except ValueError as exc:
+            raise EnvironmentError(f"lock packagesDir is unsafe: {exc}") from exc
+        # The manifest is part of the lock's identity: freeze it so nothing can
+        # move the identity out from under handles that already hold lock_id.
+        object.__setattr__(self, "manifest", freeze_json(self.manifest))
+
+    @property
+    def packages_directory(self) -> PurePosixPath:
+        """The validated Lake ``packagesDir``, relative to the workspace."""
+        return packages_directory(self.manifest)
+
+    def package_root(self, workspace: Path, package: LockedPackage) -> Path:
+        """Where ``package``'s own Lake root lives below a materialized workspace."""
+        root = workspace.joinpath(*self.packages_directory.parts) / package.name
+        subdir = package.subdir_path
+        return root.joinpath(*subdir.parts) if subdir is not None else root
 
     def identity_payload(self) -> dict[str, Any]:
         return {
@@ -137,7 +171,7 @@ class EnvironmentLock:
             "spec_digest": self.spec_digest,
             "root_lakefile": self.root_lakefile,
             "root_module": self.root_module,
-            "manifest": self.manifest,
+            "manifest": thaw_json(self.manifest),
             "packages": [
                 package.to_dict() for package in sorted(self.packages, key=lambda item: item.name)
             ],

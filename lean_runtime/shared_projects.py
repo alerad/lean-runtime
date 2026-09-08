@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import threading
 import uuid
 from contextlib import ExitStack, contextmanager, suppress
@@ -12,11 +11,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from ._git import git_command
+from ._git import git_clean, git_has_commit, git_head, git_remote
 from ._paths import is_link, remove_tree
+from ._process import git_output, run_git
+from ._project_identity import (
+    SHARED_PROJECT_SCHEMA,
+    PackageArtifactKey,
+    PackageSourceKey,
+    canonical_git_url,
+    compute_package_identity,
+    entry_identity,
+    normalized_package_identity,
+    package_artifact_key,
+    package_source_key,
+    package_subdir,
+    resolved_dependency_names,
+    resolved_path_entries,
+)
+from ._transaction import publish_tree, staged_tree
 from .errors import ProjectError
 from .events import EventEmitter
-from .locking import FileLock
+from .locking import FileLock, LockPaths
 from .package_ids import (
     PACKAGE_ID_PATTERN,
     package_directories,
@@ -25,25 +40,19 @@ from .package_ids import (
 )
 from .projects import ProjectContext, discover_project
 from .serialization import sha256_id, write_json_atomic
-from .store import clone_tree, platform_compatibility, source_snapshot_digest
+from .store import (
+    clone_tree,
+    invalidate_storage_ledger,
+    platform_compatibility,
+)
 from .toolchains import ToolchainBuildIdentity
 
 if TYPE_CHECKING:
     from .toolchains import ToolchainManager
 
-SHARED_PROJECT_SCHEMA = "lean-runtime-shared-project/3"
 PROJECT_SEED_REGISTRY_SCHEMA = "lean-runtime-project-seeds/1"
 _PACKAGE_ID_PATTERN = PACKAGE_ID_PATTERN
 _MANAGED_PROJECT_CONFIG = 'schema = "lean-runtime-project/1"\ndependencies = "shared"\n'
-
-
-def _canonical_git_url(value: str) -> str:
-    url = value.strip().rstrip("/")
-    if url.startswith("git@github.com:"):
-        url = "https://github.com/" + url.removeprefix("git@github.com:")
-    elif url.startswith("ssh://git@github.com/"):
-        url = "https://github.com/" + url.removeprefix("ssh://git@github.com/")
-    return url.removesuffix(".git")
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,110 +75,6 @@ class SharedProjectWorkspace:
             "reused": self.reused,
             "packages": list(self.packages),
             "package_ids": list(self.package_ids),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class PackageSourceKey:
-    """Immutable identity of one Git-backed package source tree."""
-
-    canonical_url: str
-    revision: str
-    subdir: str
-    tree_hash: str
-
-    def to_dict(self) -> dict[str, str]:
-        return {
-            "canonical_url": self.canonical_url,
-            "revision": self.revision,
-            "subdir": self.subdir,
-            "tree_hash": self.tree_hash,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class DependencyKey:
-    """Semantic resolved identity of one package in an artifact dependency cone."""
-
-    name: str
-    source_type: str
-    canonical_url: str | None = None
-    revision: str | None = None
-    subdir: str = ""
-    config_file: str | None = None
-    manifest_file: str | None = None
-    directory: str | None = None
-    content_digest: str | None = None
-
-    @classmethod
-    def from_entry(cls, entry: dict[str, Any]) -> DependencyKey:
-        source_type = str(entry.get("type", ""))
-        raw_url = entry.get("url")
-        return cls(
-            name=str(entry.get("name", "")),
-            source_type=source_type,
-            canonical_url=(
-                _canonical_git_url(raw_url)
-                if source_type == "git" and isinstance(raw_url, str)
-                else None
-            ),
-            revision=str(entry["rev"]) if isinstance(entry.get("rev"), str) else None,
-            subdir=str(entry.get("subDir") or ""),
-            config_file=(
-                str(entry["configFile"]) if isinstance(entry.get("configFile"), str) else None
-            ),
-            manifest_file=(
-                str(entry["manifestFile"]) if isinstance(entry.get("manifestFile"), str) else None
-            ),
-            directory=str(entry["dir"]) if isinstance(entry.get("dir"), str) else None,
-            content_digest=(
-                str(entry["content_digest"])
-                if isinstance(entry.get("content_digest"), str)
-                else None
-            ),
-        )
-
-    def to_dict(self) -> dict[str, str]:
-        values = {
-            "name": self.name,
-            "type": self.source_type,
-            "url": self.canonical_url,
-            "rev": self.revision,
-            "subDir": self.subdir or None,
-            "configFile": self.config_file,
-            "manifestFile": self.manifest_file,
-            "dir": self.directory,
-            "content_digest": self.content_digest,
-        }
-        return {key: value for key, value in values.items() if value is not None}
-
-
-@dataclass(frozen=True, slots=True)
-class PackageArtifactKey:
-    """Compatibility key for moving compiled artifacts between exact package cones."""
-
-    package_name: str
-    source: PackageSourceKey
-    toolchain: str
-    lean_executable_digest: str
-    lake_executable_digest: str
-    platform_abi: dict[str, str]
-    config_file: str
-    manifest_file: str
-    dependency_cone: tuple[DependencyKey, ...]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "schema": "lean-runtime-package-artifact-key/2",
-            "package_name": self.package_name,
-            "source": self.source.to_dict(),
-            "toolchain": self.toolchain,
-            "lean_executable_digest": self.lean_executable_digest,
-            "lake_executable_digest": self.lake_executable_digest,
-            "platform_abi": self.platform_abi,
-            "config_file": self.config_file,
-            "manifest_file": self.manifest_file,
-            "dependency_cone": [dependency.to_dict() for dependency in self.dependency_cone],
         }
 
 
@@ -210,240 +115,13 @@ def _load_manifest(context: ProjectContext) -> dict[str, Any]:
     return manifest
 
 
-def _resolved_path_entries(
-    context: ProjectContext, packages: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    identity: list[dict[str, Any]] = []
-    for entry in packages:
-        normalized = dict(entry)
-        if entry.get("type") == "path":
-            raw = entry.get("dir")
-            if not isinstance(raw, str):
-                raise ProjectError(f"path dependency {entry['name']!r} has no directory")
-            path = (context.root / raw).resolve()
-            if not path.is_dir():
-                raise ProjectError(f"path dependency {entry['name']!r} does not exist: {path}")
-            normalized["dir"] = str(path)
-            normalized["content_digest"] = source_snapshot_digest(path)
-        identity.append(normalized)
-    return identity
-
-
-def _entry_identity(entry: dict[str, Any]) -> dict[str, Any]:
-    """Keep only fields that can alter a materialized package or its name."""
-    keys = (
-        "name",
-        "type",
-        "url",
-        "rev",
-        "subDir",
-        "dir",
-        "configFile",
-        "manifestFile",
-        "content_digest",
-    )
-    identity = {key: entry[key] for key in keys if key in entry}
-    url = identity.get("url")
-    if entry.get("type") == "git" and isinstance(url, str):
-        identity["url"] = _canonical_git_url(url)
-    return identity
-
-
-def _package_subdir(entry: dict[str, Any]) -> Path | None:
-    raw = entry.get("subDir")
-    if raw in {None, ""}:
-        return None
-    if not isinstance(raw, str):
-        raise ProjectError(f"package {entry.get('name')!r} has a non-string subDir")
-    subdir = Path(raw)
-    if subdir.is_absolute() or ".." in subdir.parts:
-        raise ProjectError(f"package {entry.get('name')!r} has an unsafe subDir: {raw}")
-    return subdir
-
-
-def _git_tree_hash(path: Path) -> str | None:
-    root = _git_root(path)
-    if root is None:
-        return None
-    try:
-        relative = path.resolve().relative_to(root)
-    except (OSError, ValueError):
-        return None
-    revision = "HEAD^{tree}" if not relative.parts else f"HEAD:{relative.as_posix()}"
-    result = subprocess.run(
-        git_command("-C", str(root), "rev-parse", revision),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
-
-
-def _package_source_key(entry: dict[str, Any], source_package: Path) -> PackageSourceKey | None:
-    url = entry.get("url")
-    revision = entry.get("rev")
-    tree_hash = _git_tree_hash(source_package)
-    if not isinstance(url, str) or not isinstance(revision, str) or tree_hash is None:
-        return None
-    return PackageSourceKey(
-        canonical_url=_canonical_git_url(url),
-        revision=revision,
-        subdir=str(entry.get("subDir") or ""),
-        tree_hash=tree_hash,
-    )
-
-
-def _dependency_names(source_package: Path, manifest_name: str) -> set[str] | None:
-    manifest_path = source_package / manifest_name
-    if not manifest_path.is_file():
-        return None
-    try:
-        value = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ProjectError(f"could not read dependency manifest {manifest_path}: {exc}") from exc
-    entries = value.get("packages") if isinstance(value, dict) else None
-    if not isinstance(entries, list):
-        return None
-    return {
-        str(item["name"])
-        for item in entries
-        if isinstance(item, dict) and isinstance(item.get("name"), str)
-    }
-
-
-def _package_artifact_key(
-    *,
-    context: ProjectContext,
-    entry: dict[str, Any],
-    source_package: Path,
-    effective_entries: dict[str, dict[str, Any]],
-    toolchain_identity: ToolchainBuildIdentity | None,
-) -> PackageArtifactKey | None:
-    if toolchain_identity is None:
-        return None
-    source = _package_source_key(entry, source_package)
-    if source is None:
-        return None
-    manifest_name = str(entry.get("manifestFile", "lake-manifest.json"))
-    dependency_names = _dependency_names(source_package, manifest_name)
-    if dependency_names is None:
-        dependency_names = set(effective_entries)
-    if not dependency_names.issubset(effective_entries):
-        return None
-    cone = tuple(
-        DependencyKey.from_entry(effective_entries[name]) for name in sorted(dependency_names)
-    )
-    return PackageArtifactKey(
-        package_name=str(entry.get("name", "")),
-        source=source,
-        toolchain=toolchain_identity.toolchain,
-        lean_executable_digest=toolchain_identity.lean_executable_digest,
-        lake_executable_digest=toolchain_identity.lake_executable_digest,
-        platform_abi=platform_compatibility(),
-        config_file=str(entry.get("configFile", "lakefile.toml")),
-        manifest_file=manifest_name,
-        dependency_cone=cone,
-    )
-
-
-def _package_identity(
-    *,
-    context: ProjectContext,
-    entry: dict[str, Any],
-    source_package: Path,
-    effective_entries: dict[str, dict[str, Any]],
-    toolchain_identity: ToolchainBuildIdentity | None,
-) -> dict[str, Any]:
-    manifest_name = entry.get("manifestFile", "lake-manifest.json")
-    dependency_names = _dependency_names(source_package, str(manifest_name))
-    if dependency_names is None:
-        # A package without its own manifest gets the full root graph as a conservative key.
-        dependencies = list(effective_entries.values())
-    else:
-        dependencies = [
-            effective_entries.get(name, {"name": name, "type": "missing"})
-            for name in sorted(dependency_names)
-        ]
-    artifact_key = _package_artifact_key(
-        context=context,
-        entry=entry,
-        source_package=source_package,
-        effective_entries=effective_entries,
-        toolchain_identity=toolchain_identity,
-    )
-    return {
-        "schema": SHARED_PROJECT_SCHEMA,
-        "toolchain": context.toolchain,
-        "platform": platform_compatibility(),
-        "package": _entry_identity(entry),
-        "effective_dependencies": dependencies,
-        "artifact_key": artifact_key.to_dict() if artifact_key is not None else None,
-    }
-
-
-def _normalized_package_identity(identity: dict[str, Any]) -> dict[str, Any] | None:
-    """Normalize legacy marker spellings without weakening graph compatibility."""
-    package = identity.get("package")
-    dependencies = identity.get("effective_dependencies")
-    if not isinstance(package, dict) or not isinstance(dependencies, list):
-        return None
-    normalized_dependencies: list[dict[str, Any]] = []
-    for dependency in dependencies:
-        if not isinstance(dependency, dict):
-            return None
-        normalized_dependencies.append(_entry_identity(dependency))
-    artifact_key = identity.get("artifact_key")
-    normalized_artifact = (
-        artifact_key
-        if isinstance(artifact_key, dict)
-        and artifact_key.get("schema") == "lean-runtime-package-artifact-key/2"
-        else None
-    )
-    return {
-        "toolchain": identity.get("toolchain"),
-        "platform": identity.get("platform"),
-        "package": _entry_identity(package),
-        "effective_dependencies": normalized_dependencies,
-        "artifact_key": normalized_artifact,
-    }
-
-
-def _git_head(path: Path) -> str | None:
-    if _git_root(path) != path.resolve():
-        return None
-    result = subprocess.run(
-        git_command("-C", str(path), "rev-parse", "HEAD"),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return result.stdout.strip() if result.returncode == 0 else None
-
-
-def _git_clean(path: Path) -> bool:
-    if _git_root(path) != path.resolve():
-        return False
-    result = subprocess.run(
-        git_command("-C", str(path), "status", "--porcelain", "--untracked-files=normal"),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return result.returncode == 0 and not result.stdout.strip()
-
-
 def _git_clean_project_seed(path: Path) -> bool:
     """Accept only Git-clean roots plus Lean Runtime's exact untracked config."""
 
-    result = subprocess.run(
-        git_command("-C", str(path), "status", "--porcelain", "--untracked-files=normal"),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0:
+    status = git_output("-C", str(path), "status", "--porcelain", "--untracked-files=normal")
+    if status is None:
         return False
-    changes = tuple(line for line in result.stdout.splitlines() if line)
+    changes = tuple(line for line in status.splitlines() if line)
     if not changes:
         return True
     config = path / "lean-runtime.toml"
@@ -463,55 +141,14 @@ def _remove_managed_project_config(path: Path) -> None:
         pass
 
 
-def _git_has_commit(path: Path, revision: str) -> bool:
-    if _git_root(path) != path.resolve():
-        return False
-    result = subprocess.run(
-        git_command("-C", str(path), "cat-file", "-e", f"{revision}^{{commit}}"),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return result.returncode == 0
-
-
-def _git_remote(path: Path) -> str | None:
-    if _git_root(path) != path.resolve():
-        return None
-    result = subprocess.run(
-        git_command("-C", str(path), "config", "--get", "remote.origin.url"),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return result.stdout.strip() if result.returncode == 0 else None
-
-
-def _git_root(path: Path) -> Path | None:
-    result = subprocess.run(
-        git_command("-C", str(path), "rev-parse", "--show-toplevel"),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode or not result.stdout.strip():
-        return None
-    try:
-        return Path(result.stdout.strip()).resolve()
-    except OSError:
-        return None
-
-
-def _run_git(arguments: list[str], *, purpose: str) -> None:
-    result = subprocess.run(
-        git_command(*arguments),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
-    if result.returncode:
-        detail = result.stdout.strip()
+def _run_git(arguments: list[str], *, purpose: str, cancel: threading.Event | None = None) -> None:
+    result = run_git(*arguments, cancel=cancel)
+    if not result.ok:
+        detail = result.output.strip()
+        if result.cancelled:
+            raise ProjectError(f"cancelled while {purpose}")
+        if result.timed_out:
+            raise ProjectError(f"Git timed out while {purpose}")
         raise ProjectError(f"Git failed while {purpose}" + (f":\n{detail}" if detail else ""))
 
 
@@ -547,7 +184,7 @@ class SharedProjectManager:
         self.root = home / "project-workspaces"
         self.packages = home / "project-packages"
         self.sources = home / "project-sources"
-        self.locks = home / "locks"
+        self.lock_paths = LockPaths(home)
         self.seed_registry = home / "project-seeds.json"
 
     def _build_identity(
@@ -573,7 +210,7 @@ class SharedProjectManager:
         if manifest is None:
             return
         self.home.mkdir(parents=True, exist_ok=True)
-        with FileLock(self.locks / "project-seeds.lock", timeout=30):
+        with FileLock(self.lock_paths.project_seeds(), timeout=30):
             roots: list[str] = []
             try:
                 value = json.loads(self.seed_registry.read_text(encoding="utf-8"))
@@ -624,7 +261,7 @@ class SharedProjectManager:
             str(entry.get("name")): (
                 str(entry.get("rev")),
                 str(entry.get("subDir") or ""),
-                _canonical_git_url(str(entry.get("url"))),
+                canonical_git_url(str(entry.get("url"))),
             )
             for entry in entries
             if entry.get("type") == "git"
@@ -649,7 +286,7 @@ class SharedProjectManager:
                 str(entry.get("name")): (
                     str(entry.get("rev")),
                     str(entry.get("subDir") or ""),
-                    _canonical_git_url(str(entry.get("url"))),
+                    canonical_git_url(str(entry.get("url"))),
                 )
                 for entry in raw_entries
                 if isinstance(entry, dict) and entry.get("type") == "git"
@@ -672,8 +309,8 @@ class SharedProjectManager:
                 ) is not None and _valid_package_marker(package, marker_id)
                 if (
                     not package.is_dir()
-                    or _git_head(package) != revision
-                    or (not managed and not _git_clean(package))
+                    or git_head(package) != revision
+                    or (not managed and not git_clean(package))
                 ):
                     valid = False
                     break
@@ -710,9 +347,9 @@ class SharedProjectManager:
         """
 
         if effective_entries is None:
-            identity_entries = _resolved_path_entries(context, entries)
+            identity_entries = resolved_path_entries(context, entries)
             effective_entries = {
-                str(entry["name"]): _entry_identity(identity_entry)
+                str(entry["name"]): entry_identity(identity_entry)
                 for entry, identity_entry in zip(entries, identity_entries, strict=True)
             }
         selected: dict[str, RememberedPackageSeed] = {}
@@ -724,15 +361,15 @@ class SharedProjectManager:
                 producer = discover_project(root)
                 producer_manifest = _load_manifest(producer)
                 producer_entries = producer_manifest["packages"]
-                producer_resolved = _resolved_path_entries(producer, producer_entries)
+                producer_resolved = resolved_path_entries(producer, producer_entries)
             except ProjectError:
                 continue
-            remote = _git_remote(producer.root)
-            head = _git_head(producer.root)
+            remote = git_remote(producer.root)
+            head = git_head(producer.root)
             if remote is None or head is None or not _git_clean_project_seed(producer.root):
                 continue
             producer_effective = {
-                str(entry["name"]): _entry_identity(identity_entry)
+                str(entry["name"]): entry_identity(identity_entry)
                 for entry, identity_entry in zip(producer_entries, producer_resolved, strict=True)
             }
             for entry in entries:
@@ -744,13 +381,13 @@ class SharedProjectManager:
                 if (
                     not isinstance(url, str)
                     or not isinstance(revision, str)
-                    or _canonical_git_url(remote) != _canonical_git_url(url)
+                    or canonical_git_url(remote) != canonical_git_url(url)
                     or head != revision
                 ):
                     continue
-                subdir = _package_subdir(entry)
+                subdir = package_subdir(entry)
                 source_package = producer.root / subdir if subdir is not None else producer.root
-                source = _package_source_key(entry, source_package)
+                source = package_source_key(entry, source_package)
                 if source is None:
                     continue
                 artifact: PackageArtifactKey | None = None
@@ -776,7 +413,7 @@ class SharedProjectManager:
                         f"consumer {context.toolchain}"
                     )
                 else:
-                    dependency_names = _dependency_names(
+                    dependency_names = resolved_dependency_names(
                         source_package,
                         str(entry.get("manifestFile", "lake-manifest.json")),
                     )
@@ -795,7 +432,7 @@ class SharedProjectManager:
                         if divergent is not None:
                             miss = f"resolved dependency differs: {divergent}"
                         else:
-                            expected_artifact = _package_artifact_key(
+                            expected_artifact = package_artifact_key(
                                 context=context,
                                 entry=entry,
                                 source_package=source_package,
@@ -843,7 +480,7 @@ class SharedProjectManager:
             str(entry.get("name")): (
                 str(entry.get("rev")),
                 str(entry.get("subDir") or ""),
-                _canonical_git_url(str(entry.get("url"))),
+                canonical_git_url(str(entry.get("url"))),
             )
             for entry in entries
             if entry.get("type") == "git"
@@ -873,7 +510,7 @@ class SharedProjectManager:
                     str(entry.get("name")): (
                         str(entry.get("rev")),
                         str(entry.get("subDir") or ""),
-                        _canonical_git_url(str(entry.get("url"))),
+                        canonical_git_url(str(entry.get("url"))),
                     )
                     for entry in workspace_entries
                     if isinstance(entry, dict) and entry.get("type") == "git"
@@ -931,7 +568,7 @@ class SharedProjectManager:
             key = (
                 str(package_entry.get("rev")),
                 str(package_entry.get("subDir") or ""),
-                _canonical_git_url(str(package_entry.get("url"))),
+                canonical_git_url(str(package_entry.get("url"))),
             )
             if required.get(name) == key:
                 package_root = marker.parent / key[1] if key[1] else marker.parent
@@ -956,9 +593,9 @@ class SharedProjectManager:
     ) -> dict[str, Path]:
         """Return managed packages whose recorded graph exactly matches this project."""
         if effective_entries is None:
-            identity_entries = _resolved_path_entries(context, entries)
+            identity_entries = resolved_path_entries(context, entries)
             effective_entries = {
-                str(entry["name"]): _entry_identity(identity_entry)
+                str(entry["name"]): entry_identity(identity_entry)
                 for entry, identity_entry in zip(entries, identity_entries, strict=True)
             }
         reusable: dict[str, Path] = {}
@@ -976,19 +613,19 @@ class SharedProjectManager:
                 )
             except (OSError, json.JSONDecodeError):
                 continue
-            normalized = _normalized_package_identity(marker) if isinstance(marker, dict) else None
+            normalized = normalized_package_identity(marker) if isinstance(marker, dict) else None
             entry = next((item for item in entries if str(item.get("name")) == name), None)
             if normalized is None or entry is None:
                 continue
             if (
                 normalized["toolchain"] != context.toolchain
                 or normalized["platform"] != platform_compatibility()
-                or normalized["package"] != _entry_identity(entry)
+                or normalized["package"] != entry_identity(entry)
             ):
                 continue
-            subdir = _package_subdir(entry)
+            subdir = package_subdir(entry)
             source_package = package / subdir if subdir is not None else package
-            expected_artifact = _package_artifact_key(
+            expected_artifact = package_artifact_key(
                 context=context,
                 entry=entry,
                 source_package=source_package,
@@ -1010,7 +647,7 @@ class SharedProjectManager:
                     break
                 dependency_name = dependency.get("name")
                 current = effective_entries.get(str(dependency_name))
-                if current is None or _entry_identity(current) != dependency:
+                if current is None or entry_identity(current) != dependency:
                     compatible = False
                     break
             if compatible:
@@ -1044,8 +681,8 @@ class SharedProjectManager:
         for candidate in candidates:
             if (
                 candidate is not None
-                and _canonical_git_url(_git_remote(candidate) or "") == _canonical_git_url(url)
-                and _git_has_commit(candidate, revision)
+                and canonical_git_url(git_remote(candidate) or "") == canonical_git_url(url)
+                and git_has_commit(candidate, revision)
             ):
                 return candidate
         return None
@@ -1059,23 +696,23 @@ class SharedProjectManager:
         cancel: threading.Event | None = None,
     ) -> Path:
         source_id = sha256_id(
-            "project_source", {"url": _canonical_git_url(url), "revision": revision}
+            "project_source", {"url": canonical_git_url(url), "revision": revision}
         )
         destination = self.sources / source_id
-        with FileLock(self.locks / f"{source_id}.lock", timeout=1800, cancel=cancel):
+        with FileLock(self.lock_paths.project_source(source_id), timeout=1800, cancel=cancel):
             if (
                 destination.is_dir()
-                and _git_head(destination) == revision
-                and _git_clean(destination)
+                and git_head(destination) == revision
+                and git_clean(destination)
             ):
                 return destination
-            self.sources.mkdir(parents=True, exist_ok=True)
-            staging = self.sources / f".{source_id}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-            try:
+            with staged_tree(self.sources, self.lock_paths) as staging:
+                # Git and clone_tree create the checkout directory themselves.
+                staging.rmdir()
                 if (
                     seed is not None
                     and seed.is_dir()
-                    and _git_head(seed) == revision
+                    and git_head(seed) == revision
                     and _git_clean_project_seed(seed)
                 ):
                     self.events.emit(
@@ -1099,10 +736,12 @@ class SharedProjectManager:
                     _run_git(
                         ["clone", "--quiet", "--no-checkout", "--local", str(donor), str(staging)],
                         purpose=f"cloning local objects for {url}",
+                        cancel=cancel,
                     )
                     _run_git(
                         ["-C", str(staging), "checkout", "--quiet", "--detach", revision],
                         purpose=f"checking out {revision}",
+                        cancel=cancel,
                     )
                 else:
                     self.events.emit(
@@ -1120,20 +759,15 @@ class SharedProjectManager:
                     _run_git(
                         ["-C", str(staging), "fetch", "--depth", "1", "origin", revision],
                         purpose=f"fetching {revision}",
+                        cancel=cancel,
                     )
                     _run_git(
                         ["-C", str(staging), "checkout", "--quiet", "--detach", "FETCH_HEAD"],
                         purpose=f"checking out {revision}",
                     )
-                if _git_head(staging) != revision:
+                if git_head(staging) != revision:
                     raise ProjectError(f"dependency checkout did not resolve to {revision}")
-                if destination.exists():
-                    remove_tree(destination)
-                staging.replace(destination)
-            except BaseException:
-                if staging.exists():
-                    remove_tree(staging)
-                raise
+                publish_tree(staging, destination, replace=True)
         return destination
 
     def prepare(
@@ -1148,7 +782,7 @@ class SharedProjectManager:
         manifest = _load_manifest(context)
         toolchain_identity = self._build_identity(context.toolchain, cancel)
         packages = manifest["packages"]
-        identity_packages = _resolved_path_entries(context, packages)
+        identity_packages = resolved_path_entries(context, packages)
         identity = {
             "schema": SHARED_PROJECT_SCHEMA,
             "toolchain": context.toolchain,
@@ -1164,7 +798,7 @@ class SharedProjectManager:
         package_names = tuple(str(entry["name"]) for entry in packages)
         project_name = display_name or context.root.name
         with FileLock(
-            self.locks / f"{workspace_id}.lock",
+            self.lock_paths.project_workspace(workspace_id),
             timeout=1800,
             cancel=cancel,
             owner={"operation": "workspace preparation", "project": project_name},
@@ -1218,7 +852,7 @@ class SharedProjectManager:
                 overrides: list[dict[str, Any]] = []
                 package_ids: list[str] = []
                 effective_entries = {
-                    str(entry["name"]): _entry_identity(identity_entry)
+                    str(entry["name"]): entry_identity(identity_entry)
                     for entry, identity_entry in zip(packages, identity_packages, strict=True)
                 }
                 reusable_packages = self.reusable_packages(
@@ -1295,7 +929,7 @@ class SharedProjectManager:
                                     else "registered graph donates source only"
                                 ),
                             )
-                        elif local.is_dir() and _git_head(local) == revision and _git_clean(local):
+                        elif local.is_dir() and git_head(local) == revision and git_clean(local):
                             seed = local
                         elif remembered is not None:
                             seed = remembered.path
@@ -1325,7 +959,7 @@ class SharedProjectManager:
                             seed = local
                         if is_link(seed):
                             seed = seed.resolve()
-                        subdir = _package_subdir(entry)
+                        subdir = package_subdir(entry)
                         reusable = reusable_packages.get(package_name)
                         if reusable is not None:
                             package_id = reusable.name
@@ -1352,7 +986,7 @@ class SharedProjectManager:
                                 cancel=cancel,
                             )
                             source_package = source / subdir if subdir is not None else source
-                            package_identity = _package_identity(
+                            package_identity = compute_package_identity(
                                 context=context,
                                 entry=entry,
                                 source_package=source_package,
@@ -1376,14 +1010,14 @@ class SharedProjectManager:
                             and seed.resolve().parent == self.packages.resolve()
                             and _PACKAGE_ID_PATTERN.fullmatch(seed_id) is not None
                             and _valid_package_marker(seed, seed_id)
-                            and _normalized_package_identity(seed_marker)
-                            == _normalized_package_identity(package_identity)
+                            and normalized_package_identity(seed_marker)
+                            == normalized_package_identity(package_identity)
                         ):
                             package_id = seed_id
                             final_target = seed
                         package_ids.append(package_id)
                         with FileLock(
-                            self.locks / f"{package_id}.lock", timeout=1800, cancel=cancel
+                            self.lock_paths.package(package_id), timeout=1800, cancel=cancel
                         ):
                             if final_target.is_dir() and not _valid_package_marker(
                                 final_target, package_id
@@ -1410,7 +1044,7 @@ class SharedProjectManager:
                                         seed
                                         if preserve_seed_artifacts
                                         and seed.is_dir()
-                                        and _git_head(seed) == revision
+                                        and git_head(seed) == revision
                                         and _git_clean_project_seed(seed)
                                         else source
                                     )
@@ -1505,11 +1139,15 @@ class SharedProjectManager:
             for package_id in sorted(set(workspace.package_ids)):
                 stack.enter_context(
                     FileLock(
-                        self.locks / f"{package_id}-build.lock",
+                        self.lock_paths.package_build(package_id),
                         timeout=1800,
                         cancel=cancel,
                         owner=owner,
                         on_wait=self._announce_lock_wait,
                     )
                 )
-            yield
+            try:
+                yield
+            finally:
+                # Shared package trees were (possibly) rebuilt in place.
+                invalidate_storage_ledger(self.home)

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
-import signal
 import subprocess
 import threading
 import time
@@ -12,8 +10,18 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, Protocol, TextIO, cast
+from typing import Any, Protocol, TextIO, cast
 
+from ._process import (
+    OutputBudget,
+    ProcessOutcome,
+    ResourceLimits,
+    kill_tree,
+    run_process,
+    shutdown,
+    spawn_options,
+    stop_tree,
+)
 from .errors import PolicyError
 from .policies import ExecutionPolicy
 
@@ -28,6 +36,26 @@ class BackendResult:
     cancelled: bool
     output_truncated: bool
     enforced_policy_fields: tuple[str, ...]
+
+    @classmethod
+    def from_outcome(
+        cls, outcome: ProcessOutcome, enforced_policy_fields: tuple[str, ...]
+    ) -> BackendResult:
+        return cls(
+            exit_code=outcome.exit_code,
+            stdout=outcome.stdout,
+            stderr=outcome.stderr,
+            elapsed_seconds=outcome.elapsed_seconds,
+            timed_out=outcome.timed_out,
+            cancelled=outcome.cancelled,
+            output_truncated=outcome.output_truncated,
+            enforced_policy_fields=enforced_policy_fields,
+        )
+
+    @property
+    def signalled(self) -> bool:
+        """The process died from a signal rather than returning a status."""
+        return self.exit_code < 0 and not self.timed_out and not self.cancelled
 
 
 class Backend(Protocol):
@@ -69,60 +97,10 @@ class InteractiveProcess(Protocol):
     def finish(self) -> BackendResult: ...
 
 
-class _OutputBudget:
-    def __init__(self, limit: int) -> None:
-        self.remaining = limit
-        self.lock = threading.Lock()
-        self.truncated = False
-
-    def take(self, chunk: bytes) -> bytes:
-        with self.lock:
-            size = min(len(chunk), self.remaining)
-            self.remaining -= size
-            if size < len(chunk):
-                self.truncated = True
-            return chunk[:size]
-
-
-_LINE_BREAK = re.compile(rb"\r\n|\r|\n")
-
-
-def _drain(
-    stream: BinaryIO,
-    budget: _OutputBudget,
-    chunks: list[bytes],
-    on_output: Callable[[str], None] | None = None,
-) -> None:
-    pending = b""
-    while True:
-        chunk = stream.read(65_536)
-        if not chunk:
-            break
-        kept = budget.take(chunk)
-        if kept:
-            chunks.append(kept)
-        if on_output is None:
-            continue
-        # Progress bars redraw with bare carriage returns, so treat those as lines too.
-        parts = _LINE_BREAK.split(pending + chunk)
-        pending = parts.pop()
-        for part in parts:
-            _observe(on_output, part)
-    if on_output is not None and pending:
-        _observe(on_output, pending)
-
-
-def _observe(on_output: Callable[[str], None], line: bytes) -> None:
-    try:
-        on_output(line.decode("utf-8", errors="replace"))
-    except Exception:  # noqa: BLE001 - an observer must never break execution
-        return
-
-
 class _TranscriptReader:
     """Mirror caller-consumed text into the bounded execution transcript."""
 
-    def __init__(self, stream: TextIO, budget: _OutputBudget, chunks: list[bytes]) -> None:
+    def __init__(self, stream: TextIO, budget: OutputBudget, chunks: list[bytes]) -> None:
         self._stream = stream
         self._budget = budget
         self._chunks = chunks
@@ -168,7 +146,7 @@ class _LocalInteractiveProcess:
         self._started = time.monotonic()
         self._timed_out = threading.Event()
         self._finished = threading.Event()
-        self._budget = _OutputBudget(policy.max_output_bytes)
+        self._budget = OutputBudget(policy.max_output_bytes)
         self._stdout_chunks: list[bytes] = []
         self._stderr_chunks: list[bytes] = []
         self.stdin = cast(TextIO, process.stdin)
@@ -192,11 +170,7 @@ class _LocalInteractiveProcess:
         if self._process.poll() is not None:
             return
         self._timed_out.set()
-        LocalBackend._stop(self._process)
-        try:
-            self._process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            LocalBackend._kill(self._process)
+        shutdown(self._process)
 
     def poll(self) -> int | None:
         return self._process.poll()
@@ -214,12 +188,7 @@ class _LocalInteractiveProcess:
             self._process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             cancelled = True
-            LocalBackend._stop(self._process)
-            try:
-                self._process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                LocalBackend._kill(self._process)
-                self._process.wait()
+            shutdown(self._process)
         self._finished.set()
         self._monitor.join(timeout=3)
         self._remaining(self.stdout)
@@ -247,39 +216,20 @@ class LocalBackend:
     @staticmethod
     def _process_options(
         policy: ExecutionPolicy,
-    ) -> tuple[list[str], Callable[[], object] | None, int]:
+    ) -> tuple[tuple[str, ...], ResourceLimits | None]:
         if policy.network == "disabled":
             raise PolicyError("the local backend cannot enforce network isolation")
         enforced = ["timeout_seconds", "max_output_bytes"]
-        preexec = None
-        if os.name != "nt" and (policy.memory_mb or policy.cpu_seconds):
-            memory_mb = policy.memory_mb
-            cpu_seconds = policy.cpu_seconds
-
-            def apply_limits() -> None:
-                import resource
-
-                if memory_mb is not None:
-                    limit = memory_mb * 1024 * 1024
-                    getattr(resource, "setrlimit")(  # noqa: B009
-                        getattr(resource, "RLIMIT_AS"),  # noqa: B009
-                        (limit, limit),
-                    )
-                if cpu_seconds is not None:
-                    getattr(resource, "setrlimit")(  # noqa: B009
-                        getattr(resource, "RLIMIT_CPU"),  # noqa: B009
-                        (cpu_seconds, cpu_seconds),
-                    )
-
-            preexec = apply_limits
-            if memory_mb is not None:
+        limits: ResourceLimits | None = None
+        if policy.memory_mb or policy.cpu_seconds:
+            if os.name == "nt":
+                raise PolicyError("the local Windows backend cannot enforce memory or CPU limits")
+            limits = ResourceLimits(memory_mb=policy.memory_mb, cpu_seconds=policy.cpu_seconds)
+            if policy.memory_mb is not None:
                 enforced.append("memory_mb")
-            if cpu_seconds is not None:
+            if policy.cpu_seconds is not None:
                 enforced.append("cpu_seconds")
-        elif os.name == "nt" and (policy.memory_mb or policy.cpu_seconds):
-            raise PolicyError("the local Windows backend cannot enforce memory or CPU limits")
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
-        return enforced, preexec, creationflags
+        return tuple(enforced), limits
 
     def spawn_interactive(
         self,
@@ -290,7 +240,7 @@ class LocalBackend:
         policy: ExecutionPolicy,
     ) -> InteractiveProcess:
         """Spawn a trusted local process with live text pipes."""
-        enforced, preexec, creationflags = self._process_options(policy)
+        enforced, limits = self._process_options(policy)
         process = subprocess.Popen(
             list(command),
             cwd=cwd,
@@ -302,14 +252,12 @@ class LocalBackend:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            start_new_session=os.name != "nt",
-            creationflags=creationflags,
-            preexec_fn=preexec,
+            **spawn_options(limits),
         )
         return _LocalInteractiveProcess(
             process,
             policy=policy,
-            enforced_policy_fields=tuple(enforced),
+            enforced_policy_fields=enforced,
         )
 
     def execute(
@@ -322,94 +270,23 @@ class LocalBackend:
         cancel: threading.Event | None = None,
         on_output: Callable[[str], None] | None = None,
     ) -> BackendResult:
-        enforced, preexec, creationflags = self._process_options(policy)
-
-        started = time.monotonic()
-        process = subprocess.Popen(
-            list(command),
+        enforced, limits = self._process_options(policy)
+        outcome = run_process(
+            command,
             cwd=cwd,
-            env=dict(environment),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=os.name != "nt",
-            creationflags=creationflags,
-            preexec_fn=preexec,
+            environment=environment,
+            timeout=policy.timeout_seconds,
+            cancel=cancel,
+            max_output_bytes=policy.max_output_bytes,
+            on_output=on_output,
+            limits=limits,
         )
-        assert process.stdout is not None and process.stderr is not None
-        budget = _OutputBudget(policy.max_output_bytes)
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
-        readers = [
-            threading.Thread(
-                target=_drain, args=(process.stdout, budget, stdout_chunks, on_output)
-            ),
-            threading.Thread(
-                target=_drain, args=(process.stderr, budget, stderr_chunks, on_output)
-            ),
-        ]
-        for reader in readers:
-            reader.start()
-        timed_out = False
-        cancelled = False
-        try:
-            while process.poll() is None:
-                if cancel is not None and cancel.is_set():
-                    cancelled = True
-                    self._stop(process)
-                    break
-                if time.monotonic() - started >= policy.timeout_seconds:
-                    timed_out = True
-                    self._stop(process)
-                    break
-                time.sleep(0.02)
-        except BaseException:
-            self._stop(process)
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self._kill(process)
-                process.wait()
-            for reader in readers:
-                reader.join()
-            raise
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            self._kill(process)
-            process.wait()
-        for reader in readers:
-            reader.join()
-        exit_code = 130 if cancelled else 124 if timed_out else int(process.returncode)
-        return BackendResult(
-            exit_code=exit_code,
-            stdout=b"".join(stdout_chunks).decode("utf-8", errors="replace"),
-            stderr=b"".join(stderr_chunks).decode("utf-8", errors="replace"),
-            elapsed_seconds=time.monotonic() - started,
-            timed_out=timed_out,
-            cancelled=cancelled,
-            output_truncated=budget.truncated,
-            enforced_policy_fields=tuple(enforced),
-        )
+        return BackendResult.from_outcome(outcome, enforced)
 
     @staticmethod
     def _stop(process: subprocess.Popen[Any]) -> None:
-        try:
-            if os.name == "nt":
-                process.terminate()
-            else:
-                getattr(os, "killpg")(process.pid, signal.SIGTERM)  # noqa: B009
-        except ProcessLookupError:
-            pass
+        stop_tree(process)
 
     @staticmethod
     def _kill(process: subprocess.Popen[Any]) -> None:
-        try:
-            if os.name == "nt":
-                process.kill()
-            else:
-                getattr(os, "killpg")(  # noqa: B009
-                    process.pid,
-                    getattr(signal, "SIGKILL"),  # noqa: B009
-                )
-        except ProcessLookupError:
-            pass
+        kill_tree(process)

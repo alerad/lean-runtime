@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Literal
 
-from ._paths import remove_tree
+from ._transaction import abandoned_staging, remove_abandoned_staging
 from .errors import ToolchainError
 from .store import EnvironmentStore
 from .toolchains import ToolchainManager
@@ -86,7 +86,7 @@ def diagnose(toolchains: ToolchainManager, store: EnvironmentStore) -> DoctorRep
     else:
         checks.append(DoctorCheck("elan", "pass", f"Elan executable: {elan}"))
 
-    staging = tuple(store.environments.glob(".staging-*"))
+    staging = tuple(abandoned_staging(store.environments, store.lock_paths))
     status = "warning" if staging else "pass"
     message = f"{len(staging)} incomplete staging directories" if staging else "No stale builds"
     checks.append(DoctorCheck("staging", status, message))
@@ -149,8 +149,10 @@ def diagnose(toolchains: ToolchainManager, store: EnvironmentStore) -> DoctorRep
 
 def repair(toolchains: ToolchainManager, store: EnvironmentStore) -> DoctorReport:
     """Apply the safe remedies represented by doctor checks, then diagnose again."""
-    for staging in store.environments.glob(".staging-*"):
-        remove_tree(staging)
+    # Only staging trees nobody owns are abandoned; a build in progress in
+    # another process holds its staging lock and is left alone.
+    remove_abandoned_staging(store.environments, store.lock_paths)
+    remove_abandoned_staging(store.sources, store.lock_paths)
     # Old releases did not write ownership markers, so retain those workspaces
     # for a full day before treating them as safely abandoned.
     store.clean_scratch(

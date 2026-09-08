@@ -24,13 +24,9 @@ from lean_runtime import (
     PublicationError,
     Runtime,
 )
-from lean_runtime.bundles import (
-    SOURCE_TREE_INVENTORY,
-    EnvironmentBundles,
-    _capsule_config_object,
-    _extract_layer,
-    _oci_archive,
-)
+from lean_runtime._archive import extract_layer, oci_archive
+from lean_runtime._sources import SOURCE_TREE_INVENTORY, inventory_tree_id, source_tree_inventory
+from lean_runtime.bundles import EnvironmentBundles, capsule_config_object
 from lean_runtime.capsules import build_manifest
 from lean_runtime.environments import ENVIRONMENT_SCHEMA
 from lean_runtime.errors import CredentialAcquisitionError, RegistryRequestError
@@ -76,6 +72,30 @@ def _git_package(path: Path) -> tuple[str, str]:
     (path / ".lake" / "build" / "lib" / "lean").mkdir(parents=True)
     (path / ".lake" / "build" / "lib" / "lean" / "Sample.olean").write_bytes(b"built")
     return revision, tree
+
+
+@pytest.mark.parametrize("at_record_boundary", [False, True])
+def test_source_inventory_rejects_truncated_git_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, at_record_boundary: bool
+) -> None:
+    checkout = tmp_path / "package"
+    revision, tree = _git_package(checkout)
+    package = LockedPackage(
+        name="sample",
+        url="https://example.test/sample.git",
+        revision=revision,
+        tree_hash=tree,
+        source_id="source_" + "a" * 64,
+    )
+    inventory = json.loads(source_tree_inventory(checkout, package))
+    assert inventory_tree_id(inventory["entries"]) == tree
+    listing = subprocess.check_output(
+        ["git", "ls-tree", "-rz", "--full-tree", "HEAD"], cwd=checkout
+    )
+    limit = listing.index(b"\0") + (1 if at_record_boundary else 0)
+    monkeypatch.setattr("lean_runtime._process.DEFAULT_MAX_OUTPUT_BYTES", limit)
+    with pytest.raises(EnvironmentError, match="inventory exceeds the Git output limit"):
+        source_tree_inventory(checkout, package)
 
 
 def _published_runtime(
@@ -179,7 +199,7 @@ def test_layer_extract_accepts_internal_parent_symlink(tmp_path: Path) -> None:
         ("symlink", "docs/README.md", "../README.md"),
     )
 
-    _extract_layer(layer, tmp_path / "output")
+    extract_layer(layer, tmp_path / "output")
 
     link = tmp_path / "output" / "docs" / "README.md"
     assert link.is_symlink()
@@ -191,7 +211,7 @@ def test_layer_extract_rejects_symlink_outside_destination(tmp_path: Path) -> No
     layer = _layer(("symlink", "docs/README.md", "../../outside"))
 
     with pytest.raises(EnvironmentError, match="unsafe bundle symlink"):
-        _extract_layer(layer, tmp_path / "output")
+        extract_layer(layer, tmp_path / "output")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows runners may not permit symlink creation")
@@ -202,13 +222,13 @@ def test_layer_extract_rejects_later_write_through_symlink(tmp_path: Path) -> No
     )
 
     with pytest.raises(EnvironmentError, match="traverses an extracted symlink"):
-        _extract_layer(layer, tmp_path / "output")
+        extract_layer(layer, tmp_path / "output")
 
 
 @pytest.mark.parametrize("name", ["/absolute", "../escape", "dir/../../escape", "dir\\escape"])
 def test_layer_extract_rejects_unsafe_paths(tmp_path: Path, name: str) -> None:
     with pytest.raises(EnvironmentError, match="unsafe bundle member path"):
-        _extract_layer(_layer(("file", name, b"payload")), tmp_path / "output")
+        extract_layer(_layer(("file", name, b"payload")), tmp_path / "output")
 
 
 def test_layer_extract_rejects_duplicate_member(tmp_path: Path) -> None:
@@ -217,18 +237,18 @@ def test_layer_extract_rejects_duplicate_member(tmp_path: Path) -> None:
         ("file", "payload", b"replacement"),
     )
     with pytest.raises(EnvironmentError, match="duplicate bundle member"):
-        _extract_layer(layer, tmp_path / "output")
+        extract_layer(layer, tmp_path / "output")
 
 
 def test_layer_extract_rejects_special_member(tmp_path: Path) -> None:
     with pytest.raises(EnvironmentError, match="unsupported bundle member"):
-        _extract_layer(_layer(("fifo", "pipe", b"")), tmp_path / "output")
+        extract_layer(_layer(("fifo", "pipe", b"")), tmp_path / "output")
 
 
 def test_layer_extract_rejects_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("lean_runtime.bundles.MAX_BUNDLE_BYTES", 1)
+    monkeypatch.setattr("lean_runtime._archive.MAX_BUNDLE_BYTES", 1)
     with pytest.raises(EnvironmentError, match="exceeds extraction limits"):
-        _extract_layer(_layer(("file", "large", b"ab")), tmp_path / "output")
+        extract_layer(_layer(("file", "large", b"ab")), tmp_path / "output")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows runners may not permit symlink creation")
@@ -238,7 +258,7 @@ def test_layer_extract_rejects_symlink_destination(tmp_path: Path) -> None:
     destination = tmp_path / "destination"
     destination.symlink_to(outside, target_is_directory=True)
     with pytest.raises(EnvironmentError, match="destination must not be a symlink"):
-        _extract_layer(_layer(("file", "payload", b"payload")), destination)
+        extract_layer(_layer(("file", "payload", b"payload")), destination)
 
 
 def test_bundle_export_is_deterministic_and_imports_into_fresh_store(tmp_path: Path) -> None:
@@ -310,7 +330,7 @@ def test_capsule_layout_contains_only_indexed_sparse_artifacts(tmp_path: Path) -
     )
     assert platform_manifest["annotations"]["org.lean-runtime.profile"] == "check-capsule"
     config_descriptor = platform_manifest["config"]
-    config = _capsule_config_object(
+    config = capsule_config_object(
         (layout / "blobs" / "sha256" / config_descriptor["digest"].split(":", 1)[1]).read_bytes()
     )
     assert config["schema"] == "lean-runtime-oci-capsule/1"
@@ -344,7 +364,7 @@ def test_portable_capsule_imports_without_sources(tmp_path: Path) -> None:
     )
     archive = tmp_path / "sample.lean-capsule"
     archive.write_bytes(
-        _oci_archive(
+        oci_archive(
             {
                 path.relative_to(layout).as_posix(): path.read_bytes()
                 for path in layout.rglob("*")
@@ -571,7 +591,7 @@ def test_bundle_import_rejects_a_corrupted_blob(tmp_path: Path) -> None:
     blob_name = next(name for name in entries if name.startswith("blobs/sha256/"))
     entries[blob_name] += b"corruption"
     corrupted = tmp_path / "corrupted.oci.tar.gz"
-    corrupted.write_bytes(_oci_archive(entries))
+    corrupted.write_bytes(oci_archive(entries))
 
     consumer = Runtime(home=tmp_path / "consumer")
     with pytest.raises(EnvironmentError, match="digest mismatch"):

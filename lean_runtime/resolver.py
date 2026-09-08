@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import tempfile
 import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from ._git import git_command
+from ._process import git_command, run_git
 from .backends import Backend
 from .errors import ResolutionError
 from .events import EventEmitter
@@ -27,19 +26,14 @@ _COMMIT = re.compile(r"[0-9a-fA-F]{40}")
 
 
 def _git(path: Path, *arguments: str) -> str:
-    process = subprocess.run(
-        git_command("-C", str(path), *arguments),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if process.returncode:
+    process = run_git("-C", str(path), *arguments)
+    if not process.ok:
         raise ResolutionError(
             f"could not inspect resolved Git package at {path}",
             phase="lock-validation",
-            command=tuple(git_command("-C", str(path), *arguments)),
-            exit_code=process.returncode,
-            output=process.stdout + process.stderr,
+            command=process.command,
+            exit_code=process.exit_code,
+            output=process.output,
         )
     return process.stdout.strip()
 

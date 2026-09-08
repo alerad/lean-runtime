@@ -143,7 +143,7 @@ def test_lean_run_rejects_conflicting_cli_and_frontmatter(
     )
     monkeypatch.setattr("lean_runtime.run_cli.Runtime", FakeRuntime)
     assert main([str(source), "--with", "alerad/leancert@v1"]) == 2
-    assert "cannot combine --using" in capsys.readouterr().err
+    assert "cannot combine --with" in capsys.readouterr().err
 
 
 def test_lean_run_explains_explicit_dependencies_without_execution(

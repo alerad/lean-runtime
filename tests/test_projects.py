@@ -393,7 +393,11 @@ def test_check_builds_a_missing_local_import_then_retries(tmp_path: Path) -> Non
     assert result.ok
     assert (tmp_path / "project/.lake/build/lib/lean/Sample/Dependency.olean").is_file()
     assert any(event.kind == "project.check_dependency_build_started" for event in events)
-    assert result.timings[0].phase == "build"
+    phases = [timing.phase for timing in result.timings]
+    assert phases[:2] == ["preliminary_check", "build"]
+    assert "execution" in phases
+    # Exclusive phases: the whole operation is at least their sum.
+    assert round(result.elapsed_seconds * 1000) >= sum(t.duration_ms for t in result.timings) - 1
 
 
 def test_project_wide_check_builds_only_lake_declared_library_artifacts(

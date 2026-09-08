@@ -7,7 +7,6 @@ import os
 import posixpath
 import re
 import shutil
-import subprocess
 import tarfile
 import tempfile
 import threading
@@ -17,6 +16,7 @@ from typing import Any
 
 import zstandard
 
+from ._process import run_process
 from .errors import DownloadUnavailable, EnvironmentError, ToolchainError
 from .events import EventEmitter, current
 from .locking import FileLock
@@ -139,7 +139,15 @@ def _safe_member(name: str) -> PurePosixPath:
     return path
 
 
-def _extract_layer(layer: Path, destination: Path) -> None:
+def _lean_commit(lean: Path) -> str:
+    """The Git commit a Lean binary reports for itself."""
+    outcome = run_process([str(lean), "-g"], timeout=60)
+    if not outcome.ok:
+        raise ToolchainError(f"could not identify the Lean commit of {lean}: {outcome.output}")
+    return outcome.stdout.strip()
+
+
+def extract_layer(layer: Path, destination: Path) -> None:
     current().emit(
         "toolchain.layer_extract_started",
         "Extracting published check toolchain",
@@ -391,7 +399,7 @@ class OCIToolchainLibrary:
             raise
         destination = self.toolchains.slim_path(toolchain)
         with FileLock(
-            self.store.lock_dir / f"toolchain-{toolchain_reference(toolchain)}.lock",
+            self.store.lock_paths.toolchain(toolchain_reference(toolchain)),
             timeout=1800,
             cancel=cancel,
         ):
@@ -408,7 +416,7 @@ class OCIToolchainLibrary:
                 shutil.rmtree(staging)
             staging.mkdir(parents=True)
             try:
-                _extract_layer(layer, staging)
+                extract_layer(layer, staging)
                 manifest = SlimManifest.load(staging)
                 if manifest is None or manifest.toolchain != normalize_toolchain(toolchain):
                     raise ToolchainError("published check toolchain has an invalid slim manifest")
@@ -427,9 +435,7 @@ class OCIToolchainLibrary:
                     raise ToolchainError(
                         f"published check toolchain failed verification: {failures}"
                     )
-                observed_commit = subprocess.check_output(
-                    [str(staging / "bin" / "lean"), "-g"], text=True
-                ).strip()
+                observed_commit = _lean_commit(staging / "bin" / "lean")
                 if observed_commit != plan.lean_commit:
                     raise ToolchainError("published check toolchain Lean commit mismatch")
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -493,9 +499,7 @@ class OCIToolchainPublisher:
             ]
             if failures:
                 raise ToolchainError(f"check toolchain publication corpus failed: {failures}")
-            lean_commit = subprocess.check_output(
-                [str(slim / "bin" / "lean"), "-g"], text=True
-            ).strip()
+            lean_commit = _lean_commit(slim / "bin" / "lean")
             if not lean_commit:
                 raise ToolchainError("could not identify the check toolchain Lean commit")
             layer = root / "toolchain.tar.zst"

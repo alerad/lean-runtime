@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import shutil
@@ -19,8 +18,9 @@ import zstandard
 from .capsules import ArtifactCapability, CapsuleArtifact, CapsuleManifest
 from .errors import EnvironmentError
 from .events import current
-from .locking import FileLock
+from .locking import FileLock, LockPaths
 from .progress import CountedProgress
+from .serialization import sha256_bytes, sha256_file
 
 PACK_SCHEMA = "lean-runtime-sparse-pack/1"
 PACK_MEDIA_TYPE = "application/vnd.lean-runtime.sparse-pack.v1+zstd"
@@ -33,18 +33,6 @@ MAX_PACK_RAW_BYTES = 512 * 1024**2
 _MAGIC = b"LRCAP1\0"
 _HEADER = struct.Struct(">IQ")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
-
-
-def _digest(data: bytes) -> str:
-    return "sha256:" + hashlib.sha256(data).hexdigest()
-
-
-def _digest_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +142,7 @@ def _encode_frame(workspace: Path, artifacts: Iterable[CapsuleArtifact]) -> byte
     for artifact in artifacts:
         path = artifact.path.encode("utf-8")
         data = workspace.joinpath(*PurePosixPath(artifact.path).parts).read_bytes()
-        if len(data) != artifact.size or _digest(data) != artifact.digest:
+        if len(data) != artifact.size or sha256_bytes(data) != artifact.digest:
             raise EnvironmentError(f"capsule artifact changed while packing: {artifact.path}")
         output.extend(_HEADER.pack(len(path), len(data)))
         output.extend(path)
@@ -260,14 +248,14 @@ def build_sparse_packs(
                             offset,
                             len(compressed),
                             len(raw),
-                            _digest(compressed),
+                            sha256_bytes(compressed),
                             tuple(name for name, _items in group),
                             tuple(item.path for item in frame_artifacts),
                         )
                     )
                     offset += len(compressed)
                     progress.advance(f"{package}/{capability}")
-            digest = _digest_path(temporary)
+            digest = sha256_file(temporary)
             destination = output / f"{digest.removeprefix('sha256:')}.lrpack"
             if destination.exists():
                 temporary.unlink()
@@ -294,10 +282,10 @@ def unpack_frame(
     artifacts: Mapping[str, CapsuleArtifact],
     cas_root: Path,
     *,
-    lock_root: Path | None = None,
+    locks: LockPaths | None = None,
 ) -> tuple[str, ...]:
     """Verify one independently compressed frame and publish artifacts to CAS."""
-    if len(compressed) != frame.size or _digest(compressed) != frame.digest:
+    if len(compressed) != frame.size or sha256_bytes(compressed) != frame.digest:
         raise EnvironmentError("sparse pack frame digest mismatch")
     try:
         raw = zstandard.ZstdDecompressor().decompress(compressed, max_output_size=frame.raw_size)
@@ -325,12 +313,12 @@ def unpack_frame(
         data = raw[position:end_data]
         position = end_data
         artifact = artifacts.get(path)
-        if artifact is None or len(data) != artifact.size or _digest(data) != artifact.digest:
+        if artifact is None or len(data) != artifact.size or sha256_bytes(data) != artifact.digest:
             raise EnvironmentError(f"sparse pack artifact digest mismatch: {path}")
         destination = cas_root / artifact.digest.removeprefix("sha256:")
         lock = (
-            FileLock(lock_root / f"cas-{destination.name}.lock", timeout=1800)
-            if lock_root is not None
+            FileLock(locks.cas_artifact(destination.name), timeout=1800)
+            if locks is not None
             else nullcontext()
         )
         with lock:
@@ -355,7 +343,7 @@ def project_artifacts(
     cas_root: Path,
     root: Path,
     *,
-    lock_root: Path | None = None,
+    locks: LockPaths | None = None,
 ) -> int:
     """Hardlink verified CAS artifacts into a disposable environment projection."""
     linked = 0
@@ -363,15 +351,15 @@ def project_artifacts(
         artifact = artifacts[path]
         source = cas_root / artifact.digest.removeprefix("sha256:")
         lock = (
-            FileLock(lock_root / f"cas-{source.name}.lock", timeout=1800)
-            if lock_root is not None
+            FileLock(locks.cas_artifact(source.name), timeout=1800)
+            if locks is not None
             else nullcontext()
         )
         with lock:
             if (
                 not source.is_file()
                 or source.stat().st_size != artifact.size
-                or _digest_path(source) != artifact.digest
+                or sha256_file(source) != artifact.digest
             ):
                 raise EnvironmentError(f"capsule CAS artifact is unavailable: {path}")
             os.utime(source, None)
@@ -381,7 +369,7 @@ def project_artifacts(
                 if (
                     not destination.is_file()
                     or destination.stat().st_size != artifact.size
-                    or _digest_path(destination) != artifact.digest
+                    or sha256_file(destination) != artifact.digest
                 ):
                     raise EnvironmentError(
                         f"capsule projection contains a conflicting artifact: {path}"

@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -16,11 +16,16 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
     import tomli as tomllib
 
 from .errors import SpecificationError
+from .events import submit
 from .lockfiles import EnvironmentLock
 from .models import ExecutionResult
 
 _SELECTORS = ("requires", "lock", "environment", "toolchain", "project")
 _KEYS = {"name", *_SELECTORS}
+
+
+if TYPE_CHECKING:
+    from .runtime import Runtime
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +104,7 @@ def load_matrix(path: Path) -> tuple[MatrixContext, ...]:
 
 
 def run_matrix(
-    runtime: Any,
+    runtime: Runtime,
     source: str,
     *,
     filename: str,
@@ -110,9 +115,12 @@ def run_matrix(
 ) -> MatrixResult:
     if concurrency < 1 or concurrency > 32:
         raise SpecificationError("matrix concurrency must be between 1 and 32")
+    # One failing context must stop its running siblings whether or not the
+    # caller supplied an event, so the matrix always owns one.
+    cancel = cancel if cancel is not None else threading.Event()
 
     def execute(context: MatrixContext) -> MatrixEntry:
-        if cancel is not None and cancel.is_set():
+        if cancel.is_set():
             raise RuntimeError("matrix execution was cancelled")
         if context.requires:
             environment = runtime.open_references(
@@ -149,14 +157,13 @@ def run_matrix(
     else:
         by_name: dict[str, MatrixEntry] = {}
         with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="lean-matrix") as pool:
-            futures = {pool.submit(execute, item): item.name for item in contexts}
+            futures = {submit(pool, execute, item): item.name for item in contexts}
             try:
                 for future in as_completed(futures):
                     entry = future.result()
                     by_name[entry.context] = entry
             except BaseException:
-                if cancel is not None:
-                    cancel.set()
+                cancel.set()
                 for future in futures:
                     future.cancel()
                 raise

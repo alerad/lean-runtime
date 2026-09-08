@@ -226,16 +226,7 @@ def _write_shard(
 
 
 def _package_root(workspace: Path, lock: EnvironmentLock, package: LockedPackage) -> Path:
-    raw_packages_dir = lock.manifest.get("packagesDir", ".lake/packages")
-    if not isinstance(raw_packages_dir, str):
-        raise EnvironmentError("lock packagesDir must be a relative string")
-    packages_dir = PurePosixPath(raw_packages_dir)
-    if packages_dir.is_absolute() or ".." in packages_dir.parts:
-        raise EnvironmentError("lock packagesDir must be a safe relative string")
-    root = workspace.joinpath(*packages_dir.parts) / package.name
-    if package.subdir:
-        root = root.joinpath(*PurePosixPath(package.subdir).parts)
-    return root / ".lake" / "build" / "lib" / "lean"
+    return lock.package_root(workspace, package) / ".lake" / "build" / "lib" / "lean"
 
 
 def build_declaration_index(

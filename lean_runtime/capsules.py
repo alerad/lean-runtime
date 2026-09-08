@@ -13,19 +13,22 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
+from ._process import run_process
+from ._relpath import safe_relative_posix
+from ._transaction import publish_tree, staged_tree
 from .errors import EnvironmentError
 from .events import current
 from .import_syntax import IMPORT_STATEMENT
 from .lockfiles import EnvironmentLock
+from .locking import LockPaths
 from .progress import CountedProgress
-from .serialization import canonical_json_bytes, write_json_atomic
+from .serialization import canonical_json_bytes, sha256_file, write_json_atomic
 
 CAPSULE_SCHEMA = "lean-runtime-check-capsule/1"
 CAPSULE_MANIFEST = ".lean-runtime/capsule.json"
@@ -47,14 +50,6 @@ def source_import_roots(source: str) -> tuple[str, ...]:
             for module in match.group(1).split()
         )
     )
-
-
-def _digest_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
 
 
 def artifact_capability(path: Path | PurePosixPath) -> ArtifactCapability:
@@ -98,22 +93,24 @@ class CapsuleArtifact:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> CapsuleArtifact:
-        path = str(value.get("path", ""))
-        digest = str(value.get("digest", ""))
+        path = value.get("path")
+        digest = value.get("digest")
         size = value.get("size")
         capability = value.get("capability")
-        normalized = PurePosixPath(path)
+        try:
+            normalized = safe_relative_posix(path)
+        except ValueError as exc:
+            raise EnvironmentError(f"capsule artifact path is unsafe: {exc}") from exc
         if (
-            not path
-            or normalized.is_absolute()
-            or ".." in normalized.parts
+            not isinstance(digest, str)
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
             or not isinstance(size, int)
+            or isinstance(size, bool)
             or size < 0
             or capability not in {"check", "native", "editor", "development", "metadata"}
         ):
             raise EnvironmentError("capsule contains an invalid artifact record")
-        return cls(path, digest, size, capability)
+        return cls(normalized.as_posix(), digest, size, capability)
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,16 +262,13 @@ def parse_import_headers(
         progress.start()
         for offset in range(0, len(source_paths), batch_size):
             batch = list(source_paths[offset : offset + batch_size])
-            process = subprocess.run(
+            process = run_process(
                 [*lean_command, "--run", str(helper), *(str(path) for path in batch)],
-                text=True,
-                capture_output=True,
-                check=False,
+                timeout=600,
             )
-            if process.returncode:
+            if not process.ok:
                 raise EnvironmentError(
-                    "Lean could not inventory capsule imports: "
-                    + (process.stdout + process.stderr)[-4000:]
+                    "Lean could not inventory capsule imports: " + process.output[-4000:]
                 )
             try:
                 document = json.loads(process.stdout)
@@ -410,9 +404,7 @@ def build_manifest(
         if module is not None:
             relative = path.relative_to(workspace).as_posix()
             capability = artifact_capability(path)
-            artifact = CapsuleArtifact(
-                relative, _digest_path(path), path.stat().st_size, capability
-            )
+            artifact = CapsuleArtifact(relative, sha256_file(path), path.stat().st_size, capability)
             existing = modules.get(module)
             if existing is not None and existing[0] != package:
                 raise EnvironmentError(
@@ -437,22 +429,10 @@ def build_manifest(
 def _package_directories(
     workspace: Path, lock: EnvironmentLock
 ) -> tuple[dict[str, Path], dict[str, Path]]:
-    raw_packages_dir = lock.manifest.get("packagesDir", ".lake/packages")
-    if not isinstance(raw_packages_dir, str):
-        raise EnvironmentError("lock packagesDir must be a relative string")
-    packages_dir = PurePosixPath(raw_packages_dir)
-    if packages_dir.is_absolute() or ".." in packages_dir.parts:
-        raise EnvironmentError("lock packagesDir must be a safe relative path")
     sources = {"__root__": workspace}
     builds = {"__root__": workspace / ".lake" / "build" / "lib" / "lean"}
-    package_base = workspace.joinpath(*packages_dir.parts)
     for package in lock.packages:
-        source = package_base / package.name
-        if package.subdir:
-            subdir = PurePosixPath(package.subdir)
-            if subdir.is_absolute() or ".." in subdir.parts:
-                raise EnvironmentError(f"unsafe package subdirectory: {package.subdir!r}")
-            source = source.joinpath(*subdir.parts)
+        source = lock.package_root(workspace, package)
         sources[package.name] = source
         builds[package.name] = source / ".lake" / "build" / "lib" / "lean"
     return sources, builds
@@ -534,14 +514,15 @@ def materialize_capsule(
     manifest: CapsuleManifest,
     *,
     capabilities: frozenset[ArtifactCapability] = frozenset({"check"}),
+    locks: LockPaths | None = None,
 ) -> int:
-    """Physically materialize selected capsule capabilities, then publish atomically."""
-    staging = destination.parent / f".{destination.name}.staging-{os.getpid()}"
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
+    """Physically materialize selected capsule capabilities, then publish atomically.
+
+    An existing destination is swapped out only once the new tree is complete
+    and is restored if the swap fails.
+    """
     copied = 0
-    try:
+    with staged_tree(destination.parent, locks, prefix=f".{destination.name}.staging-") as staging:
         for module in manifest.modules:
             for artifact in module.artifacts:
                 if artifact.capability not in capabilities:
@@ -550,7 +531,7 @@ def materialize_capsule(
                 if (
                     not source.is_file()
                     or source.stat().st_size != artifact.size
-                    or _digest_path(source) != artifact.digest
+                    or sha256_file(source) != artifact.digest
                 ):
                     raise EnvironmentError(
                         f"capsule artifact changed during export: {artifact.path}"
@@ -563,11 +544,5 @@ def materialize_capsule(
                     shutil.copy2(source, target)
                 copied += artifact.size
         write_json_atomic(staging / CAPSULE_MANIFEST, manifest.to_dict())
-        if destination.exists():
-            shutil.rmtree(destination)
-        staging.replace(destination)
-    except BaseException:
-        if staging.exists():
-            shutil.rmtree(staging)
-        raise
+        publish_tree(staging, destination, replace=True)
     return copied
