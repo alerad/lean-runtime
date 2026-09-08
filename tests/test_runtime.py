@@ -17,12 +17,9 @@ from lean_runtime import (
     Runtime,
     ToolchainError,
 )
+from lean_runtime._transaction import staged_tree
 from lean_runtime.backends import BackendResult, LocalBackend
-from lean_runtime.environments import (
-    Environment,
-    EnvironmentManager,
-    _environment_staging_path,
-)
+from lean_runtime.environments import Environment, EnvironmentManager
 from lean_runtime.runtime import _bundled_lock_for_references
 from lean_runtime.store import EnvironmentStore
 
@@ -246,7 +243,8 @@ def test_core_environment_never_installs_the_full_toolchain(tmp_path: Path) -> N
 
 def test_environment_stage_preserves_windows_artifact_path_budget(tmp_path: Path) -> None:
     store = EnvironmentStore(tmp_path / "runtime")
-    stage = _environment_staging_path(store)
+    with staged_tree(store.environments, store.lock_paths) as stage:
+        pass
 
     assert stage.parent == store.environments
     assert stage.name.startswith(".staging-")

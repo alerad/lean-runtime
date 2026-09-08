@@ -14,8 +14,8 @@ from lean_runtime.errors import ToolchainError
 from lean_runtime.oci import OCIRepository
 from lean_runtime.toolchain_oci import (
     OCIToolchainPublisher,
-    _extract_layer,
     _write_layer,
+    extract_layer,
     toolchain_reference,
 )
 
@@ -52,7 +52,7 @@ def test_toolchain_zstd_layer_is_deterministic_and_preserves_executables(
     )
     destination = tmp_path / "destination"
     destination.mkdir()
-    _extract_layer(first, destination)
+    extract_layer(first, destination)
     assert (destination / "bin" / "lean").read_bytes() == b"lean"
     # NTFS has no execute bit; only assert it where the filesystem can hold one.
     assert os.name == "nt" or (destination / "bin" / "lean").stat().st_mode & 0o111
@@ -64,7 +64,7 @@ def test_toolchain_extractor_rejects_non_zstd_input(tmp_path: Path) -> None:
     destination = tmp_path / "destination"
     destination.mkdir()
     with pytest.raises(ToolchainError, match="could not extract"):
-        _extract_layer(layer, destination)
+        extract_layer(layer, destination)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows runners may not permit symlinks")
@@ -79,7 +79,7 @@ def test_toolchain_layer_preserves_safe_internal_symlink(tmp_path: Path) -> None
     _write_layer(root, layer)
     destination = tmp_path / "destination"
     destination.mkdir()
-    _extract_layer(layer, destination)
+    extract_layer(layer, destination)
 
     link = destination / "lib" / "libLLVM-19.so"
     assert link.is_symlink()
@@ -126,7 +126,7 @@ def _raw_toolchain_layer(tmp_path: Path, members: list[tuple[str, str, bytes | s
 def test_toolchain_extractor_rejects_unsafe_paths(tmp_path: Path, name: str) -> None:
     layer = _raw_toolchain_layer(tmp_path, [("file", name, b"payload")])
     with pytest.raises(ToolchainError, match="unsafe check toolchain member"):
-        _extract_layer(layer, tmp_path / "output")
+        extract_layer(layer, tmp_path / "output")
 
 
 def test_toolchain_extractor_rejects_duplicate_member(tmp_path: Path) -> None:
@@ -135,13 +135,13 @@ def test_toolchain_extractor_rejects_duplicate_member(tmp_path: Path) -> None:
         [("file", "bin/lean", b"first"), ("file", "bin/lean", b"replacement")],
     )
     with pytest.raises(ToolchainError, match="duplicate check toolchain member"):
-        _extract_layer(layer, tmp_path / "output")
+        extract_layer(layer, tmp_path / "output")
 
 
 def test_toolchain_extractor_rejects_special_member(tmp_path: Path) -> None:
     layer = _raw_toolchain_layer(tmp_path, [("fifo", "pipe", b"")])
     with pytest.raises(ToolchainError, match="only files, directories, and safe symlinks"):
-        _extract_layer(layer, tmp_path / "output")
+        extract_layer(layer, tmp_path / "output")
 
 
 def test_toolchain_extractor_rejects_limits(
@@ -150,7 +150,7 @@ def test_toolchain_extractor_rejects_limits(
     layer = _raw_toolchain_layer(tmp_path, [("file", "large", b"ab")])
     monkeypatch.setattr("lean_runtime.toolchain_oci.MAX_TOOLCHAIN_BYTES", 1)
     with pytest.raises(ToolchainError, match="exceeds extraction limits"):
-        _extract_layer(layer, tmp_path / "output")
+        extract_layer(layer, tmp_path / "output")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows runners may not permit symlink creation")
@@ -161,7 +161,7 @@ def test_toolchain_extractor_rejects_symlink_destination(tmp_path: Path) -> None
     destination.symlink_to(outside, target_is_directory=True)
     layer = _raw_toolchain_layer(tmp_path, [("file", "bin/lean", b"payload")])
     with pytest.raises(ToolchainError, match="destination must not be a symlink"):
-        _extract_layer(layer, destination)
+        extract_layer(layer, destination)
 
 
 def test_toolchain_index_finalization_is_ordered_and_rejects_duplicate_platforms() -> None:

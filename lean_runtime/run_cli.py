@@ -249,7 +249,7 @@ def _explain_discovery(
 def _combine(arguments: argparse.Namespace, metadata: LeanFrontmatter | None) -> LeanFrontmatter:
     embedded = metadata or LeanFrontmatter()
     if arguments.requires and embedded.requires:
-        raise SpecificationError("cannot combine --using and frontmatter 'requires'")
+        raise SpecificationError("cannot combine --with and frontmatter 'requires'")
     if arguments.lock is not None and embedded.lock is not None:
         raise SpecificationError("cannot combine --lock and frontmatter 'lock'")
     if arguments.toolchain is not None and embedded.toolchain is not None:
@@ -424,232 +424,238 @@ def run(
         verbose=arguments.verbose,
     )
     try:
-        source = source_path.read_text(encoding="utf-8")
-        evidence = analyze_source(source)
-        embedded = parse_frontmatter(source)
-        context = _combine(arguments, embedded)
-        context_resolution = resolve_file_context(
-            source_path,
-            context,
-            discover=not arguments.no_discover,
-            standalone=arguments.standalone,
-        )
-        if arguments.explain:
+        try:
+            source = source_path.read_text(encoding="utf-8")
+            evidence = analyze_source(source)
+            embedded = parse_frontmatter(source)
+            context = _combine(arguments, embedded)
+            context_resolution = resolve_file_context(
+                source_path,
+                context,
+                discover=not arguments.no_discover,
+                standalone=arguments.standalone,
+            )
+            if arguments.explain:
+                if context_resolution.kind == "lock":
+                    selected = "exact lock"
+                    detail = context.lock
+                    explanation: dict[str, object] = {
+                        "decision": "context_selected",
+                        "context": selected,
+                        "subject": detail,
+                    }
+                elif context_resolution.kind == "references":
+                    selected = "standalone dependencies"
+                    detail = ", ".join(context.requires)
+                    explanation = {
+                        "decision": "context_selected",
+                        "context": selected,
+                        "subject": detail,
+                    }
+                elif context_resolution.kind == "toolchain":
+                    selected = "standalone toolchain"
+                    detail = context.toolchain
+                    explanation = {
+                        "decision": "context_selected",
+                        "context": selected,
+                        "subject": detail,
+                    }
+                elif context_resolution.kind == "project":
+                    assert context_resolution.project is not None
+                    selected = "local project"
+                    detail = str(context_resolution.project.root)
+                    explanation = {
+                        "decision": "context_selected",
+                        "context": selected,
+                        "subject": detail,
+                        "reasons": list(context_resolution.reasons),
+                    }
+                else:
+                    explanation = _explain_discovery(arguments, source, evidence)
+                    selected = "automatic discovery"
+                    candidates = explanation["subject"]
+                    detail = (
+                        ", ".join(candidates) if isinstance(candidates, list) else str(candidates)
+                    )
+                if arguments.json:
+                    print(
+                        json.dumps(
+                            envelope("lean-runtime.inspect/v1", ok=True, data=explanation),
+                            ensure_ascii=False,
+                            indent=2,
+                            sort_keys=True,
+                        )
+                    )
+                else:
+                    print(f"Context: {selected}\nSelected: {detail}")
+                return 0
+            if arguments.plan:
+                lock, candidate_id = _plan_lock(
+                    arguments,
+                    context,
+                    source,
+                    source_path,
+                    context_resolution,
+                    evidence,
+                )
+                _, plan_libraries = _selected_policy(arguments)
+                runtime = Runtime(
+                    home=arguments.home,
+                    max_download_bytes=arguments.max_download,
+                    libraries=plan_libraries,
+                )
+                report = runtime.plan_exact(lock, import_roots=evidence.imports)
+                if candidate_id is not None:
+                    report["candidate"] = candidate_id
+                _render_plan(report, as_json=arguments.json)
+                return 0
+            preparation_started = time.monotonic()
+            runtime_events: list[RuntimeEvent] = []
+
+            def observe(event: RuntimeEvent) -> None:
+                runtime_events.append(event)
+                if arguments.json_events:
+                    print(
+                        json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True),
+                        file=sys.stderr,
+                    )
+                renderer(event)
+
+            availability, libraries = _selected_policy(arguments)
+            runtime = Runtime(
+                home=arguments.home,
+                on_event=observe,
+                availability=availability,
+                libraries=libraries,
+                max_download_bytes=arguments.max_download,
+                allow_source_build=getattr(arguments, "allow_source_build", False),
+            )
+            policy = ExecutionPolicy(timeout_seconds=arguments.check_timeout)
+            rejected_discovery: DiscoveryResult | None = None
             if context_resolution.kind == "lock":
-                selected = "exact lock"
-                detail = context.lock
-                explanation: dict[str, object] = {
-                    "decision": "context_selected",
-                    "context": selected,
-                    "subject": detail,
-                }
+                if arguments.lock_out is not None:
+                    raise SpecificationError("--write-lock cannot be combined with an exact lock")
+                assert context.lock is not None
+                lock_path = _lock_path(
+                    context.lock,
+                    source_path,
+                    embedded=arguments.lock is None,
+                )
+                environment = runtime.open_exact(
+                    EnvironmentLock.load(lock_path), import_roots=evidence.imports
+                )
+                preparation = PhaseTiming(
+                    "environment_open", round((time.monotonic() - preparation_started) * 1000)
+                )
+                result = environment.check(source, filename=source_path.name, policy=policy)
             elif context_resolution.kind == "references":
-                selected = "standalone dependencies"
-                detail = ", ".join(context.requires)
-                explanation = {
-                    "decision": "context_selected",
-                    "context": selected,
-                    "subject": detail,
-                }
+                resolution_started = time.monotonic()
+                lock = runtime.prepare_references(context.requires, toolchain=context.toolchain)
+                resolution = PhaseTiming(
+                    "resolution", round((time.monotonic() - resolution_started) * 1000)
+                )
+                if arguments.lock_out is not None:
+                    lock.write(arguments.lock_out)
+                environment = runtime.open_exact(lock, import_roots=evidence.imports)
+                preparation = PhaseTiming(
+                    "environment_open",
+                    round((time.monotonic() - resolution_started) * 1000) - resolution.duration_ms,
+                )
+                result = environment.check(source, filename=source_path.name, policy=policy)
+                result = replace(result, timings=(resolution, preparation, *result.timings))
             elif context_resolution.kind == "toolchain":
-                selected = "standalone toolchain"
-                detail = context.toolchain
-                explanation = {
-                    "decision": "context_selected",
-                    "context": selected,
-                    "subject": detail,
-                }
+                preparation = PhaseTiming(
+                    "toolchain", round((time.monotonic() - preparation_started) * 1000)
+                )
+                result = runtime.check_file(source_path, toolchain=context.toolchain, policy=policy)
             elif context_resolution.kind == "project":
-                assert context_resolution.project is not None
-                selected = "local project"
-                detail = str(context_resolution.project.root)
-                explanation = {
-                    "decision": "context_selected",
-                    "context": selected,
-                    "subject": detail,
-                    "reasons": list(context_resolution.reasons),
-                }
+                if arguments.lock_out is not None:
+                    raise SpecificationError(
+                        "--write-lock is only available for explicit dependencies or discovery"
+                    )
+                preparation = PhaseTiming(
+                    "environment_open", round((time.monotonic() - preparation_started) * 1000)
+                )
+                result = runtime.check_file(source_path, policy=policy)
             else:
-                explanation = _explain_discovery(arguments, source, evidence)
-                selected = "automatic discovery"
-                candidates = explanation["subject"]
-                detail = ", ".join(candidates) if isinstance(candidates, list) else str(candidates)
+                discovery_started = time.monotonic()
+                discovery_catalog = _catalog(arguments.catalog)
+                discovery_policy = _discovery_policy(arguments)
+                discovery = Discovery(
+                    catalog=discovery_catalog,
+                    policy=discovery_policy,
+                    runtime=runtime,
+                    runtime_events=runtime_events,
+                    filename=source_path.name,
+                )
+                if not discovery.has_local_history_hint(source, evidence=evidence):
+                    renderer.note("Discovering an exact environment")
+                discovered = discovery.discover_and_check(source, evidence=evidence)
+                if discovered.status != "found" or discovered.execution_result is None:
+                    rejection = discovered.best_rejection
+                    if rejection is None or rejection.execution_result is None:
+                        raise SpecificationError(_discovery_failure(discovered)) from None
+                    result = rejection.execution_result
+                    rejected_discovery = discovered
+                else:
+                    if arguments.lock_out is not None:
+                        assert discovered.lock is not None
+                        discovered.lock.write(arguments.lock_out)
+                    result = discovered.execution_result
+                preparation = PhaseTiming(
+                    "discovery", round((time.monotonic() - discovery_started) * 1000)
+                )
+            if context_resolution.kind in {"lock", "toolchain", "project", "discovery"}:
+                result = replace(result, timings=(preparation, *result.timings))
+            discovery_summary = (
+                _discovery_summary(rejected_discovery) if rejected_discovery is not None else None
+            )
+            if discovery_summary is not None:
+                result = replace(
+                    result,
+                    hints=(*result.hints, discovery_summary),
+                )
+            renderer.close()
+            _emit(
+                result,
+                as_json=arguments.json,
+                filename=source_path.name,
+                display_path=str(arguments.file),
+                show_timings=arguments.timings,
+                summary_elapsed_seconds=(
+                    rejected_discovery.duration_seconds if rejected_discovery is not None else None
+                ),
+                discovery_summary=discovery_summary,
+            )
+            if result.ok:
+                return 0
+            # A hit resource limit is an execution-policy outcome, not a verdict.
+            return 2 if result.timed_out else 1
+        except KeyboardInterrupt:
+            renderer.close()
+            print(f"{command_name}: interrupted", file=sys.stderr)
+            return 130
+        except (DiscoveryError, LeanRuntimeError, OSError, UnicodeError, ValueError) as exc:
+            renderer.close()
             if arguments.json:
                 print(
                     json.dumps(
-                        envelope("lean-runtime.inspect/v1", ok=True, data=explanation),
+                        envelope(
+                            "lean-runtime.execution/v1",
+                            ok=False,
+                            data={},
+                            errors=[error("invocation_failed", str(exc))],
+                        ),
                         ensure_ascii=False,
                         indent=2,
                         sort_keys=True,
                     )
                 )
             else:
-                print(f"Context: {selected}\nSelected: {detail}")
-            return 0
-        if arguments.plan:
-            lock, candidate_id = _plan_lock(
-                arguments,
-                context,
-                source,
-                source_path,
-                context_resolution,
-                evidence,
-            )
-            _, plan_libraries = _selected_policy(arguments)
-            runtime = Runtime(
-                home=arguments.home,
-                max_download_bytes=arguments.max_download,
-                libraries=plan_libraries,
-            )
-            report = runtime.plan_exact(lock, import_roots=evidence.imports)
-            if candidate_id is not None:
-                report["candidate"] = candidate_id
-            _render_plan(report, as_json=arguments.json)
-            return 0
-        preparation_started = time.monotonic()
-        runtime_events: list[RuntimeEvent] = []
-
-        def observe(event: RuntimeEvent) -> None:
-            runtime_events.append(event)
-            if arguments.json_events:
-                print(
-                    json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True), file=sys.stderr
-                )
-            renderer(event)
-
-        availability, libraries = _selected_policy(arguments)
-        runtime = Runtime(
-            home=arguments.home,
-            on_event=observe,
-            availability=availability,
-            libraries=libraries,
-            max_download_bytes=arguments.max_download,
-            allow_source_build=getattr(arguments, "allow_source_build", False),
-        )
-        policy = ExecutionPolicy(timeout_seconds=arguments.check_timeout)
-        rejected_discovery: DiscoveryResult | None = None
-        if context_resolution.kind == "lock":
-            if arguments.lock_out is not None:
-                raise SpecificationError("--write-lock cannot be combined with an exact lock")
-            assert context.lock is not None
-            lock_path = _lock_path(
-                context.lock,
-                source_path,
-                embedded=arguments.lock is None,
-            )
-            environment = runtime.open_exact(
-                EnvironmentLock.load(lock_path), import_roots=evidence.imports
-            )
-            preparation = PhaseTiming(
-                "environment_open", round((time.monotonic() - preparation_started) * 1000)
-            )
-            result = environment.check(source, filename=source_path.name, policy=policy)
-        elif context_resolution.kind == "references":
-            resolution_started = time.monotonic()
-            lock = runtime.prepare_references(context.requires, toolchain=context.toolchain)
-            resolution = PhaseTiming(
-                "resolution", round((time.monotonic() - resolution_started) * 1000)
-            )
-            if arguments.lock_out is not None:
-                lock.write(arguments.lock_out)
-            environment = runtime.open_exact(lock, import_roots=evidence.imports)
-            preparation = PhaseTiming(
-                "environment_open",
-                round((time.monotonic() - resolution_started) * 1000) - resolution.duration_ms,
-            )
-            result = environment.check(source, filename=source_path.name, policy=policy)
-            result = replace(result, timings=(resolution, preparation, *result.timings))
-        elif context_resolution.kind == "toolchain":
-            preparation = PhaseTiming(
-                "toolchain", round((time.monotonic() - preparation_started) * 1000)
-            )
-            result = runtime.check_file(source_path, toolchain=context.toolchain, policy=policy)
-        elif context_resolution.kind == "project":
-            if arguments.lock_out is not None:
-                raise SpecificationError(
-                    "--write-lock is only available for explicit dependencies or discovery"
-                )
-            preparation = PhaseTiming(
-                "environment_open", round((time.monotonic() - preparation_started) * 1000)
-            )
-            result = runtime.check_file(source_path, policy=policy)
-        else:
-            discovery_started = time.monotonic()
-            discovery_catalog = _catalog(arguments.catalog)
-            discovery_policy = _discovery_policy(arguments)
-            discovery = Discovery(
-                catalog=discovery_catalog,
-                policy=discovery_policy,
-                runtime=runtime,
-                runtime_events=runtime_events,
-                filename=source_path.name,
-            )
-            if not discovery.has_local_history_hint(source, evidence=evidence):
-                renderer.note("Discovering an exact environment")
-            discovered = discovery.discover_and_check(source, evidence=evidence)
-            if discovered.status != "found" or discovered.execution_result is None:
-                rejection = discovered.best_rejection
-                if rejection is None or rejection.execution_result is None:
-                    raise SpecificationError(_discovery_failure(discovered)) from None
-                result = rejection.execution_result
-                rejected_discovery = discovered
-            else:
-                if arguments.lock_out is not None:
-                    assert discovered.lock is not None
-                    discovered.lock.write(arguments.lock_out)
-                result = discovered.execution_result
-            preparation = PhaseTiming(
-                "discovery", round((time.monotonic() - discovery_started) * 1000)
-            )
-        if context_resolution.kind in {"lock", "toolchain", "project", "discovery"}:
-            result = replace(result, timings=(preparation, *result.timings))
-        discovery_summary = (
-            _discovery_summary(rejected_discovery) if rejected_discovery is not None else None
-        )
-        if discovery_summary is not None:
-            result = replace(
-                result,
-                hints=(*result.hints, discovery_summary),
-            )
+                print(f"{command_name}: {exc}", file=sys.stderr)
+            return 2
+    finally:
         renderer.close()
-        _emit(
-            result,
-            as_json=arguments.json,
-            filename=source_path.name,
-            display_path=str(arguments.file),
-            show_timings=arguments.timings,
-            summary_elapsed_seconds=(
-                rejected_discovery.duration_seconds if rejected_discovery is not None else None
-            ),
-            discovery_summary=discovery_summary,
-        )
-        if result.ok:
-            return 0
-        # A hit resource limit is an execution-policy outcome, not a verdict.
-        return 2 if result.timed_out else 1
-    except KeyboardInterrupt:
-        renderer.close()
-        print(f"{command_name}: interrupted", file=sys.stderr)
-        return 130
-    except (DiscoveryError, LeanRuntimeError, OSError, UnicodeError, ValueError) as exc:
-        renderer.close()
-        if arguments.json:
-            print(
-                json.dumps(
-                    envelope(
-                        "lean-runtime.execution/v1",
-                        ok=False,
-                        data={},
-                        errors=[error("invocation_failed", str(exc))],
-                    ),
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                )
-            )
-        else:
-            print(f"{command_name}: {exc}", file=sys.stderr)
-        return 2
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -9,10 +9,12 @@ from pathlib import Path
 import pytest
 
 from lean_runtime import EnvironmentError, EnvironmentLock, LockedPackage
+from lean_runtime._process import ProcessOutcome
 from lean_runtime.store import (
     EnvironmentStore,
     clone_tree,
     environment_identity,
+    invalidate_storage_ledger,
     platform_compatibility,
 )
 
@@ -302,15 +304,15 @@ def test_source_snapshot_preserves_git_error_when_cleanup_also_fails(
         "tree_hash": "b" * 40,
     }
 
-    def failed_clone(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        Path(command[-1]).mkdir()
-        return subprocess.CompletedProcess(command, 1, "", "Filename too long")
+    def failed_clone(*arguments: str, **_kwargs: object) -> ProcessOutcome:
+        Path(arguments[-1]).mkdir()
+        return ProcessOutcome(arguments, 1, "", "Filename too long", 0.0, False, False, False)
 
     def failed_cleanup(_path: Path, *, onerror) -> None:
         assert onerror is not None
         raise PermissionError("pack file is locked")
 
-    monkeypatch.setattr("lean_runtime.store.subprocess.run", failed_clone)
+    monkeypatch.setattr("lean_runtime.store.run_git", failed_clone)
     monkeypatch.setattr("lean_runtime._paths.shutil.rmtree", failed_cleanup)
     monkeypatch.setattr("lean_runtime._paths.time.sleep", lambda _seconds: None)
 
@@ -424,3 +426,50 @@ def test_cas_artifact_lease_protects_a_freshly_unpacked_artifact(tmp_path: Path)
         assert artifact.is_file()
 
     assert not store.has_cas_artifact_leases(artifact.name)
+
+
+def test_status_ledger_refreshes_live_metadata_without_full_accounting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = EnvironmentStore(tmp_path)
+    environment = store.environments / ("env_" + "a" * 64)
+    (environment / "workspace").mkdir(parents=True)
+    (environment / "metadata.json").write_text('{"toolchain": "leanprover/lean4:v4.32.2"}')
+    first = store.status()
+    assert first.aliases == 0 and first.environment_usage[0].aliases == ()
+
+    calls: list[str] = []
+    original = store._storage_fingerprint
+
+    def counting() -> list[list[object]]:
+        calls.append("fingerprint")
+        return original()
+
+    monkeypatch.setattr(store, "_storage_fingerprint", counting)
+    monkeypatch.setattr(
+        "lean_runtime.store._tree_metrics",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("sizes must come from the ledger")),
+    )
+    store.set_alias("demo", environment.name)
+    store.touch_environment(environment.name)
+    second = store.status()
+    assert second.aliases == 1
+    assert second.environment_usage[0].aliases == ("demo",)
+    assert second.environment_usage[0].last_used_at is not None
+    assert second.environments_bytes == first.environments_bytes
+
+
+def test_shared_build_trees_invalidate_the_ledger(tmp_path: Path) -> None:
+    store = EnvironmentStore(tmp_path)
+    package = tmp_path / "project-packages" / ("pkg_" + "b" * 32)
+    build = package / ".lake" / "build"
+    build.mkdir(parents=True)
+    (package / ".lean-runtime-package.json").write_text("{}")
+    baseline = store.status().project_packages_bytes
+    (build / "Big.olean").write_bytes(b"x" * 4096)
+    # A new file deep inside a build tree changes the build directory listing.
+    assert store.status().project_packages_bytes > baseline
+    (build / "Big.olean").write_bytes(b"y" * 65536)
+    os.utime(build, None)
+    invalidate_storage_ledger(tmp_path)
+    assert store.status().project_packages_bytes > baseline + 4096

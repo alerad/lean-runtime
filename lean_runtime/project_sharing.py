@@ -7,24 +7,25 @@ import os
 import shutil
 import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._git import git_clean, git_head
 from ._paths import is_link, link_directory, remove_tree
+from ._project_identity import (
+    compute_package_identity,
+    entry_identity,
+    package_subdir,
+    resolved_path_entries,
+)
+from ._relpath import packages_directory
 from .errors import ProjectError
 from .policies import format_byte_size
 from .projects import ProjectContext, discover_project
 from .serialization import sha256_id, write_json_atomic
-from .shared_projects import (
-    SharedProjectManager,
-    _entry_identity,
-    _git_clean,
-    _git_head,
-    _package_identity,
-    _package_subdir,
-    _resolved_path_entries,
-)
+from .shared_projects import SharedProjectManager
 from .store import clone_tree
 
 PROJECT_CONFIG = "lean-runtime.toml"
@@ -32,6 +33,22 @@ PROJECT_CONFIG_SCHEMA = "lean-runtime-project/1"
 ATTACHMENT_RECORD = "lean-runtime-attachment.json"
 ATTACHMENT_SCHEMA = "lean-runtime-project-attachment/1"
 _CONFIG_CONTENT = f'schema = "{PROJECT_CONFIG_SCHEMA}"\ndependencies = "shared"\n'
+
+
+def _read_bytes_or_none(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _restore_file(path: Path, previous: bytes | None) -> None:
+    """Put ``path`` back to ``previous`` (its earlier contents, or absence)."""
+    with suppress(OSError):
+        if previous is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(previous)
 
 
 def _remove_path(path: Path) -> None:
@@ -89,20 +106,18 @@ def _manifest_packages(context: ProjectContext) -> list[dict[str, Any]]:
                 f"shared adoption does not support package source type {entry.get('type')!r}"
             )
         if entry.get("type") == "git":
-            _package_subdir(entry)
+            package_subdir(entry)
         packages.append(entry)
     return packages
 
 
 def _packages_directory(context: ProjectContext) -> Path:
     manifest = _read_manifest(context)
-    raw = manifest.get("packagesDir", ".lake/packages")
-    if not isinstance(raw, str):
-        raise ProjectError("Lake manifest packagesDir must be a string")
-    path = Path(raw)
-    if path.is_absolute() or ".." in path.parts:
-        raise ProjectError("Lake manifest packagesDir must be a safe relative path")
-    return context.root / path
+    try:
+        relative = packages_directory(manifest)
+    except ValueError as exc:
+        raise ProjectError(f"Lake manifest packagesDir is unsafe: {exc}") from exc
+    return context.root.joinpath(*relative.parts)
 
 
 def project_sharing_enabled(root: Path) -> bool:
@@ -400,7 +415,7 @@ def inspect_adoption(root: Path) -> ProjectAdoption:
             continue
         dependency_bytes += _tree_bytes(local)
         revision = entry.get("rev")
-        head = _git_head(local)
+        head = git_head(local)
         if head is None:
             blockers.append(f"dependency {name} is not a Git checkout")
         elif not isinstance(revision, str) or head != revision:
@@ -408,7 +423,7 @@ def inspect_adoption(root: Path) -> ProjectAdoption:
                 f"dependency {name} is checked out at {head[:12]}, not manifest revision "
                 f"{str(revision)[:12]}"
             )
-        elif not _git_clean(local):
+        elif not git_clean(local):
             blockers.append(f"dependency {name} has local changes")
     attached = (
         project_sharing_enabled(context.root)
@@ -465,9 +480,9 @@ def plan_adoption(
         context = discover_project(project.root)
         manifest = _read_manifest(context)
         entries = _manifest_packages(context)
-        identity_entries = _resolved_path_entries(context, entries)
+        identity_entries = resolved_path_entries(context, entries)
         effective_entries = {
-            str(entry["name"]): _entry_identity(identity_entry)
+            str(entry["name"]): entry_identity(identity_entry)
             for entry, identity_entry in zip(entries, identity_entries, strict=True)
         }
         reusable = (
@@ -491,8 +506,8 @@ def plan_adoption(
             if reusable_package is not None:
                 key = reusable_package.name
                 reused_groups.add(key)
-            elif _git_head(local) == entry.get("rev") and source_package.is_dir():
-                identity = _package_identity(
+            elif git_head(local) == entry.get("rev") and source_package.is_dir():
+                identity = compute_package_identity(
                     context=context,
                     entry=entry,
                     source_package=source_package,
@@ -610,7 +625,7 @@ class ProjectAdopter:
                 if package_dir is None or not is_link(link):
                     links_match = False
                     break
-                subdir = _package_subdir(entry)
+                subdir = package_subdir(entry)
                 target = package_dir
                 if subdir is not None:
                     for _part in subdir.parts:
@@ -636,6 +651,8 @@ class ProjectAdopter:
         swapped = False
         had_original = packages_dir.exists() or is_link(packages_dir)
         config = context.root / PROJECT_CONFIG
+        previous_marker = _read_bytes_or_none(marker)
+        previous_config = _read_bytes_or_none(config)
         try:
             self.shared.events.emit(
                 "project.attach.swap_started",
@@ -651,7 +668,7 @@ class ProjectAdopter:
                 package_dir = override_package_dirs.get(name)
                 if package_dir is None or not package_dir.is_dir():
                     raise ProjectError(f"shared workspace has no materialized package {name}")
-                subdir = _package_subdir(entry)
+                subdir = package_subdir(entry)
                 target = package_dir
                 if subdir is not None:
                     for _part in subdir.parts:
@@ -694,10 +711,11 @@ class ProjectAdopter:
                 _remove_path(packages_dir)
             if backup.exists() or is_link(backup):
                 backup.replace(packages_dir)
-            if marker.is_file():
-                marker.unlink()
-            if project_sharing_enabled(context.root):
-                config.unlink()
+            # Restore the records exactly as they were, rather than deleting
+            # them: a previous attachment or user config must survive a failed
+            # re-attach.
+            _restore_file(marker, previous_marker)
+            _restore_file(config, previous_config)
             raise
         return AdoptionResult(
             context.root,

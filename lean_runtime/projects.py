@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 import tempfile
 import threading
@@ -23,10 +22,11 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover - exercised by the Python 3.10 CI job
     import tomli as tomllib
 
-from ._git import git_command
+from ._cancellation import run_cancellable
 from ._paths import is_link
+from ._process import git_output, run_git, run_process
 from .errors import ProjectError, ProjectNotFoundError
-from .events import current
+from .events import current, submit
 from .models import ExecutionResult, PackageProvenance, ProjectProvenance
 from .policies import ExecutionPolicy
 from .toolchains import normalize_toolchain
@@ -49,13 +49,7 @@ def _file_digest(path: Path) -> str | None:
 
 
 def _git(root: Path, *arguments: str) -> str | None:
-    result = subprocess.run(
-        git_command("-C", str(root), *arguments),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return result.stdout.strip() if result.returncode == 0 else None
+    return git_output("-C", str(root), *arguments)
 
 
 def _publication_url(value: str, *, root: Path) -> str:
@@ -99,21 +93,17 @@ def _lake_metadata(path: Path, toolchain: str, runtime: Runtime) -> tuple[str, t
         command = runtime.toolchains.command(
             toolchain, "lake", "translate-config", "toml", str(lakefile)
         )
-        try:
-            process = subprocess.run(
-                command,
-                cwd=path,
-                env=runtime.toolchains.environment_for(toolchain),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=120,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
+        process = run_process(
+            command,
+            cwd=path,
+            environment=runtime.toolchains.environment_for(toolchain),
+            timeout=120,
+            merge_stderr=True,
+        )
+        if process.timed_out:
             temporary.cleanup()
-            raise ProjectError("Lake timed out while inspecting lakefile.lean") from exc
-        if process.returncode or not lakefile.is_file():
+            raise ProjectError("Lake timed out while inspecting lakefile.lean")
+        if not process.ok or not lakefile.is_file():
             if temporary is not None:
                 temporary.cleanup()
             raise ProjectError(
@@ -154,13 +144,8 @@ def _lake_metadata(path: Path, toolchain: str, runtime: Runtime) -> tuple[str, t
 def _remote_contains_commit(url: str, revision: str, directory: Path) -> None:
     """Prove that the exact commit can be acquired from the advertised remote."""
     with tempfile.TemporaryDirectory(prefix="lean-runtime-remote-", dir=directory) as raw:
-        process = subprocess.run(
-            git_command("init", "--quiet", raw),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if process.returncode == 0:
+        process = run_git("init", "--quiet", raw)
+        if process.ok:
             current().emit(
                 "publish.remote_probe_started",
                 f"Proving {revision[:12]} is available from origin",
@@ -168,20 +153,15 @@ def _remote_contains_commit(url: str, revision: str, directory: Path) -> None:
                 url=url,
                 revision=revision,
             )
-            try:
-                process = subprocess.run(
-                    git_command("-C", raw, "fetch", "--quiet", "--depth", "1", url, revision),
-                    text=True,
-                    capture_output=True,
-                    timeout=120,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
+            process = run_git(
+                "-C", raw, "fetch", "--quiet", "--depth", "1", url, revision, timeout=120
+            )
+            if process.timed_out:
                 raise ProjectError(
                     "timed out proving that HEAD is available from the configured origin"
-                ) from exc
-        if process.returncode:
-            detail = (process.stdout + process.stderr).strip()
+                )
+        if not process.ok:
+            detail = process.output.strip()
             raise ProjectError(
                 f"HEAD {revision[:12]} is not available from origin; push the commit before "
                 "publishing an immutable environment" + (f"\nGit: {detail}" if detail else "")
@@ -668,16 +648,7 @@ class ProjectEnvironment:
         filename: str = "Main.lean",
         policy: ExecutionPolicy | None = None,
     ) -> ExecutionResult:
-        cancel = threading.Event()
-        task = asyncio.create_task(
-            asyncio.to_thread(self.check, source, filename=filename, policy=policy, cancel=cancel)
-        )
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancel.set()
-            await task
-            raise
+        return await run_cancellable(self.check, source, filename=filename, policy=policy)
 
     def check_many(
         self,
@@ -691,7 +662,7 @@ class ProjectEnvironment:
             raise ValueError("concurrency must be positive")
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = [
-                executor.submit(self.check, source, policy=policy, cancel=cancel)
+                submit(executor, self.check, source, policy=policy, cancel=cancel)
                 for source in sources
             ]
             return tuple(future.result() for future in futures)

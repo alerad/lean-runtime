@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import threading
@@ -163,3 +164,79 @@ class FileLock:
             )
         handle.close()
         self._handle = None
+
+
+class LockPaths:
+    """Every cross-process lock file below one store home.
+
+    A lock only protects an invariant when every participant agrees on its
+    location, so no component builds a lock path on its own: the store, the
+    shared-project manager, the OCI caches and the garbage collectors all ask
+    this registry. Lock files are transient and live apart from the data they
+    guard, under ``<home>/.locks``.
+    """
+
+    def __init__(self, home: Path) -> None:
+        self.root = home / ".locks"
+
+    def _path(self, name: str) -> Path:
+        return self.root / f"{name}.lock"
+
+    # Content-addressed store objects.
+    def environment(self, environment_id: str) -> Path:
+        return self._path(environment_id)
+
+    def environment_lock(self, lock_id: str) -> Path:
+        return self._path(lock_id)
+
+    def source(self, source_id: str) -> Path:
+        return self._path(source_id)
+
+    def program(self, program_id: str) -> Path:
+        return self._path(program_id)
+
+    def name(self, name: str) -> Path:
+        return self._path(f"name-{name}")
+
+    def oci_blob(self, hex_digest: str) -> Path:
+        return self._path(f"oci-{hex_digest}")
+
+    def cas_artifact(self, hex_digest: str) -> Path:
+        return self._path(f"cas-{hex_digest}")
+
+    def declaration_index(self, lock_id: str) -> Path:
+        return self._path(f"declaration-index-{lock_id}")
+
+    def toolchain(self, reference: str) -> Path:
+        return self._path(f"toolchain-{reference}")
+
+    # Shared Lake projects.
+    def package(self, package_id: str) -> Path:
+        """Ownership of one shared package tree (materialization and removal)."""
+        return self._path(package_id)
+
+    def package_build(self, package_id: str) -> Path:
+        """Serializes builds that may write into one shared package tree."""
+        return self._path(f"{package_id}-build")
+
+    def project_source(self, source_id: str) -> Path:
+        return self._path(source_id)
+
+    def project_workspace(self, workspace_id: str) -> Path:
+        return self._path(workspace_id)
+
+    def project_seeds(self) -> Path:
+        return self._path("project-seeds")
+
+    # Disposable workspaces and in-flight staging trees.
+    def workspace(self, path: Path) -> Path:
+        identity = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
+        return self._path(f"workspace-{identity}")
+
+    def staging(self, nonce: str) -> Path:
+        """Held by the process building the staging tree named by ``nonce``."""
+        return self._path(f"staging-{nonce}")
+
+    # Garbage collectors.
+    def collector(self, name: str) -> Path:
+        return self._path(f"{name}-gc")

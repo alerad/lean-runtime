@@ -18,19 +18,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ._git import git_command
 from ._paths import remove_tree
+from ._platform import PLATFORM_COMPATIBILITY_SCHEMA as PLATFORM_COMPATIBILITY_SCHEMA
+from ._platform import platform_compatibility as platform_compatibility
+from ._platform import platform_record as platform_record
+from ._process import git_output, run_git
+from ._transaction import publish_tree, staged_tree
 from .declaration_index import DeclarationShard
 from .errors import EnvironmentError
 from .events import current
 from .lockfiles import EnvironmentLock
-from .locking import FileLock
+from .locking import FileLock, LockPaths
 from .package_ids import package_directories
 from .progress import CountedProgress
 from .serialization import sha256_id, write_json_atomic
 
 STORE_SCHEMA = "lean-runtime-store/2"
-PLATFORM_COMPATIBILITY_SCHEMA = "lean-runtime-platform/1"
 _ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _ENVIRONMENT_ID = re.compile(r"env_[0-9a-f]{64}")
 _OCI_BLOB = re.compile(r"[0-9a-f]{64}")
@@ -86,33 +89,6 @@ def source_snapshot_digest(root: Path) -> str:
                     digest.update(chunk)
         progress.advance(relative.as_posix())
     return "sha256:" + digest.hexdigest()
-
-
-def platform_record() -> dict[str, str]:
-    return {
-        "system": platform.system().lower(),
-        "machine": platform.machine().lower(),
-        "python_platform": platform.platform(),
-    }
-
-
-def platform_compatibility() -> dict[str, str]:
-    """Return only fields that determine compatibility of built artifacts."""
-    system = platform.system().lower()
-    machine = platform.machine().lower()
-    machine = {"amd64": "x86_64", "x64": "x86_64", "aarch64": "arm64"}.get(machine, machine)
-    abi = "native"
-    if system == "linux":
-        libc, _version = platform.libc_ver()
-        abi = {"glibc": "gnu", "musl": "musl"}.get(libc.lower(), libc.lower() or "unknown")
-    elif system == "windows":
-        abi = "msvc"
-    return {
-        "schema": PLATFORM_COMPATIBILITY_SCHEMA,
-        "system": system,
-        "machine": machine,
-        "abi": abi,
-    }
 
 
 def environment_identity(lock: EnvironmentLock, build_profile: str = "release") -> str:
@@ -235,6 +211,19 @@ def _tree_metrics(root: Path, seen: set[tuple[int, int]]) -> tuple[int, int]:
         except OSError:
             continue
     return materialized, allocated
+
+
+STORAGE_LEDGER_NAME = "storage-ledger.json"
+
+
+def invalidate_storage_ledger(home: Path) -> None:
+    """Drop the cached storage accounting below ``home``.
+
+    Called by operations that rewrite mutable trees in place (shared package
+    builds), which a directory-level fingerprint cannot be trusted to notice.
+    """
+    with suppress(OSError):
+        (home / STORAGE_LEDGER_NAME).unlink()
 
 
 class WorkspaceLease:
@@ -421,7 +410,8 @@ class EnvironmentStore:
         self.declaration_indexes = home / "declaration-indexes"
         self.declaration_index_objects = self.declaration_indexes / "objects" / "sha256"
         self.declaration_index_locks = self.declaration_indexes / "locks"
-        self.lock_dir = home / ".locks"
+        self.lock_paths = LockPaths(home)
+        self.lock_dir = self.lock_paths.root
         for path in (
             self.sources,
             self.locks,
@@ -493,7 +483,7 @@ class EnvironmentStore:
         if not shards or len({item.shard_id for item in shards}) != len(shards):
             raise EnvironmentError("declaration index shard manifest is empty or duplicated")
         destinations: list[Path] = []
-        with FileLock(self.lock_dir / f"declaration-index-{lock_id}.lock", timeout=1800):
+        with FileLock(self.lock_paths.declaration_index(lock_id), timeout=1800):
             for shard_id, source in sources.items():
                 shard = next((item for item in shards if item.shard_id == shard_id), None)
                 if shard is None:
@@ -523,8 +513,7 @@ class EnvironmentStore:
         return self.locks / lock_id / "environment.lock.json"
 
     def _workspace_lock_path(self, path: Path) -> Path:
-        identity = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
-        return self.lock_dir / f"workspace-{identity}.lock"
+        return self.lock_paths.workspace(path)
 
     def lease_workspace(self, path: Path, kind: str) -> WorkspaceLease:
         return WorkspaceLease(self, path, kind)
@@ -547,7 +536,7 @@ class EnvironmentStore:
 
     def publish_lock(self, lock: EnvironmentLock) -> Path:
         destination = self.lock_path(lock.lock_id)
-        with FileLock(self.lock_dir / f"{lock.lock_id}.lock"):
+        with FileLock(self.lock_paths.environment_lock(lock.lock_id)):
             if destination.is_file():
                 EnvironmentLock.load(destination)
                 return destination
@@ -591,22 +580,17 @@ class EnvironmentStore:
         commands = (("rev-parse", "HEAD"), ("rev-parse", "HEAD^{tree}"))
         observed = []
         for arguments in commands:
-            process = subprocess.run(
-                git_command("-C", str(source), *arguments),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            if process.returncode:
+            value = git_output("-C", str(source), *arguments)
+            if value is None:
                 raise EnvironmentError(f"immutable source Git metadata is invalid: {source_id}")
-            observed.append(process.stdout.strip().lower())
+            observed.append(value.lower())
         if observed != [revision.lower(), tree_hash.lower()]:
             raise EnvironmentError(f"immutable source content mismatch: {source_id}")
         return source
 
     def publish_source(self, checkout: Path, source_id: str, metadata: dict[str, Any]) -> Path:
         destination = self.source_path(source_id)
-        with FileLock(self.lock_dir / f"{source_id}.lock"):
+        with FileLock(self.lock_paths.source(source_id)):
             if destination.is_dir():
                 self.validate_source(
                     source_id,
@@ -615,13 +599,12 @@ class EnvironmentStore:
                     tree_hash=str(metadata["tree_hash"]),
                 )
                 return destination
-            parent = destination.parent
-            parent.mkdir(parents=True, exist_ok=True)
-            # Keep this short: Git rejects shallow-clone metadata paths near MAX_PATH
-            # on Windows ("'$GIT_DIR' too big"), and source ids are already 71 chars.
-            stage = parent / f".staging-{uuid.uuid4().hex[:12]}"
-            try:
-                command = git_command(
+            # Keep the stage short: Git rejects shallow-clone metadata paths near
+            # MAX_PATH on Windows ("'$GIT_DIR' too big"); source ids are 71 chars.
+            with staged_tree(destination.parent, self.lock_paths) as stage:
+                # Git creates the clone directory itself.
+                stage.rmdir()
+                process = run_git(
                     "clone",
                     "--quiet",
                     "--no-local",
@@ -631,46 +614,20 @@ class EnvironmentStore:
                     checkout.resolve().as_uri(),
                     str(stage),
                 )
-                process = subprocess.run(
-                    command,
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
-                if process.returncode:
+                if not process.ok:
                     raise EnvironmentError(
-                        f"could not create compact source snapshot {source_id}: "
-                        + process.stdout
-                        + process.stderr
+                        f"could not create compact source snapshot {source_id}: " + process.output
                     )
-                remote = subprocess.run(
-                    git_command(
-                        "-C",
-                        str(stage),
-                        "remote",
-                        "set-url",
-                        "origin",
-                        str(metadata["url"]),
-                    ),
-                    text=True,
-                    capture_output=True,
-                    check=False,
+                remote = run_git(
+                    "-C", str(stage), "remote", "set-url", "origin", str(metadata["url"])
                 )
-                if remote.returncode:
+                if not remote.ok:
                     raise EnvironmentError(
-                        f"could not normalize source remote {source_id}: "
-                        + remote.stdout
-                        + remote.stderr
+                        f"could not normalize source remote {source_id}: " + remote.output
                     )
                 snapshot_metadata = {**metadata, "content_hash": source_snapshot_digest(stage)}
                 write_json_atomic(stage / ".lean-runtime-source.json", snapshot_metadata)
-                stage.replace(destination)
-            finally:
-                if stage.exists():
-                    # Failed Git checkouts can leave locked pack files on
-                    # Windows. Cleanup must not mask the actionable Git error.
-                    with suppress(OSError):
-                        remove_tree(stage)
+                publish_tree(stage, destination)
         return destination
 
     def environment_path(self, environment_id: str) -> Path:
@@ -694,7 +651,7 @@ class EnvironmentStore:
         self.validate_environment_id(environment_id)
         lease_directory = self.leases / environment_id
         lease = lease_directory / f"{os.getpid()}-{uuid.uuid4().hex}.json"
-        with FileLock(self.lock_dir / f"{environment_id}.lock"):
+        with FileLock(self.lock_paths.environment(environment_id)):
             if not self.environment_path(environment_id).is_dir():
                 raise EnvironmentError(
                     f"environment disappeared before execution: {environment_id}"
@@ -817,7 +774,7 @@ class EnvironmentStore:
             "name": name,
             "environment_id": environment_id,
         }
-        with FileLock(self.lock_dir / f"name-{name}.lock"):
+        with FileLock(self.lock_paths.name(name)):
             write_json_atomic(self.names / f"{name}.json", record)
 
     def resolve_identifier(self, identifier: str) -> str:
@@ -856,6 +813,14 @@ class EnvironmentStore:
         return result
 
     def _storage_fingerprint(self) -> list[list[object]]:
+        """Identity of the expensive, mostly immutable trees that size accounting covers.
+
+        Shallow directory metadata is enough for content-addressed objects,
+        which are published whole by rename. Shared package build trees are
+        mutable in place, so their ``.lake/build`` directories are listed one
+        level deeper; on top of that, operations that rebuild them call
+        :func:`invalidate_storage_ledger` explicitly.
+        """
         roots = (
             self.environments,
             self.sources,
@@ -882,17 +847,55 @@ class EnvironmentStore:
                         sum(child.stat().st_mtime_ns for child in children),
                     ]
                 )
+        for package in package_directories(self.home / "project-packages"):
+            build = package / ".lake" / "build"
+            with suppress(OSError):
+                fingerprint.append([package.name, build.stat().st_mtime_ns])
         return fingerprint
 
+    def invalidate_storage_ledger(self) -> None:
+        invalidate_storage_ledger(self.home)
+
+    def _live_status(self, cached: StoreStatus) -> StoreStatus:
+        """Refresh the cheap, mutable facts a cached size accounting does not cover.
+
+        Aliases, usage timestamps and object counts change without touching
+        the fingerprinted trees; they are read fresh on every call so cleanup
+        advice never rests on a stale ledger.
+        """
+        aliases = self.aliases()
+        names_by_environment: dict[str, list[str]] = {}
+        for name, environment_id in aliases.items():
+            names_by_environment.setdefault(environment_id, []).append(name)
+        usage = tuple(
+            replace(
+                item,
+                aliases=tuple(sorted(names_by_environment.get(item.environment_id, ()))),
+                last_used_at=self._last_used_at(self.environments / item.environment_id),
+            )
+            for item in cached.environment_usage
+        )
+        return replace(
+            cached,
+            aliases=len(aliases),
+            locks=sum(1 for path in self.locks.glob("lock_*") if path.is_dir()),
+            executions=sum(1 for _path in self.executions.glob("execution_*.json")),
+            declaration_indexes=sum(
+                1 for path in self.declaration_index_objects.glob("[0-9a-f]" * 64) if path.is_file()
+            ),
+            scratch_workspaces=len(self._scratch_paths()),
+            bytes_free=shutil.disk_usage(self.home).free,
+            environment_usage=usage,
+        )
+
     def status(self, *, verify: bool = False) -> StoreStatus:
-        ledger = self.home / "storage-ledger.json"
+        ledger = self.home / STORAGE_LEDGER_NAME
         fingerprint = self._storage_fingerprint()
         if not verify:
             with suppress(OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
                 value = json.loads(ledger.read_text(encoding="utf-8"))
-                if value.get("accounting") == 2 and value["fingerprint"] == fingerprint:
-                    cached = StoreStatus.from_dict(value["status"])
-                    return replace(cached, bytes_free=shutil.disk_usage(self.home).free)
+                if value.get("accounting") == 3 and value["fingerprint"] == fingerprint:
+                    return self._live_status(StoreStatus.from_dict(value["status"]))
         aliases = self.aliases()
         allocated_seen: set[tuple[int, int]] = set()
         allocated_bytes = 0
@@ -1013,7 +1016,7 @@ class EnvironmentStore:
         )
         write_json_atomic(
             ledger,
-            {"accounting": 2, "fingerprint": fingerprint, "status": status.to_dict()},
+            {"accounting": 3, "fingerprint": fingerprint, "status": status.to_dict()},
         )
         return status
 
@@ -1068,7 +1071,7 @@ class EnvironmentStore:
             current().emit, "storage.cleanup", "Inspecting environments", len(paths), phase="clean"
         )
         progress.start()
-        with FileLock(self.lock_dir / "gc.lock"):
+        with FileLock(self.lock_paths.collector("environments")):
             for path in paths:
                 if _ENVIRONMENT_ID.fullmatch(path.name) is None:
                     retained.append(path.name)
@@ -1089,7 +1092,7 @@ class EnvironmentStore:
                 size = _tree_bytes(path)
                 candidate_bytes += size
                 if not dry_run:
-                    with FileLock(self.lock_dir / f"{path.name}.lock"):
+                    with FileLock(self.lock_paths.environment(path.name)):
                         referenced = set(self.aliases().values())
                         age = now - (
                             usage.stat().st_mtime if usage.exists() else path.stat().st_mtime
@@ -1140,7 +1143,7 @@ class EnvironmentStore:
             phase="clean",
         )
         progress.start()
-        with FileLock(self.lock_dir / "scratch-gc.lock"):
+        with FileLock(self.lock_paths.collector("scratch")):
             for path in paths:
                 try:
                     age = max(0.0, now - path.stat().st_mtime)
@@ -1176,8 +1179,12 @@ class EnvironmentStore:
                     continue
                 tombstone = path.with_name(f".trash-{path.name}-{uuid.uuid4().hex}")
                 try:
-                    path.replace(tombstone)
-                except FileNotFoundError:
+                    # Ownership is held across the rename so a lease taken
+                    # between the check above and here cannot lose its tree.
+                    with FileLock(self._workspace_lock_path(path), timeout=0):
+                        path.replace(tombstone)
+                except (EnvironmentError, FileNotFoundError):
+                    retained.append(label)
                     progress.advance(label)
                     continue
                 remove_tree(tombstone)
@@ -1216,7 +1223,7 @@ class EnvironmentStore:
             phase="clean",
         )
         progress.start()
-        with FileLock(self.lock_dir / "project-artifact-gc.lock"):
+        with FileLock(self.lock_paths.collector("project-artifacts")):
             for package in packages:
                 marker = package / ".lean-runtime-package.json"
                 try:
@@ -1243,8 +1250,8 @@ class EnvironmentStore:
                     continue
                 try:
                     with (
-                        FileLock(self.lock_dir / f"{package.name}-build.lock", timeout=0),
-                        FileLock(self.lock_dir / f"{package.name}.lock", timeout=0),
+                        FileLock(self.lock_paths.package_build(package.name), timeout=0),
+                        FileLock(self.lock_paths.package(package.name), timeout=0),
                     ):
                         if not package.is_dir():
                             progress.advance(package.name)
@@ -1286,7 +1293,7 @@ class EnvironmentStore:
             phase="clean",
         )
         progress.start()
-        with FileLock(self.lock_dir / "oci-gc.lock"):
+        with FileLock(self.lock_paths.collector("downloads")):
             referenced = self.referenced_oci_blobs()
             for path in blob_paths:
                 if not path.is_file() or _OCI_BLOB.fullmatch(path.name) is None:
@@ -1308,7 +1315,7 @@ class EnvironmentStore:
                 if dry_run:
                     progress.advance(path.name)
                     continue
-                with FileLock(self.lock_dir / f"oci-{path.name}.lock"):
+                with FileLock(self.lock_paths.oci_blob(path.name)):
                     referenced = self.referenced_oci_blobs()
                     if (
                         not path.is_file()
@@ -1341,7 +1348,7 @@ class EnvironmentStore:
                 if dry_run:
                     progress.advance(label)
                     continue
-                with FileLock(self.lock_dir / f"cas-{path.name}.lock"):
+                with FileLock(self.lock_paths.cas_artifact(path.name)):
                     if (
                         not path.is_file()
                         or max(0.0, now - path.stat().st_mtime) < minimum_age_seconds

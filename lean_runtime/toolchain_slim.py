@@ -23,9 +23,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._transaction import publish_tree, staged_tree
 from .backends import LocalBackend
 from .errors import ToolchainError
 from .events import current
+from .locking import LockPaths
 from .policies import ExecutionPolicy
 from .progress import CountedProgress
 from .serialization import write_json_atomic
@@ -157,7 +159,12 @@ class SlimManifest:
 
 
 def materialize(
-    source: Path, destination: Path, *, toolchain: str, created_at: str
+    source: Path,
+    destination: Path,
+    *,
+    toolchain: str,
+    created_at: str,
+    locks: LockPaths | None = None,
 ) -> SlimManifest:
     """Materialize the check profile of one installed toolchain.
 
@@ -167,15 +174,11 @@ def materialize(
     """
     if not (source / "bin").is_dir():
         raise ToolchainError(f"not an installed Lean toolchain: {source}")
-    staging = destination.parent / f".{destination.name}.staging"
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
     kept_files = 0
     kept_bytes = 0
     excluded_files = 0
     excluded_bytes = 0
-    try:
+    with staged_tree(destination.parent, locks, prefix=f".{destination.name}.staging-") as staging:
         scan = CountedProgress(
             current().emit,
             "toolchain.slim_scan",
@@ -224,14 +227,8 @@ def materialize(
             created_at=created_at,
         )
         write_json_atomic(staging / SLIM_MANIFEST_NAME, manifest.to_dict())
-        if destination.exists():
-            shutil.rmtree(destination)
-        os.replace(staging, destination)
+        publish_tree(staging, destination, replace=True)
         return manifest
-    except BaseException:
-        if staging.exists():
-            shutil.rmtree(staging)
-        raise
 
 
 def verify_capabilities(

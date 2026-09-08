@@ -5,9 +5,15 @@ from __future__ import annotations
 import statistics
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from .models import ExecutionResult
+
+
+class Checker(Protocol):
+    """Anything that can check one Lean source: an environment or a project."""
+
+    def check(self, source: str, *, filename: str = ...) -> ExecutionResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,14 +58,16 @@ class ProfileReport:
 
 
 def run_profile(
-    environment: Any, source: str, *, filename: str, warmup: int, repeat: int
+    environment: Checker, source: str, *, filename: str, warmup: int, repeat: int
 ) -> ProfileReport:
     if warmup < 0 or repeat < 1 or warmup > 100 or repeat > 1000:
         raise ValueError("profile requires 0..100 warmups and 1..1000 samples")
+    started = time.monotonic()
     for _ in range(warmup):
         result = environment.check(source, filename=filename)
         if not result.ok:
-            return ProfileReport(filename, warmup, (), 0.0)
+            # The failing warmup is the report: it says why no samples exist.
+            return ProfileReport(filename, warmup, (result,), time.monotonic() - started)
     started = time.monotonic()
     results: list[ExecutionResult] = []
     for _ in range(repeat):

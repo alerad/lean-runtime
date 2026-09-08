@@ -8,29 +8,23 @@ another's private protocol helpers.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from ._platform import platform_compatibility
 from .errors import EnvironmentError
-from .store import platform_compatibility
+from .serialization import sha256_bytes, sha256_file
 
 MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 
 
-def digest_bytes(data: bytes) -> str:
-    return "sha256:" + hashlib.sha256(data).hexdigest()
+digest_bytes = sha256_bytes
 
 
-def digest_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+digest_path = sha256_file
 
 
 def blob_descriptor(data: bytes, media_type: str, **extra: Any) -> dict[str, Any]:

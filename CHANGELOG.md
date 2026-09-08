@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+- Make store lifecycle guarantees consistent across every execution path.
+  Every cross-process lock now comes from one registry under `<home>/.locks`
+  (`LockPaths`), so shared-project package locks and store cleanup finally
+  contend; every published tree goes through one staged-publish transaction
+  whose staging directory is owned by a lock while it is built, so `doctor
+  --repair` only removes staging trees nobody is building; scratch cleanup
+  holds the workspace lease across its rename; capsule and slim-toolchain
+  replacement swaps the old tree out only once the new one is complete and
+  restores it if the swap fails; a failed `adopt` restores the previous
+  attachment record and config instead of deleting them; sparse projections
+  validate the existing environment before writing into it.
+- Carry cancellation and bounds end to end. All child processes (Lean, Lake,
+  Git, elan, helpers) run through one internal seam with a shared timeout,
+  cancel event, bounded output and observer buffering, process-tree shutdown
+  and reader deadlines, and resource limits are applied without importing in
+  the forked child. Sparse acquisition, capsule pulls and source fetches
+  accept the cancel event; async wrappers preserve the caller's cancellation
+  when a worker fails during cleanup; a failing matrix context always stops
+  its running siblings.
+- Validate at the boundary and keep identities stable. One portable
+  relative-path policy (rejecting absolute, drive, UNC, backslash, NUL and
+  `..` forms) backs manifests, locks, capsules, archives and program
+  inventories; locks validate `packagesDir` and package subdirectories at
+  construction and freeze their manifest so `lock_id` cannot drift; provenance
+  and program inventories are frozen the same way; specifications, generated
+  root modules and locks all use one canonical package order; `verify`
+  reports the path check it actually performs.
+- Refresh storage status honestly: aliases, usage timestamps and object
+  counts are re-read on every call while the expensive size accounting stays
+  cached, and shared package builds invalidate that cache explicitly. The
+  header-snapshot cache keys by the compiler binary's identity, not its
+  spelling.
+- Consolidate result construction: one conversion from process outcome to
+  `ExecutionResult`, exclusive timing phases (a dependency build before a
+  retried check now reports `preliminary_check` and `build` separately), a
+  failed support module keeps every earlier support transcript, `profile`
+  keeps the failing warmup, and a process killed by a signal reports the new
+  `crashed` verdict rather than `rejected`.
+- Progress observers are strictly observational: a failing callback is
+  recorded on the emitter and never fails or rolls back an operation; the
+  console renderer always shuts down; repeated counted operations with the
+  same label print their checkpoints again; `lean-run` error messages name
+  the flags the parser actually accepts.
+- Extract shared primitives into internal modules (`_archive`, `_platform`,
+  `_sources`, `_project_identity`, `_git`, `_process`, `_transaction`,
+  `_relpath`, `_results`, `_cancellation`) so high-level modules no longer
+  serve as each other's utility libraries.
+
 - Shorten source-build environment staging names so deeply nested Mathlib
   artifacts remain below legacy `MAX_PATH` while `leantar` hydrates the cache
   on Windows. The previous PID plus full-UUID name put some artifacts at

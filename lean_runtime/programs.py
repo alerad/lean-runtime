@@ -7,7 +7,6 @@ the sources and compiler state required for an independent rebuild.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import tempfile
@@ -19,19 +18,21 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, cast
 
-from ._paths import remove_tree
-from .backends import Backend, BackendResult, InteractiveProcess
-from .bundles import (
-    _extract_layer,
-    _safe_name,
-    _write_tar_gzip,
+from ._archive import (
+    extract_layer,
+    extract_oci_archive,
+    safe_name,
+    write_oci_archive,
+    write_tar_gzip,
 )
-from .diagnostics import error_diagnostic, parse_diagnostics
+from ._paths import remove_tree
+from ._results import from_backend
+from .backends import Backend, BackendResult, InteractiveProcess
 from .environments import InteractiveSession
 from .errors import DownloadUnavailable, EnvironmentError, PolicyError
 from .events import EventEmitter, current
 from .locking import FileLock
-from .models import ExecutionProvenance, ExecutionResult, PhaseTiming
+from .models import ExecutionProvenance, ExecutionResult
 from .oci import (
     OCIRegistryClient,
     OCIRepository,
@@ -56,7 +57,14 @@ from .oci_protocol import (
 )
 from .policies import ExecutionPolicy
 from .progress import CountedProgress
-from .serialization import canonical_json_bytes, sha256_id, write_json_atomic
+from .serialization import (
+    canonical_json_bytes,
+    freeze_json,
+    sha256_file,
+    sha256_id,
+    thaw_json,
+    write_json_atomic,
+)
 from .store import EnvironmentStore, clone_tree, platform_compatibility, platform_record
 
 LEGACY_PROGRAM_SCHEMA = "lean-runtime-execution-program/1"
@@ -71,16 +79,8 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _digest_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
-
-
 def _relative_executable(value: str) -> str:
-    path = _safe_name(value.replace("\\", "/"))
+    path = safe_name(value.replace("\\", "/"))
     if path == PurePosixPath("."):
         raise EnvironmentError("program executable must name a file")
     return path.as_posix()
@@ -117,7 +117,7 @@ def _file_inventory(root: Path) -> dict[str, dict[str, Any]]:
         elif path.is_file():
             inventory[relative] = {
                 "kind": "file",
-                "sha256": _digest_file(path),
+                "sha256": sha256_file(path),
                 "size": path.stat().st_size,
                 "executable": bool(path.stat().st_mode & 0o111),
             }
@@ -143,6 +143,8 @@ class ProgramDescription:
     schema: str = PROGRAM_SCHEMA
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "files", freeze_json(self.files))
+        object.__setattr__(self, "provenance", freeze_json(dict(self.provenance)))
         if self.schema not in {LEGACY_PROGRAM_SCHEMA, PROGRAM_SCHEMA}:
             raise EnvironmentError(f"unsupported program schema: {self.schema!r}")
         if self.schema == LEGACY_PROGRAM_SCHEMA and self.provenance:
@@ -176,7 +178,7 @@ class ProgramDescription:
         value: dict[str, Any] = {
             "schema": self.schema,
             "command": list(self.command),
-            "files": dict(sorted(self.files.items())),
+            "files": thaw_json(dict(sorted(self.files.items()))),
             "computer_compatibility": self.computer_compatibility,
             "source_revision": self.source_revision,
             "source_environment_id": self.source_environment_id,
@@ -316,10 +318,6 @@ class ReadyProgram:
             raise
 
         def finalize(raw: BackendResult) -> ExecutionResult:
-            combined = "\n".join(part for part in (raw.stdout, raw.stderr) if part)
-            diagnostics = parse_diagnostics(combined)
-            if raw.timed_out:
-                diagnostics += (error_diagnostic("Program execution exceeded its time limit"),)
             provenance = ExecutionProvenance(
                 environment_id=self.description.source_environment_id,
                 execution_id=execution_id,
@@ -336,21 +334,13 @@ class ReadyProgram:
                 program_id=self.id,
                 program_copy_id=self.copy_id,
             )
-            result = ExecutionResult(
-                ok=raw.exit_code == 0,
-                exit_code=raw.exit_code,
+            result = from_backend(
+                raw,
+                command=resolved,
+                cwd=instance,
                 toolchain=self.description.toolchain,
-                command=tuple(resolved),
-                cwd=str(instance),
-                stdout=raw.stdout,
-                stderr=raw.stderr,
-                elapsed_seconds=raw.elapsed_seconds,
-                timed_out=raw.timed_out,
-                cancelled=raw.cancelled,
-                output_truncated=raw.output_truncated,
-                diagnostics=diagnostics,
                 provenance=provenance,
-                timings=(PhaseTiming("execution", round(raw.elapsed_seconds * 1000)),),
+                subject="Program execution",
             )
             write_json_atomic(
                 self.store.executions / f"{execution_id}.json",
@@ -396,7 +386,7 @@ class ProgramManager:
             provenance=dict(provenance or {}),
         )
         destination = self.store.programs / manifest.program_id
-        with FileLock(self.store.lock_dir / f"{manifest.program_id}.lock", timeout=1800):
+        with FileLock(self.store.lock_paths.program(manifest.program_id), timeout=1800):
             if not destination.exists():
                 stage = self.store.programs / f".staging-{uuid.uuid4().hex}"
                 try:
@@ -442,7 +432,7 @@ class ProgramManager:
             with tempfile.TemporaryDirectory(prefix="lean-runtime-program-save-copy-") as directory:
                 staging = Path(directory)
                 layer_path = staging / "payload.tar.gz"
-                _write_tar_gzip(program.root / "payload", layer_path)
+                write_tar_gzip(program.root / "payload", layer_path)
                 layer = _blob_descriptor_path(
                     layer_path,
                     PROGRAM_LAYER_MEDIA_TYPE,
@@ -510,9 +500,7 @@ class ProgramManager:
                 layout_path.write_bytes(b'{"imageLayoutVersion":"1.0.0"}')
                 entries["index.json"] = index_path
                 entries["oci-layout"] = layout_path
-                from .bundles import _write_oci_archive
-
-                _write_oci_archive(entries, temporary)
+                write_oci_archive(entries, temporary)
             temporary.replace(output)
         finally:
             temporary.unlink(missing_ok=True)
@@ -525,10 +513,9 @@ class ProgramManager:
         )
 
     def import_bundle(self, bundle: Path) -> ReadyProgram:
-        from .bundles import EnvironmentBundles
 
         with tempfile.TemporaryDirectory(prefix="lean-runtime-program-open-copy-") as directory:
-            entries = EnvironmentBundles._extract_oci_archive(bundle, Path(directory))
+            entries = extract_oci_archive(bundle, Path(directory))
             index = entries.get("index.json")
             if index is None:
                 raise EnvironmentError("program OCI bundle has no index")
@@ -583,11 +570,11 @@ class ProgramManager:
         if manifest.computer_compatibility != platform_compatibility():
             raise EnvironmentError("ready-to-run program is not compatible with this computer")
         destination = self.store.programs / manifest.program_id
-        with FileLock(self.store.lock_dir / f"{manifest.program_id}.lock", timeout=1800):
+        with FileLock(self.store.lock_paths.program(manifest.program_id), timeout=1800):
             if not destination.exists():
                 stage = self.store.programs / f".staging-{uuid.uuid4().hex}"
                 try:
-                    _extract_layer(
+                    extract_layer(
                         _descriptor_blob_path(entries, layers[0], "program payload"),
                         stage / "payload",
                     )
@@ -704,9 +691,8 @@ class ProgramLibrary:
             root = Path(directory)
             archive = root / "program.oci.tar.gz"
             info = self.programs.export(program_id, archive)
-            from .bundles import EnvironmentBundles
 
-            entries = EnvironmentBundles._extract_oci_archive(archive, root / "layout")
+            entries = extract_oci_archive(archive, root / "layout")
             index = _json_object(entries["index.json"].read_bytes(), "program index")
             descriptor = index["manifests"][0]
             manifest_path = entries[

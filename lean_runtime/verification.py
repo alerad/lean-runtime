@@ -7,9 +7,9 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .bundles import _packages_directory, _verify_package, _verify_workspace_lock
+from ._sources import verify_package, verify_workspace_lock
 from .capsules import CAPSULE_MANIFEST, CapsuleManifest
 from .environments import Environment, EnvironmentManager
 from .errors import EnvironmentError
@@ -19,6 +19,9 @@ from .lockfiles import EnvironmentLock
 from .policies import ExecutionPolicy
 from .progress import CountedProgress
 from .store import EnvironmentStore, environment_identity, platform_compatibility
+
+if TYPE_CHECKING:
+    from .runtime import Runtime
 
 VERIFY_SCHEMA = "lean-runtime.verify/v1"
 ATTESTATION_SCHEMA = "lean-runtime.attestation/v1"
@@ -80,10 +83,10 @@ def _artifact_inventory(workspace: Path) -> _ArtifactInventory:
 
 def _verify_sources(environment: Environment) -> None:
     workspace = environment.root / "workspace"
-    _verify_workspace_lock(workspace, environment.lock)
-    packages = workspace.joinpath(*_packages_directory(environment.lock).parts)
+    verify_workspace_lock(workspace, environment.lock)
+    packages = workspace.joinpath(*environment.lock.packages_directory.parts)
     for package in environment.lock.packages:
-        _verify_package(packages / package.name, package)
+        verify_package(packages / package.name, package)
 
 
 def _verify_capsule_state(environment: Environment) -> int:
@@ -163,7 +166,7 @@ def _probe(environment: Environment, *, offline: bool = False) -> None:
         )
 
 
-def _rebuild_inventory(runtime: Any, environment: Environment) -> tuple[str, str]:
+def _rebuild_inventory(runtime: Runtime, environment: Environment) -> tuple[str, str]:
     runtime.events.emit(
         "verification.rebuild_started",
         "Rebuilding exact lock from source",
@@ -260,7 +263,14 @@ def verify_lock(lock: EnvironmentLock, *, subject: str) -> VerificationReport:
         VerificationCheck("lock_schema_valid", True),
         VerificationCheck("lock_identity_verified", True, details={"lock_id": lock.lock_id}),
         VerificationCheck("package_names_unique", True, details={"packages": len(lock.packages)}),
-        VerificationCheck("package_paths_safe", True),
+        VerificationCheck(
+            "package_paths_safe",
+            True,
+            details={
+                "packages_dir": lock.packages_directory.as_posix(),
+                "subdirs": sum(1 for package in lock.packages if package.subdir_path is not None),
+            },
+        ),
         VerificationCheck("source_acquisition", True, skipped=True),
     )
     return VerificationReport(subject, "lock", checks, (), (), lock.lock_id, None)

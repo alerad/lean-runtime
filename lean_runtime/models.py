@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from .serialization import freeze_json
+
 Severity = Literal["error", "warning", "information", "unknown"]
 TimingPhase = Literal[
     "discovery",
@@ -15,6 +17,7 @@ TimingPhase = Literal[
     "cache_download",
     "artifact_hydration",
     "build",
+    "preliminary_check",
     "publication",
     "environment_open",
     "instance_creation",
@@ -37,6 +40,7 @@ TIMING_PHASES = frozenset(
         "cache_download",
         "artifact_hydration",
         "build",
+        "preliminary_check",
         "publication",
         "environment_open",
         "instance_creation",
@@ -118,6 +122,11 @@ class ProjectProvenance:
         return asdict(self)
 
 
+# NTSTATUS severity "error" codes (0xC0000000 and above, e.g. access violation
+# 0xC0000005) are how Windows reports a process that died rather than exited.
+_WINDOWS_FATAL_STATUS = 0xC0000000
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionProvenance:
     environment_id: str | None
@@ -135,6 +144,10 @@ class ExecutionProvenance:
     project: ProjectProvenance | None = None
     program_id: str | None = None
     program_copy_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "platform", freeze_json(self.platform))
+        object.__setattr__(self, "requested_policy", freeze_json(self.requested_policy))
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,14 +196,23 @@ class ExecutionResult:
         ``accepted`` and ``rejected`` are both normal results: Lean ran to
         completion inside one exact environment and judged the source.
         ``not_run`` means no verdict exists because the run was cut short by a
-        timeout or cancellation; ``ok`` is false in that case too, so callers
-        that only test ``ok`` remain correct.
+        timeout or cancellation, and ``crashed`` means the process died from a
+        signal or a fatal runtime fault rather than returning Lean's own
+        status; ``ok`` is false in both cases too, so callers that only test
+        ``ok`` remain correct.
         """
         if self.ok:
             return "accepted"
         if self.timed_out or self.cancelled:
             return "not_run"
+        if self.crashed:
+            return "crashed"
         return "rejected"
+
+    @property
+    def crashed(self) -> bool:
+        """The compiler process did not return a status of its own."""
+        return self.exit_code < 0 or self.exit_code >= _WINDOWS_FATAL_STATUS
 
     @property
     def execution_id(self) -> str | None:

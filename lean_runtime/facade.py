@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import threading
 from collections.abc import Sequence
 from pathlib import Path
 
+from ._cancellation import run_cancellable
 from .environments import Environment, ExecutionCapture
 from .errors import SpecificationError
 from .lockfiles import EnvironmentLock
@@ -195,21 +195,11 @@ async def check_matrix_async(
     concurrency: int = 1,
     runtime: Runtime | None = None,
 ) -> MatrixResult:
-    cancel = threading.Event()
-    task = asyncio.create_task(
-        asyncio.to_thread(
-            check_matrix,
-            source,
-            contexts=contexts,
-            filename=filename,
-            concurrency=concurrency,
-            runtime=runtime,
-            cancel=cancel,
-        )
+    return await run_cancellable(
+        check_matrix,
+        source,
+        contexts=contexts,
+        filename=filename,
+        concurrency=concurrency,
+        runtime=runtime,
     )
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        cancel.set()
-        await task
-        raise

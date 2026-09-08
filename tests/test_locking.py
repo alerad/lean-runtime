@@ -45,7 +45,7 @@ def test_build_lock_waits_announce_the_holding_operation(tmp_path: Path) -> None
     cancelled.set()
     with (
         FileLock(
-            tmp_path / "locks" / "pkg-1-build.lock",
+            manager.lock_paths.package_build("pkg-1"),
             owner={"operation": "shared build", "packages": ["mathlib", "batteries"]},
         ),
         pytest.raises(EnvironmentError, match="cancelled"),
@@ -57,3 +57,23 @@ def test_build_lock_waits_announce_the_holding_operation(tmp_path: Path) -> None
     assert "Waiting for shared workspace lock held by" in message
     assert f"PID {os.getpid()}" in message
     assert "shared build of mathlib, batteries" in message
+
+
+def test_lock_registry_places_every_lock_under_one_directory(tmp_path: Path) -> None:
+    from lean_runtime.locking import LockPaths
+
+    locks = LockPaths(tmp_path)
+    paths = {
+        locks.environment("env_a"),
+        locks.package("pkg_a"),
+        locks.package_build("pkg_a"),
+        locks.project_workspace("project_workspace_a"),
+        locks.workspace(tmp_path / "jobs" / "x"),
+        locks.staging("abc"),
+        locks.collector("scratch"),
+        locks.oci_blob("ff"),
+        locks.cas_artifact("ff"),
+    }
+    assert len(paths) == 9
+    assert all(path.parent == tmp_path / ".locks" for path in paths)
+    assert locks.package("pkg_a") != locks.package_build("pkg_a")

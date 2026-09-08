@@ -28,6 +28,7 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover - exercised by the Python 3.10 CI job
     import tomli as tomllib
 
+from ._results import after_preparation
 from .errors import ProjectError
 from .import_syntax import IMPORT_STATEMENT
 from .locking import FileLock
@@ -340,19 +341,12 @@ class ProjectExecutor:
             policy=policy,
             cancel=cancel,
         )
-        preparation_seconds = result.elapsed_seconds + built.elapsed_seconds
-        preparation_timing = PhaseTiming("build", round(preparation_seconds * 1000))
+        # The first check and the dependency build are separate, exclusive
+        # phases of this operation; a failed build is the operation's outcome.
         if not built.ok:
-            return replace(
-                built,
-                elapsed_seconds=preparation_seconds,
-                timings=(preparation_timing,),
-            )
-        retried = retry()
-        return replace(
-            retried,
-            elapsed_seconds=preparation_seconds + retried.elapsed_seconds,
-            timings=(preparation_timing, *retried.timings),
+            return after_preparation(built, preparation=(("preliminary_check", result),))
+        return after_preparation(
+            retry(), preparation=(("preliminary_check", result), ("build", built))
         )
 
     def _with_identifier_hints(

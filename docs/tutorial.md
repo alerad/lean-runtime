@@ -142,7 +142,7 @@ obtained, or Lean could not be run — and carries no verdict.
 | `130` | none | The operation was interrupted. |
 
 `--json` carries the same distinction as `data.verdict` (`accepted`,
-`rejected`, or `not_run`) alongside the environment and lock identities and the
+`rejected`, `not_run`, or `crashed`) alongside the environment and lock identities and the
 digest of the source that ran. Use `--verbose` for the runtime event stream.
 
 ## Continue

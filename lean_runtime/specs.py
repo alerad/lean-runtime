@@ -15,6 +15,7 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover - exercised by the Python 3.10 CI job
     import tomli as tomllib
 
+from ._relpath import safe_relative_posix
 from .errors import SpecificationError
 from .serialization import sha256_id
 from .toolchains import normalize_toolchain
@@ -60,9 +61,12 @@ class GitPackage:
                 f"invalid root module for package {self.name!r}: {self.root_module!r}"
             )
         if self.subdir is not None:
-            subdir = Path(self.subdir)
-            if subdir.is_absolute() or ".." in subdir.parts:
-                raise SpecificationError(f"package subdir must be relative: {self.subdir!r}")
+            try:
+                safe_relative_posix(self.subdir)
+            except ValueError as exc:
+                raise SpecificationError(
+                    f"package subdir must be a safe relative path: {self.subdir!r}"
+                ) from exc
         if any(not item or "\x00" in item for item in self.artifact_command):
             raise SpecificationError(f"invalid artifact command for package {self.name!r}")
 
@@ -174,13 +178,23 @@ class EnvironmentSpec:
     def spec_digest(self) -> str:
         return sha256_id("spec", self.to_dict())
 
+    @property
+    def canonical_packages(self) -> tuple[GitPackage, ...]:
+        """Packages in identity order.
+
+        Package order does not affect a Lean environment: every package is
+        imported by the generated root module, and Lake resolves the graph
+        from the manifest, not from declaration order. The specification
+        digest, the generated root module and the lock therefore all use this
+        one canonical order, so equal digests always mean equal environments.
+        """
+        return tuple(sorted(self.packages, key=lambda item: item.name))
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema": SPEC_SCHEMA,
             "toolchain": self.toolchain,
-            "packages": [
-                package.to_dict() for package in sorted(self.packages, key=lambda item: item.name)
-            ],
+            "packages": [package.to_dict() for package in self.canonical_packages],
         }
 
     @classmethod

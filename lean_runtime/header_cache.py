@@ -85,11 +85,11 @@ class LeanHeaderCache:
         self.events = events
         self.enabled = _configured_enabled()
         self._support: dict[str, bool] = {}
-        self._toolchain_keys: dict[str, str] = {}
 
     def _toolchain_key(self, toolchain: str) -> str:
-        if toolchain in self._toolchain_keys:
-            return self._toolchain_keys[toolchain]
+        # Not memoized by spelling: ``executable_digest`` is validated against
+        # the binary's stat identity, so replacing a local compiler changes the
+        # key immediately instead of after the runtime object is discarded.
         digest = getattr(self.toolchains, "executable_digest", None)
         executable = str(digest(toolchain, "lean")) if callable(digest) else toolchain
         key = sha256_id(
@@ -100,7 +100,6 @@ class LeanHeaderCache:
                 "platform": platform_compatibility(),
             },
         ).removeprefix("lean-header-")
-        self._toolchain_keys[toolchain] = key
         return key
 
     def supported(self, toolchain: str) -> bool:

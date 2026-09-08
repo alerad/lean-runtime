@@ -74,6 +74,8 @@ def verdict_line(result: Any, *, style: Styler, subject: str | None = None) -> s
         symbol, status = style.green("✓"), style.green("accepted")
     elif result.verdict == "rejected":
         symbol, status = style.red("✗"), style.red("rejected")
+    elif result.verdict == "crashed":
+        symbol, status = style.red("✗"), style.red("crashed (no verdict)")
     else:
         detail = "timed out" if result.timed_out else "cancelled"
         symbol, status = style.red("✗"), style.red(f"{detail} (no verdict)")
@@ -120,6 +122,7 @@ class ConsoleRenderer:
         self._download_finished = False
         self._count_key: tuple[str, int] | None = None
         self._count_checkpoint = _PLAIN_CHECKPOINT_PERCENT
+        self._count_last_current = 0
         # Heartbeat: when events stop arriving mid-operation, keep showing the
         # last known activity so a long silent phase never looks hung.
         self._heartbeat_seconds = heartbeat_seconds
@@ -163,7 +166,7 @@ class ConsoleRenderer:
             self._print(message)
 
     def close(self) -> None:
-        """Terminate any in-place progress line before final output."""
+        """Terminate any in-place progress line before final output (idempotent)."""
         self._stop.set()
         thread = self._heartbeat_thread
         if thread is not None and thread is not threading.current_thread():
@@ -277,7 +280,11 @@ class ConsoleRenderer:
             ):
                 return
             self._last_redraw = now
-            self._draw_bar(done, total, frame_progress=(frame_current, frame_total))
+            self._draw_bar(
+                done,
+                total,
+                frame_progress=(frame_current, frame_total) if aggregate_frames else None,
+            )
         else:
             percent = done * 100 // total
             while self._next_checkpoint <= percent:
@@ -426,9 +433,13 @@ class ConsoleRenderer:
                 self._end_progress_line()
             return
         key = (label, total)
-        if self._count_key != key:
+        # A new operation with the same label and total starts over when its
+        # counter moves backwards; otherwise repeated operations would print
+        # no checkpoints at all.
+        if self._count_key != key or current < self._count_last_current:
             self._count_key = key
             self._count_checkpoint = _PLAIN_CHECKPOINT_PERCENT
+        self._count_last_current = current
         percent = current * 100 // total
         while self._count_checkpoint <= percent:
             amount = (

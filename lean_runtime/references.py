@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import subprocess
 import sys
 import tempfile
 from collections.abc import Sequence
@@ -17,7 +16,7 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover - exercised by the Python 3.10 CI job
     import tomli as tomllib
 
-from ._git import git_command
+from ._process import run_git, run_process
 from .errors import ResolutionError, SpecificationError
 from .specs import GitPackage
 from .toolchains import ToolchainManager, normalize_toolchain
@@ -139,30 +138,22 @@ class DiscoveredPackage:
 
 
 def _run_git(arguments: list[str], *, cwd: Path | None = None, timeout: float = 120) -> str:
-    try:
-        process = subprocess.run(
-            git_command(*arguments),
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
+    process = run_git(*arguments, cwd=cwd, timeout=timeout)
+    if process.timed_out:
         raise ResolutionError(
             "package-reference Git operation timed out",
             phase="package-discovery",
-            command=tuple(git_command(*arguments)),
-            exit_code=124,
-            output=str(exc.stdout or "") + str(exc.stderr or ""),
-        ) from exc
-    if process.returncode:
+            command=process.command,
+            exit_code=process.exit_code,
+            output=process.output,
+        )
+    if not process.ok:
         raise ResolutionError(
             "could not acquire package-reference metadata",
             phase="package-discovery",
-            command=tuple(git_command(*arguments)),
-            exit_code=process.returncode,
-            output=process.stdout + process.stderr,
+            command=process.command,
+            exit_code=process.exit_code,
+            output=process.output,
         )
     return process.stdout.strip()
 
@@ -207,38 +198,28 @@ def _lake_metadata(
             "referenced package has neither a root lakefile.toml nor lakefile.lean"
         )
     translated = checkout / ".lean-runtime-lakefile.toml"
-    try:
-        command = toolchains.command(
-            toolchain,
-            "lake",
-            "translate-config",
-            "toml",
-            str(translated),
-        )
-        process = subprocess.run(
-            command,
-            cwd=checkout,
-            env=toolchains.environment_for(toolchain),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=120,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
+    command = toolchains.command(toolchain, "lake", "translate-config", "toml", str(translated))
+    process = run_process(
+        command,
+        cwd=checkout,
+        environment=toolchains.environment_for(toolchain),
+        timeout=120,
+        merge_stderr=True,
+    )
+    if process.timed_out:
         raise ResolutionError(
             "Lake package-metadata translation timed out",
             phase="package-discovery",
             command=tuple(command),
-            exit_code=124,
-            output=str(exc.stdout or "") + str(exc.stderr or ""),
-        ) from exc
-    if process.returncode:
+            exit_code=process.exit_code,
+            output=process.output,
+        )
+    if not process.ok:
         raise ResolutionError(
             "Lake could not translate package metadata",
             phase="package-discovery",
             command=tuple(command),
-            exit_code=process.returncode,
+            exit_code=process.exit_code,
             output=process.stdout,
         )
     if not translated.is_file():

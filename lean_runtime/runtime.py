@@ -30,6 +30,7 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
     import tomli as tomllib
 
 from ._paths import remove_tree
+from ._results import from_backend
 from .backends import Backend, BackendResult, LocalBackend
 from .bundles import EnvironmentBundles, PortableCopyInfo
 from .capsules import source_import_roots
@@ -43,7 +44,6 @@ from .declaration_index_oci import (
     OCIDeclarationIndexLibrary,
     retained_declaration_index_set,
 )
-from .diagnostics import error_diagnostic, map_diagnostic_paths, parse_diagnostics
 from .environments import Environment, EnvironmentManager, ExecutionCapture
 from .errors import (
     DownloadLimitExceeded,
@@ -65,7 +65,6 @@ from .models import (
     ExecutionProvenance,
     ExecutionResult,
     PackageProvenance,
-    PhaseTiming,
     ProjectProvenance,
 )
 from .oci import (
@@ -419,6 +418,7 @@ class Runtime:
         lock: EnvironmentLock,
         roots: tuple[str, ...],
         capabilities: frozenset[str],
+        cancel: threading.Event | None = None,
     ) -> None:
         if self.availability == "local":
             raise EnvironmentError(
@@ -431,7 +431,7 @@ class Runtime:
         rejections: list[str] = []
         for library in self.libraries:
             try:
-                library.pull_capsule(lock, roots, capabilities=capabilities)
+                library.pull_capsule(lock, roots, capabilities=capabilities, cancel=cancel)
                 return
             except DownloadUnavailable as exc:
                 rejections.append(f"{library.repository.display}: {exc}")
@@ -2782,12 +2782,6 @@ class Runtime:
             **self._output_observer_arguments(observer),
         )
         observer.finish()
-        output = "\n".join(part for part in (raw.stdout, raw.stderr) if part)
-        diagnostics = map_diagnostic_paths(parse_diagnostics(output), path_map)
-        if raw.timed_out:
-            diagnostics += (error_diagnostic("Lean execution exceeded its time limit"),)
-        if raw.cancelled:
-            diagnostics += (error_diagnostic("Lean execution was cancelled"),)
         provenance = ExecutionProvenance(
             environment_id=None,
             execution_id=execution_id,
@@ -2803,19 +2797,11 @@ class Runtime:
             started_at=started_at,
             project=project,
         )
-        return ExecutionResult(
-            ok=raw.exit_code == 0,
-            exit_code=raw.exit_code,
+        return from_backend(
+            raw,
+            command=command,
+            cwd=cwd,
             toolchain=toolchain,
-            command=tuple(command),
-            cwd=str(cwd),
-            stdout=raw.stdout,
-            stderr=raw.stderr,
-            elapsed_seconds=raw.elapsed_seconds,
-            timed_out=raw.timed_out,
-            cancelled=raw.cancelled,
-            output_truncated=raw.output_truncated,
-            diagnostics=diagnostics,
             provenance=provenance,
-            timings=(PhaseTiming("execution", round(raw.elapsed_seconds * 1000)),),
+            path_map=path_map,
         )

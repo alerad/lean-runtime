@@ -6,21 +6,23 @@ import asyncio
 import json
 import os
 import re
-import subprocess
 import tempfile
 import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Generic, Literal, TextIO, TypeVar, cast
 
+from ._cancellation import settle
 from ._git import git_command
-from ._paths import remove_tree
+from ._process import git_output, run_process
+from ._relpath import safe_relative_posix
+from ._results import combine_invocations, from_backend
+from ._transaction import publish_tree, staged_tree
 from .backends import Backend, BackendResult, InteractiveProcess, InteractiveTextReader
 from .capsules import (
     CAPSULE_MANIFEST,
@@ -29,9 +31,8 @@ from .capsules import (
     setup_artifact_groups,
     source_import_roots,
 )
-from .diagnostics import error_diagnostic, map_diagnostic_paths, parse_diagnostics
 from .errors import EnvironmentError, MaterializationError, PolicyError
-from .events import EventEmitter
+from .events import EventEmitter, submit
 from .import_syntax import IMPORT_STATEMENT
 from .lake import ROOT_MODULE
 from .lockfiles import EnvironmentLock
@@ -44,7 +45,7 @@ from .models import (
 )
 from .policies import ExecutionPolicy
 from .references import artifact_accelerators
-from .serialization import sha256_id, write_json_atomic
+from .serialization import freeze_json, sha256_id, write_json_atomic
 from .store import (
     EnvironmentStore,
     clone_tree,
@@ -65,20 +66,12 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _environment_staging_path(store: EnvironmentStore) -> Path:
-    """Return a collision-resistant stage without exhausting Windows' path budget."""
-    nonce = uuid.uuid4().hex[:_STAGING_NONCE_LENGTH]
-    return store.environments / f".staging-{nonce}"
-
-
 def _lean_path(value: str) -> str:
-    normalized = PurePosixPath(value.replace("\\", "/"))
-    if (
-        not value
-        or normalized.is_absolute()
-        or ".." in normalized.parts
-        or normalized.suffix != ".lean"
-    ):
+    try:
+        normalized = safe_relative_posix(value.replace("\\", "/"))
+    except ValueError as exc:
+        raise EnvironmentError(f"unsafe Lean source path: {value!r}") from exc
+    if normalized.suffix != ".lean":
         raise EnvironmentError(f"unsafe Lean source path: {value!r}")
     return normalized.as_posix()
 
@@ -177,17 +170,8 @@ def _check_lean_paths(workspace: Path, scratch: Path, lock: EnvironmentLock) -> 
     roots = [scratch / ".lake" / "build" / "lib" / "lean"]
     workspace_root = workspace / ".lake" / "build" / "lib" / "lean"
 
-    raw_packages_dir = lock.manifest.get("packagesDir", ".lake/packages")
-    if not isinstance(raw_packages_dir, str):
-        raise EnvironmentError("lock packagesDir must be a relative string")
-    packages_dir = PurePosixPath(raw_packages_dir)
-    if packages_dir.is_absolute() or ".." in packages_dir.parts:
-        raise EnvironmentError("lock packagesDir must be a safe relative path")
-    package_root = workspace.joinpath(*packages_dir.parts)
     for package in lock.packages:
-        root = package_root / package.name
-        if package.subdir:
-            root = root.joinpath(*PurePosixPath(package.subdir).parts)
+        root = lock.package_root(workspace, package)
         compiled = root / ".lake" / "build" / "lib" / "lean"
         if compiled.is_dir():
             roots.append(compiled)
@@ -244,6 +228,9 @@ class EnvironmentInfo:
     created_at: str
     names: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "platform", freeze_json(self.platform))
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -257,6 +244,9 @@ class ExecutionCapture:
     entrypoint: str
     policy: ExecutionPolicy
     expected_ok: bool | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "files", freeze_json(self.files))
 
     @property
     def capture_id(self) -> str:
@@ -588,6 +578,7 @@ class Environment:
             roots,
             frozenset({"check"}),
             allow_acquisition=_allow_sparse_acquisition,
+            cancel=cancel,
         )
         result = self._execute_in_instance(
             operation="check",
@@ -645,13 +636,12 @@ class Environment:
 
     @staticmethod
     async def _await_job(job: ExecutionJob[ExecutionResult]) -> ExecutionResult:
+        task = asyncio.ensure_future(asyncio.to_thread(job.result))
         try:
-            return await asyncio.to_thread(job.result)
+            return await asyncio.shield(task)
         except asyncio.CancelledError:
             job.cancel()
-            while not job.done():
-                await asyncio.sleep(0.01)
-            job.result()
+            await settle(task)
             raise
 
     def check_many(
@@ -664,7 +654,7 @@ class Environment:
         if concurrency < 1:
             raise ValueError("concurrency must be positive")
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = [executor.submit(self.check, source, policy=policy) for source in sources]
+            futures = [submit(executor, self.check, source, policy=policy) for source in sources]
             return tuple(future.result() for future in futures)
 
     async def check_many_async(
@@ -965,10 +955,11 @@ class Environment:
                             policy=policy,
                             cancel=cancel,
                         )
-                        preliminary.append(support_result)
                         if support_result.exit_code:
+                            # The operation failed in a support module: report
+                            # it with every earlier support invocation folded in.
                             result = self._result(
-                                support_result,
+                                combine_invocations(preliminary, support_result),
                                 command=support_command,
                                 cwd=instance,
                                 execution_id=execution_id,
@@ -988,6 +979,7 @@ class Environment:
                                 requested_command,
                             )
                             return result
+                        preliminary.append(support_result)
                     source_path = instance / entrypoint
                     setup_path = _capsule_setup(
                         self.workspace,
@@ -1021,19 +1013,8 @@ class Environment:
                     policy=policy,
                     cancel=cancel,
                 )
-            if operation == "check" and preliminary:
-                raw = BackendResult(
-                    exit_code=raw.exit_code,
-                    stdout="".join([item.stdout for item in preliminary] + [raw.stdout]),
-                    stderr="".join([item.stderr for item in preliminary] + [raw.stderr]),
-                    elapsed_seconds=sum(item.elapsed_seconds for item in preliminary)
-                    + raw.elapsed_seconds,
-                    timed_out=raw.timed_out or any(item.timed_out for item in preliminary),
-                    cancelled=raw.cancelled or any(item.cancelled for item in preliminary),
-                    output_truncated=raw.output_truncated
-                    or any(item.output_truncated for item in preliminary),
-                    enforced_policy_fields=raw.enforced_policy_fields,
-                )
+            if operation == "check":
+                raw = combine_invocations(preliminary, raw)
             result = self._result(
                 raw,
                 command=command,
@@ -1072,12 +1053,6 @@ class Environment:
         timings: tuple[PhaseTiming, ...] = (),
         path_map: Mapping[str, str] | None = None,
     ) -> ExecutionResult:
-        combined = "\n".join(part for part in (raw.stdout, raw.stderr) if part)
-        diagnostics = map_diagnostic_paths(parse_diagnostics(combined), path_map)
-        if raw.timed_out:
-            diagnostics += (error_diagnostic("Lean execution exceeded its time limit"),)
-        if raw.cancelled:
-            diagnostics += (error_diagnostic("Lean execution was cancelled"),)
         provenance = ExecutionProvenance(
             environment_id=self.id,
             execution_id=execution_id,
@@ -1095,21 +1070,14 @@ class Environment:
             source_digest=source_digest,
             started_at=started_at,
         )
-        return ExecutionResult(
-            ok=raw.exit_code == 0,
-            exit_code=raw.exit_code,
+        return from_backend(
+            raw,
+            command=command,
+            cwd=cwd,
             toolchain=self.lock.toolchain,
-            command=tuple(command),
-            cwd=str(cwd),
-            stdout=raw.stdout,
-            stderr=raw.stderr,
-            elapsed_seconds=raw.elapsed_seconds,
-            timed_out=raw.timed_out,
-            cancelled=raw.cancelled,
-            output_truncated=raw.output_truncated,
-            diagnostics=diagnostics,
             provenance=provenance,
-            timings=(*timings, PhaseTiming("execution", round(raw.elapsed_seconds * 1000))),
+            timings=timings,
+            path_map=path_map,
         )
 
     def _record_execution(
@@ -1136,6 +1104,11 @@ class Environment:
         )
 
 
+SparseAcquirer = Callable[
+    [EnvironmentLock, tuple[str, ...], frozenset[str], "threading.Event | None"], None
+]
+
+
 class EnvironmentManager:
     def __init__(
         self,
@@ -1149,7 +1122,10 @@ class EnvironmentManager:
         self.backend = backend
         self.events = events or EventEmitter()
         self.sparse_acquirer: (
-            Callable[[EnvironmentLock, tuple[str, ...], frozenset[str]], None] | None
+            Callable[
+                [EnvironmentLock, tuple[str, ...], frozenset[str], threading.Event | None], None
+            ]
+            | None
         ) = None
         self.declaration_hint_resolver: (
             Callable[[EnvironmentLock, ExecutionResult, threading.Event | None], ExecutionResult]
@@ -1163,6 +1139,7 @@ class EnvironmentManager:
         capabilities: frozenset[str],
         *,
         allow_acquisition: bool = True,
+        cancel: threading.Event | None = None,
     ) -> None:
         """Extend a sparse projection before checking a new import closure."""
         environment_id = environment_identity(lock)
@@ -1188,7 +1165,7 @@ class EnvironmentManager:
                 )
             if self.sparse_acquirer is None:
                 raise EnvironmentError("sparse environment has no configured acquisition source")
-            self.sparse_acquirer(lock, roots, capabilities)
+            self.sparse_acquirer(lock, roots, capabilities, cancel)
 
     def ensure(
         self,
@@ -1208,13 +1185,15 @@ class EnvironmentManager:
             "Ensuring published environment",
             environment_id=environment_id,
         )
-        with FileLock(self.store.lock_dir / f"{environment_id}.lock", timeout=1800, cancel=cancel):
+        with FileLock(
+            self.store.lock_paths.environment(environment_id), timeout=1800, cancel=cancel
+        ):
             if not destination.is_dir():
                 if lock.packages:
                     # Building a package graph shells out to Lake, which a slim
                     # check-only toolchain does not contain.
                     self.toolchains.ensure_full(lock.toolchain, cancel=cancel)
-                self._ensure_sources(lock)
+                self._ensure_sources(lock, cancel=cancel)
                 self._materialize(
                     lock,
                     environment_id,
@@ -1273,9 +1252,8 @@ class EnvironmentManager:
         # Mathlib artifacts can have paths over 150 characters below the workspace.
         # Keep this internal component short so leantar remains below legacy MAX_PATH
         # on Windows; the final environment identity is unaffected by the stage name.
-        stage = _environment_staging_path(self.store)
-        workspace = stage / "workspace"
-        try:
+        with staged_tree(self.store.environments, self.store.lock_paths) as stage:
+            workspace = stage / "workspace"
             self.events.emit(
                 "environment.build_started",
                 "Building environment",
@@ -1286,7 +1264,7 @@ class EnvironmentManager:
             (workspace / "lakefile.toml").write_text(lock.root_lakefile, encoding="utf-8")
             (workspace / f"{ROOT_MODULE}.lean").write_text(lock.root_module, encoding="utf-8")
             write_json_atomic(workspace / "lake-manifest.json", lock.manifest)
-            packages_dir = workspace / str(lock.manifest.get("packagesDir", ".lake/packages"))
+            packages_dir = workspace.joinpath(*lock.packages_directory.parts)
             packages_dir.mkdir(parents=True, exist_ok=True)
             for package in lock.packages:
                 source = self.store.source_path(package.source_id)
@@ -1385,20 +1363,16 @@ class EnvironmentManager:
                 "build": build,
             }
             write_json_atomic(stage / "metadata.json", metadata)
-            stage.replace(destination)
-            self.events.emit(
-                "environment.published",
-                "Published built environment",
-                environment_id=environment_id,
-            )
-        finally:
-            if stage.exists():
-                # Preserve a build/materialization diagnostic if cleanup of
-                # Git's read-only pack files also fails on Windows.
-                with suppress(OSError):
-                    remove_tree(stage)
+            publish_tree(stage, destination)
+        self.events.emit(
+            "environment.published",
+            "Published built environment",
+            environment_id=environment_id,
+        )
 
-    def _ensure_sources(self, lock: EnvironmentLock) -> None:
+    def _ensure_sources(
+        self, lock: EnvironmentLock, *, cancel: threading.Event | None = None
+    ) -> None:
         """Acquire exact locked sources without invoking Lake resolution."""
         acquisition_root = self.store.home / "acquisition"
         acquisition_root.mkdir(parents=True, exist_ok=True)
@@ -1441,28 +1415,16 @@ class EnvironmentManager:
                     git_command("checkout", "--detach", "FETCH_HEAD"),
                 ]
                 for command in commands:
-                    completed = subprocess.run(
-                        command,
-                        cwd=checkout,
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                    )
-                    if completed.returncode:
+                    completed = run_process(command, cwd=checkout, cancel=cancel, timeout=None)
+                    if not completed.ok:
                         raise MaterializationError(
                             f"could not acquire locked source {package.name}",
                             phase="acquisition",
                             command=tuple(command),
-                            exit_code=completed.returncode,
-                            output=completed.stdout + completed.stderr,
+                            exit_code=completed.exit_code,
+                            output=completed.output,
                         )
-                tree = subprocess.run(
-                    git_command("rev-parse", "HEAD^{tree}"),
-                    cwd=checkout,
-                    text=True,
-                    capture_output=True,
-                    check=True,
-                ).stdout.strip()
+                tree = git_output("rev-parse", "HEAD^{tree}", cwd=checkout, cancel=cancel)
                 if tree != package.tree_hash:
                     raise MaterializationError(
                         f"acquired Git tree does not match lock for {package.name}",

@@ -129,7 +129,7 @@
         "provenance": {"anyOf": [{"$ref": "#/$defs/provenance"}, {"type": "null"}]},
         "timings": {"type": "array", "items": {"$ref": "#/$defs/timing"}},
         "hints": {"type": "array", "items": {"type": "string"}},
-        "verdict": {"enum": ["accepted", "rejected", "not_run"]}
+        "verdict": {"enum": ["accepted", "rejected", "not_run", "crashed"]}
       }
     }
   }
