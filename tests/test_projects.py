@@ -650,8 +650,8 @@ def test_attach_replaces_only_packages_and_detach_materializes_them(tmp_path: Pa
     assert plan.current_dependency_bytes > 0
     assert plan.checkout_bytes_removed == plan.current_dependency_bytes
     assert plan.shared_bytes_reused == 0
-    assert plan.new_shared_bytes == plan.current_dependency_bytes
-    assert plan.estimated_machine_reclaimable_bytes == 0
+    assert plan.new_shared_bytes == plan.current_dependency_bytes + plan.new_source_bytes
+    assert plan.estimated_machine_reclaimable_bytes is None
     attached = runtime.attach_projects(source)
     assert attached.ok
     package = tmp_path / "project" / ".lake" / "packages" / "dep"
@@ -720,19 +720,8 @@ def test_second_graph_reuses_compatible_managed_package_without_source_resolutio
     first, _revision = _shared_project(tmp_path / "first", tmp_path / "dependency")
     second_root = tmp_path / "second"
     shutil.copytree(tmp_path / "first", second_root)
-    local_path = second_root / "vendor" / "local"
-    local_path.mkdir(parents=True)
-    (local_path / "lakefile.toml").write_text('name = "local"\n')
     second_manifest = json.loads((second_root / "lake-manifest.json").read_text())
-    second_manifest["packages"].append(
-        {
-            "type": "path",
-            "name": "local",
-            "dir": "./vendor/local",
-            "inherited": False,
-            "configFile": "lakefile.toml",
-        }
-    )
+    second_manifest["packages"][0]["scope"] = "cosmetic"
     (second_root / "lake-manifest.json").write_text(json.dumps(second_manifest))
     events = []
     runtime = Runtime(
@@ -744,12 +733,10 @@ def test_second_graph_reuses_compatible_managed_package_without_source_resolutio
     assert runtime.attach_projects(first).ok
     first_target = (tmp_path / "first" / ".lake" / "packages" / "dep").resolve()
     plan = runtime.plan_project_adoption(second_root)
-    # Planning does not install or hash a toolchain, so artifact reuse remains
-    # conservative until attach computes the local build identity.
-    assert plan.shared_bytes_reused == 0
-    assert plan.new_shared_bytes == plan.current_dependency_bytes
+    assert plan.shared_bytes_reused > 0
+    assert plan.new_shared_bytes == 0
     assert plan.checkout_bytes_removed == plan.current_dependency_bytes
-    assert plan.estimated_machine_reclaimable_bytes == 0
+    assert plan.estimated_machine_reclaimable_bytes is None
 
     def source_resolution_is_not_needed(**_kwargs):
         raise AssertionError("compatible managed package should bypass source resolution")
@@ -1607,7 +1594,7 @@ def test_shared_project_reuses_local_git_objects_for_another_revision(tmp_path: 
     )
 
 
-def test_shared_packages_reuse_only_their_effective_dependency_closure(tmp_path: Path) -> None:
+def test_shared_packages_conservatively_key_the_entire_effective_graph(tmp_path: Path) -> None:
     first_source, _revision = _shared_project(tmp_path / "first", tmp_path / "dependency")
     second_source = _project(tmp_path / "second")
     second_local = tmp_path / "second" / ".lake" / "packages" / "dep"
@@ -1641,7 +1628,7 @@ def test_shared_packages_reuse_only_their_effective_dependency_closure(tmp_path:
     first_override = json.loads(first.overrides_file.read_text())["packages"][0]["dir"]
     second_override = json.loads(second.overrides_file.read_text())["packages"][0]["dir"]
     assert first.workspace_id != second.workspace_id
-    assert first_override == second_override
+    assert first_override != second_override
 
 
 def test_shared_package_artifacts_are_rekeyed_when_toolchain_binary_changes(
@@ -1667,7 +1654,7 @@ def test_shared_package_artifacts_are_rekeyed_when_toolchain_binary_changes(
     artifact.parent.mkdir(parents=True)
     artifact.write_bytes(b"old compiler artifact")
     first_marker = json.loads((first_package / ".lean-runtime-package.json").read_text())
-    assert first_marker["artifact_key"]["schema"] == "lean-runtime-package-artifact-key/2"
+    assert first_marker["artifact_key"]["schema"] == "lean-runtime-package-artifact-key/3"
 
     toolchains.executable_digests["lean"] = "sha256:" + "3" * 64
     second = runtime.prepare_shared_project(second_source)

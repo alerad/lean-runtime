@@ -276,6 +276,47 @@ class ManifestResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class PayloadTransferUnit:
+    """One exact compressed range, unrelated to package compatibility or size samples."""
+
+    blob_digest: str
+    offset: int
+    size: int
+    frame_digest: str
+
+
+def missing_capsule_frames(
+    frames: tuple[tuple[SparsePack, dict[str, Any], PackFrame], ...],
+    artifacts: dict[str, CapsuleArtifact],
+    cas: Path,
+) -> tuple[tuple[dict[str, Any], PackFrame], ...]:
+    verified: dict[tuple[str, int], bool] = {}
+    missing: dict[PayloadTransferUnit, tuple[dict[str, Any], PackFrame]] = {}
+    for _pack, descriptor, frame in frames:
+        ready = True
+        for name in frame.artifacts:
+            artifact = artifacts[name]
+            key = (artifact.digest, artifact.size)
+            if key not in verified:
+                path = cas / artifact.digest.removeprefix("sha256:")
+                try:
+                    verified[key] = (
+                        path.is_file()
+                        and path.stat().st_size == artifact.size
+                        and _digest_path(path) == artifact.digest
+                    )
+                except OSError:
+                    verified[key] = False
+            ready &= verified[key]
+        if not ready:
+            unit = PayloadTransferUnit(
+                str(descriptor["digest"]), frame.offset, frame.size, frame.digest
+            )
+            missing.setdefault(unit, (descriptor, frame))
+    return tuple(missing.values())
+
+
+@dataclass(frozen=True, slots=True)
 class CapsuleAcquisitionPlan:
     manifest_descriptor: dict[str, Any]
     manifest: dict[str, Any]
@@ -291,6 +332,12 @@ class CapsuleAcquisitionPlan:
     frames: tuple[tuple[SparsePack, dict[str, Any], PackFrame], ...]
     total_bytes: int
     cached_bytes: int
+    payload_units: tuple[PayloadTransferUnit, ...] = ()
+    metadata_bytes_read: int = 0
+
+    @property
+    def payload_download_bytes(self) -> int:
+        return sum(unit.size for unit in set(self.payload_units))
 
     @property
     def download_bytes(self) -> int:
@@ -946,24 +993,18 @@ class OCIEnvironmentCache:
                 continue
             for frame in pack.frames_for_modules(selected):
                 frames.append((pack, descriptor, frame))
-                total_bytes += frame.size
-                if all(
-                    (
-                        self.store.cas_artifacts / artifact_map[path].digest.removeprefix("sha256:")
-                    ).is_file()
-                    and (
-                        self.store.cas_artifacts / artifact_map[path].digest.removeprefix("sha256:")
-                    )
-                    .stat()
-                    .st_size
-                    == artifact_map[path].size
-                    and _digest_path(
-                        self.store.cas_artifacts / artifact_map[path].digest.removeprefix("sha256:")
-                    )
-                    == artifact_map[path].digest
-                    for path in frame.artifacts
-                ):
-                    cached_bytes += frame.size
+        # Deduplicate actual ranges, never compatibility IDs or package labels.
+        selected_units = {
+            PayloadTransferUnit(str(d["digest"]), f.offset, f.size, f.digest) for _p, d, f in frames
+        }
+        missing = missing_capsule_frames(tuple(frames), artifact_map, self.store.cas_artifacts)
+        payload_units = tuple(
+            PayloadTransferUnit(str(d["digest"]), f.offset, f.size, f.digest) for d, f in missing
+        )
+        total_bytes += sum(unit.size for unit in selected_units)
+        cached_bytes += sum(unit.size for unit in selected_units) - sum(
+            u.size for u in payload_units
+        )
         return CapsuleAcquisitionPlan(
             manifest_descriptor,
             manifest,
@@ -979,6 +1020,8 @@ class OCIEnvironmentCache:
             tuple(frames),
             total_bytes,
             cached_bytes,
+            payload_units,
+            0 if config_cached else len(config_data),
         )
 
     def pull_capsule(
@@ -1024,32 +1067,22 @@ class OCIEnvironmentCache:
             for path in (artifact.path,)
             if path in artifacts
         ]
-        missing_frames = [
-            (descriptor, frame)
-            for _pack, descriptor, frame in plan.frames
-            if not all(
-                (
-                    self.store.cas_artifacts / artifacts[path].digest.removeprefix("sha256:")
-                ).is_file()
-                and (self.store.cas_artifacts / artifacts[path].digest.removeprefix("sha256:"))
-                .stat()
-                .st_size
-                == artifacts[path].size
-                and _digest_path(
-                    self.store.cas_artifacts / artifacts[path].digest.removeprefix("sha256:")
-                )
-                == artifacts[path].digest
-                for path in frame.artifacts
-            )
-        ]
         # Bound both concurrency and buffered compressed data. Eight parallel
         # range reads hide registry round-trip latency without turning a full
         # Mathlib closure into thousands of serial HTTP requests.
         # Hold a collection lease across unpacking and projection so a
         # concurrent clean cannot reclaim a freshly unpacked artifact.
         with self.store.cas_artifact_lease(selected_digests):
+            missing_frames = missing_capsule_frames(
+                plan.frames, artifacts, self.store.cas_artifacts
+            )
             downloaded_frame_bytes = 0
             total_frame_bytes = sum(frame.size for _descriptor, frame in missing_frames)
+            pending = total_frame_bytes + plan.metadata_bytes_read
+            if self.max_download_bytes is not None and pending > self.max_download_bytes:
+                raise DownloadLimitExceeded(
+                    "cache state changed; revalidated transfer exceeds configured download limit"
+                )
             completed_frames = 0
             for offset in range(0, len(missing_frames), 8):
                 _check_cancelled(cancel, "sparse acquisition")

@@ -11,7 +11,7 @@ import sys
 import tempfile
 import threading
 import urllib.parse
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -686,6 +686,27 @@ class ProjectEnvironment:
                 return await self.check_async(source, policy=policy)
 
         return tuple(await asyncio.gather(*(check_one(source) for source in sources)))
+
+    def execute(
+        self,
+        command: Sequence[str],
+        *,
+        policy: ExecutionPolicy | None = None,
+        cancel: threading.Event | None = None,
+        on_bytes: Callable[[str, bytes], None] | None = None,
+    ) -> ExecutionResult:
+        """Run an explicit command with this project's compiler and provenance.
+
+        This is a persistent project operation, unlike Environment.execute's
+        disposable instance. Use absolute output paths for dataset jobs.
+        """
+        return self.runtime.project_executor.execute(
+            self.context,
+            command,
+            policy=policy or ExecutionPolicy(),
+            cancel=cancel,
+            on_bytes=on_bytes,
+        )
 
     def build(
         self,

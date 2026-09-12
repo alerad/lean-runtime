@@ -9,7 +9,7 @@ import shutil
 import sys
 import tempfile
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -50,6 +50,7 @@ from .errors import (
     DownloadUnavailable,
     EnvironmentError,
     LeanRuntimeError,
+    PolicyError,
     ProjectError,
     SpecificationError,
     ToolchainError,
@@ -125,6 +126,7 @@ from .verification import (
     attestation_predicate,
     load_lock_subject,
     verify_environment,
+    verify_project_attachment,
 )
 
 EnvironmentReference = Environment | EnvironmentSpec | EnvironmentLock | str
@@ -944,6 +946,10 @@ class Runtime:
         if offline and rebuild:
             raise SpecificationError("offline and rebuild verification are mutually exclusive")
         path = Path(subject).expanduser()
+        if path.is_dir() and (path / "lean-toolchain").is_file():
+            if rebuild:
+                raise SpecificationError("rebuild verification requires a published environment")
+            return verify_project_attachment(self, path.resolve())
         if path.is_file():
             if rebuild:
                 raise SpecificationError("rebuild verification requires a published environment")
@@ -1557,10 +1563,22 @@ class Runtime:
         return self.shared_projects.prepare(context, cancel=cancel)
 
     def plan_project_adoption(
-        self, path: str | os.PathLike[str], *, recursive: bool = False
+        self, path: str | os.PathLike[str], *, recursive: bool = False, jobs: int | None = None
     ) -> AdoptionPlan:
         """Inspect one project or a tree without changing it."""
-        return plan_adoption(Path(path), recursive=recursive, shared=self.shared_projects)
+        from ._published_estimates import published_package_sizes
+
+        return plan_adoption(
+            Path(path),
+            recursive=recursive,
+            shared=self.shared_projects,
+            jobs=jobs,
+            reference_provider=(
+                (lambda requests: published_package_sizes(self.libraries, requests))
+                if self.libraries and self.availability != "local"
+                else None
+            ),
+        )
 
     def _probe_project_graph(
         self,
@@ -1629,13 +1647,6 @@ class Runtime:
                 current=index,
                 total=len(ready_projects),
             )
-            if project.attached and len(selected_plan.projects) > 1:
-                # A batch re-run must not pay a Lake graph load per project that
-                # the plan already reports as attached; `verify` re-checks links.
-                results.append(
-                    AdoptionResult(project.root, "already-attached", len(project.packages), 0)
-                )
-                continue
             context = discover_project(project.root)
             self.shared_projects.remember_project(context)
 
@@ -2742,6 +2753,7 @@ class Runtime:
         path_map: Mapping[str, str] | None = None,
         environment: Mapping[str, str] | None = None,
         cancel: threading.Event | None = None,
+        on_bytes: Callable[[str, bytes], None] | None = None,
     ) -> ExecutionResult:
         started_at = datetime.now(timezone.utc).isoformat()
         request_command = (
@@ -2771,6 +2783,11 @@ class Runtime:
         )
         observer_label = str(request_command[0]) if request_command else Path(command[0]).name
         observer = OutputProgress(self.events.emit, label=observer_label)
+        byte_arguments: dict[str, Any] = {}
+        if on_bytes is not None:
+            if "on_bytes" not in inspect.signature(self.backend.execute).parameters:
+                raise PolicyError("backend does not support lossless byte output")
+            byte_arguments["on_bytes"] = on_bytes
         raw = self.backend.execute(
             command,
             cwd=cwd,
@@ -2780,6 +2797,7 @@ class Runtime:
             policy=policy,
             cancel=cancel,
             **self._output_observer_arguments(observer),
+            **byte_arguments,
         )
         observer.finish()
         provenance = ExecutionProvenance(

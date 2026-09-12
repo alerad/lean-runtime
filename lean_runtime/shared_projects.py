@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import uuid
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -44,6 +46,7 @@ from .store import (
     clone_tree,
     invalidate_storage_ledger,
     platform_compatibility,
+    source_snapshot_digest,
 )
 from .toolchains import ToolchainBuildIdentity
 
@@ -76,6 +79,33 @@ class SharedProjectWorkspace:
             "packages": list(self.packages),
             "package_ids": list(self.package_ids),
         }
+
+
+class SourceSelectionInventory:
+    """Facts memoized for one read-only plan, never retained for execution."""
+
+    def __init__(self, path_digests: dict[Path, str] | None = None) -> None:
+        self.head = cache(git_head)
+        self.remote = cache(git_remote)
+        self.has_commit = cache(git_has_commit)
+        self.clean = cache(git_clean)
+        self.clean_seed = cache(_git_clean_project_seed)
+        self.path_digests = dict(path_digests or {})
+
+    def digest(self, path: Path) -> str:
+        if path not in self.path_digests:
+            self.path_digests[path] = source_snapshot_digest(path)
+        return self.path_digests[path]
+
+
+@dataclass(frozen=True, slots=True)
+class PackagePreparationInput:
+    seed: Path
+    reusable: Path | None
+    artifact_miss: str | None
+
+    donor: Path | None = None
+    donor_miss: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,12 +146,16 @@ def _load_manifest(context: ProjectContext) -> dict[str, Any]:
 
 
 def _git_clean_project_seed(path: Path) -> bool:
-    """Accept only Git-clean roots plus Lean Runtime's exact untracked config."""
+    """Accept clean sources plus generated Lake state and reserved runtime metadata."""
 
     status = git_output("-C", str(path), "status", "--porcelain", "--untracked-files=normal")
     if status is None:
         return False
-    changes = tuple(line for line in status.splitlines() if line)
+    changes = tuple(
+        line
+        for line in status.splitlines()
+        if line and line not in {"?? .lean-runtime-package.json", "?? .lake/"}
+    )
     if not changes:
         return True
     config = path / "lean-runtime.toml"
@@ -158,6 +192,40 @@ def _valid_package_marker(package: Path, package_id: str) -> bool:
     except (OSError, json.JSONDecodeError):
         return False
     return isinstance(marker, dict) and package_id_matches(marker, package_id)
+
+
+def _strip_build_state(root: Path) -> None:
+    """Source caches, including older caches, never authorize copied build state."""
+    for directory, directories, _files in os.walk(root):
+        directories[:] = [name for name in directories if name != ".git"]
+        if ".lake" not in directories:
+            continue
+        build = Path(directory) / ".lake"
+        if is_link(build):
+            if build.is_symlink():
+                build.unlink()
+            else:
+                build.rmdir()
+        else:
+            remove_tree(build)
+        directories.remove(".lake")
+
+
+def _copy_build_outputs(source: Path, destination: Path) -> None:
+    """Retain build products, regenerating path-sensitive traces and linked state."""
+
+    def ignored(directory: str, names: list[str]) -> set[str]:
+        return {
+            name
+            for name in names
+            if is_link(Path(directory) / name) or name.endswith((".trace", ".hash"))
+        }
+
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in ("lib", "ir", "bin"):
+        tree = source / name
+        if tree.is_dir() and not is_link(tree):
+            shutil.copytree(tree, destination / name, symlinks=True, ignore=ignored)
 
 
 def _has_root_olean(build: Path, package_name: str) -> bool:
@@ -203,6 +271,57 @@ class SharedProjectManager:
             str(digest(toolchain, "lean")),
             str(digest(toolchain, "lake")),
         )
+
+    def local_toolchain_build_identity(self, toolchain: str) -> ToolchainBuildIdentity | None:
+        """Planning must never acquire a missing toolchain."""
+        local = getattr(self.toolchains, "local_build_identity", None)
+        if callable(local):
+            return cast(ToolchainBuildIdentity | None, local(toolchain))
+        # Custom providers can expose a local executable-digest API.
+        available = getattr(self.toolchains, "is_available_locally", None)
+        digest = getattr(self.toolchains, "executable_digest", None)
+        if not callable(available) or not available(toolchain) or not callable(digest):
+            return None
+        return ToolchainBuildIdentity(
+            toolchain, str(digest(toolchain, "lean")), str(digest(toolchain, "lake"))
+        )
+
+    def artifact_donor_rejection(
+        self,
+        context: ProjectContext,
+        entry: dict[str, Any],
+        donor: Path,
+        effective_entries: dict[str, dict[str, Any]],
+        toolchain_identity: ToolchainBuildIdentity | None,
+    ) -> str | None:
+        """An exact source revision alone never proves compiled compatibility."""
+        if git_head(donor) != entry.get("rev") or not _git_clean_project_seed(donor):
+            return "source revision or cleanliness differs"
+        subdir = package_subdir(entry)
+        package = donor / subdir if subdir is not None else donor
+        expected = package_artifact_key(
+            context=context,
+            entry=entry,
+            source_package=package,
+            effective_entries=effective_entries,
+            toolchain_identity=toolchain_identity,
+        )
+        try:
+            marker = json.loads((donor / ".lean-runtime-package.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            marker = None
+        normalized = normalized_package_identity(marker) if isinstance(marker, dict) else None
+        if (
+            expected is None
+            or normalized is None
+            or normalized["artifact_key"] != expected.to_dict()
+        ):
+            return "no matching recorded compiler and effective-graph provenance; rebuild required"
+        if is_link(package / ".lake") or is_link(package / ".lake" / "build"):
+            return "linked build state has no independent provenance; rebuild required"
+        if not (package / ".lake" / "build").is_dir():
+            return "no compiled build outputs"
+        return None
 
     def remember_project(self, context: ProjectContext) -> None:
         """Remember a Lake project as a future exact dependency seed."""
@@ -255,6 +374,7 @@ class SharedProjectManager:
         *,
         roots: tuple[Path, ...] = (),
         exclude_root: Path | None = None,
+        inventory: SourceSelectionInventory | None = None,
     ) -> tuple[dict[str, Path], Path | None]:
         """Find one exact complete source graph in registered or explicit projects."""
         required = {
@@ -309,8 +429,11 @@ class SharedProjectManager:
                 ) is not None and _valid_package_marker(package, marker_id)
                 if (
                     not package.is_dir()
-                    or git_head(package) != revision
-                    or (not managed and not git_clean(package))
+                    or (inventory.head(package) if inventory else git_head(package)) != revision
+                    or (
+                        not managed
+                        and not (inventory.clean(package) if inventory else git_clean(package))
+                    )
                 ):
                     valid = False
                     break
@@ -338,12 +461,13 @@ class SharedProjectManager:
         *,
         effective_entries: dict[str, dict[str, Any]] | None = None,
         toolchain_identity: ToolchainBuildIdentity | None = None,
+        inventory: SourceSelectionInventory | None = None,
     ) -> dict[str, RememberedPackageSeed]:
         """Match remembered project roots to individual exact Git dependencies.
 
         A clean URL/revision match may always donate source. Compiled artifacts
-        additionally require the same toolchain, platform, and resolved package
-        dependency cone. Unrelated packages in the consumer do not participate.
+        additionally require the same toolchain, platform, and conservative
+        full effective dependency graph.
         """
 
         if effective_entries is None:
@@ -354,19 +478,34 @@ class SharedProjectManager:
             }
         selected: dict[str, RememberedPackageSeed] = {}
         scores: dict[str, tuple[bool, int]] = {}
+        requested_sources = {
+            (canonical_git_url(str(e.get("url", ""))), e.get("rev"))
+            for e in entries
+            if e.get("type") == "git"
+        }
         for root in self.remembered_roots():
             if root.resolve() == context.root.resolve():
+                continue
+            remote = inventory.remote(root) if inventory else git_remote(root)
+            head = inventory.head(root) if inventory else git_head(root)
+            if (
+                remote is None
+                or head is None
+                or (canonical_git_url(remote), head) not in requested_sources
+            ):
+                continue
+            if not (inventory.clean_seed(root) if inventory else _git_clean_project_seed(root)):
                 continue
             try:
                 producer = discover_project(root)
                 producer_manifest = _load_manifest(producer)
                 producer_entries = producer_manifest["packages"]
-                producer_resolved = resolved_path_entries(producer, producer_entries)
+                producer_resolved = (
+                    resolved_path_entries(producer, producer_entries, digest=inventory.digest)
+                    if inventory
+                    else resolved_path_entries(producer, producer_entries)
+                )
             except ProjectError:
-                continue
-            remote = git_remote(producer.root)
-            head = git_head(producer.root)
-            if remote is None or head is None or not _git_clean_project_seed(producer.root):
                 continue
             producer_effective = {
                 str(entry["name"]): entry_identity(identity_entry)
@@ -454,7 +593,11 @@ class SharedProjectManager:
                             )
                             if expected_artifact is None:
                                 miss = "artifact dependency cone is incomplete"
-                            elif recorded_artifact != expected_artifact.to_dict():
+                            elif (
+                                not isinstance(donor_marker, dict)
+                                or normalized_package_identity(donor_marker) is None
+                                or recorded_artifact != expected_artifact.to_dict()
+                            ):
                                 miss = "donor has no matching toolchain artifact identity"
                             elif not (source_package / ".lake" / "build").is_dir():
                                 miss = "donor has no compiled artifacts"
@@ -599,7 +742,9 @@ class SharedProjectManager:
                 for entry, identity_entry in zip(entries, identity_entries, strict=True)
             }
         reusable: dict[str, Path] = {}
-        for name, package in self.graph_seeds(context.toolchain, entries).items():
+        preferred = list(self.graph_seeds(context.toolchain, entries).values())
+        candidates = list(dict.fromkeys([*preferred, *package_directories(self.packages)]))
+        for package in candidates:
             package_id = package.name
             if (
                 package.resolve().parent != self.packages.resolve()
@@ -614,14 +759,17 @@ class SharedProjectManager:
             except (OSError, json.JSONDecodeError):
                 continue
             normalized = normalized_package_identity(marker) if isinstance(marker, dict) else None
+            name = str(normalized["package"].get("name")) if normalized is not None else ""
             entry = next((item for item in entries if str(item.get("name")) == name), None)
-            if normalized is None or entry is None:
+            if name in reusable or normalized is None or entry is None:
                 continue
             if (
                 normalized["toolchain"] != context.toolchain
                 or normalized["platform"] != platform_compatibility()
                 or normalized["package"] != entry_identity(entry)
             ):
+                continue
+            if git_head(package) != entry.get("rev") or not _git_clean_project_seed(package):
                 continue
             subdir = package_subdir(entry)
             source_package = package / subdir if subdir is not None else package
@@ -673,7 +821,13 @@ class SharedProjectManager:
                 return False
         return True
 
-    def _object_donor(self, url: str, revision: str, seed: Path | None) -> Path | None:
+    def _object_donor(
+        self,
+        url: str,
+        revision: str,
+        seed: Path | None,
+        inventory: SourceSelectionInventory | None = None,
+    ) -> Path | None:
         candidates = [seed] if seed is not None else []
         if self.sources.is_dir():
             candidates.extend(path for path in self.sources.iterdir() if path.is_dir())
@@ -681,11 +835,123 @@ class SharedProjectManager:
         for candidate in candidates:
             if (
                 candidate is not None
-                and canonical_git_url(git_remote(candidate) or "") == canonical_git_url(url)
-                and git_has_commit(candidate, revision)
+                and canonical_git_url(
+                    (inventory.remote(candidate) if inventory else git_remote(candidate)) or ""
+                )
+                == canonical_git_url(url)
+                and (
+                    inventory.has_commit(candidate, revision)
+                    if inventory
+                    else git_has_commit(candidate, revision)
+                )
             ):
                 return candidate
         return None
+
+    def source_input(
+        self,
+        entry: dict[str, Any],
+        seed: Path | None,
+        inventory: SourceSelectionInventory | None = None,
+    ) -> tuple[str, Path | None]:
+        """Read-only source selection, repeated under the source lock by execution."""
+        cached = self.cached_source(entry, inventory)
+        if cached is not None:
+            return "use_cached_source", cached
+        revision = str(entry["rev"])
+        if (
+            seed is not None
+            and seed.is_dir()
+            and (inventory.head(seed) if inventory else git_head(seed)) == revision
+            and (inventory.clean_seed(seed) if inventory else _git_clean_project_seed(seed))
+        ):
+            return "import_local", seed
+        donor = self._object_donor(str(entry["url"]), revision, seed, inventory)
+        if donor is not None:
+            return "clone_local_objects", donor
+        return "fetch_source", None
+
+    def preparation_inputs(
+        self,
+        context: ProjectContext,
+        packages: list[dict[str, Any]],
+        *,
+        effective_entries: dict[str, dict[str, Any]],
+        toolchain_identity: ToolchainBuildIdentity | None,
+        inventory: SourceSelectionInventory | None = None,
+        seed_packages: Path | None = None,
+        seed_package_paths: dict[str, Path] | None = None,
+    ) -> dict[str, PackagePreparationInput]:
+        """Shared donor/compatibility decisions; callers must revalidate before mutation."""
+        reusable = self.reusable_packages(
+            context,
+            packages,
+            effective_entries=effective_entries,
+            toolchain_identity=toolchain_identity,
+        )
+        remembered: dict[str, RememberedPackageSeed] | None = None
+        graph: dict[str, Path] = {}
+        graph_root: Path | None = None
+        manifest = _load_manifest(context)
+        local_packages = context.root / str(manifest.get("packagesDir", ".lake/packages"))
+        result = {}
+        for entry in packages:
+            if entry["type"] != "git":
+                continue
+            name = str(entry["name"])
+            local = local_packages / name
+            if name in reusable:
+                result[name] = PackagePreparationInput(reusable[name], reusable[name], None)
+                continue
+            donor = None
+            donor_miss = None
+            if seed_package_paths is not None:
+                seed = seed_package_paths.get(name, local)
+            elif seed_packages is not None:
+                seed = seed_packages / name
+            elif (
+                local.is_dir()
+                and (inventory.head(local) if inventory else git_head(local)) == entry["rev"]
+                and (inventory.clean_seed(local) if inventory else _git_clean_project_seed(local))
+            ):
+                seed = local
+            else:
+                if remembered is None:
+                    remembered = self.registered_package_seeds(
+                        context,
+                        packages,
+                        effective_entries=effective_entries,
+                        toolchain_identity=toolchain_identity,
+                        inventory=inventory,
+                    )
+                    graph, graph_root = self.registered_graph_seeds(
+                        context.toolchain,
+                        packages,
+                        exclude_root=context.root,
+                        inventory=inventory,
+                    )
+                if name in graph:
+                    seed = graph[name]
+                    donor = graph_root
+                    donor_miss = "registered graph donates source only"
+                elif name in remembered:
+                    seed = remembered[name].path
+                    donor = seed
+                    donor_miss = remembered[name].artifact_miss
+                else:
+                    seed = local
+            if is_link(seed):
+                seed = seed.resolve()
+            result[name] = PackagePreparationInput(
+                seed,
+                reusable.get(name),
+                self.artifact_donor_rejection(
+                    context, entry, seed, effective_entries, toolchain_identity
+                ),
+                donor,
+                donor_miss,
+            )
+        return result
 
     def _source_checkout(
         self,
@@ -700,33 +966,26 @@ class SharedProjectManager:
         )
         destination = self.sources / source_id
         with FileLock(self.lock_paths.project_source(source_id), timeout=1800, cancel=cancel):
-            if (
-                destination.is_dir()
-                and git_head(destination) == revision
-                and git_clean(destination)
-            ):
+            kind, selected = self.source_input({"url": url, "rev": revision}, seed)
+            if kind == "use_cached_source":
                 return destination
             with staged_tree(self.sources, self.lock_paths) as staging:
-                # Git and clone_tree create the checkout directory themselves.
                 staging.rmdir()
-                if (
-                    seed is not None
-                    and seed.is_dir()
-                    and git_head(seed) == revision
-                    and _git_clean_project_seed(seed)
-                ):
+                if kind == "import_local":
+                    assert selected is not None
                     self.events.emit(
                         "project.shared.source_started",
                         f"Importing cached source for {url}",
                         phase="shared-project",
                         source=url,
                     )
-                    clone_tree(seed, staging)
-                    build = staging / ".lake"
-                    if build.exists():
-                        remove_tree(build)
+                    clone_tree(selected, staging)
+                    _strip_build_state(staging)
                     _remove_managed_project_config(staging)
-                elif (donor := self._object_donor(url, revision, seed)) is not None:
+                    (staging / ".lean-runtime-package.json").unlink(missing_ok=True)
+                elif kind == "clone_local_objects":
+                    assert selected is not None
+                    donor = selected
                     self.events.emit(
                         "project.shared.source_started",
                         f"Reusing local Git objects for {url}",
@@ -770,6 +1029,132 @@ class SharedProjectManager:
                 publish_tree(staging, destination, replace=True)
         return destination
 
+    @staticmethod
+    def _workspace_identity(
+        context: ProjectContext,
+        identity_packages: list[dict[str, Any]],
+        toolchain_identity: ToolchainBuildIdentity | None,
+    ) -> dict[str, Any]:
+        return {
+            "schema": SHARED_PROJECT_SCHEMA,
+            "toolchain": context.toolchain,
+            "toolchain_build": toolchain_identity.to_dict() if toolchain_identity else None,
+            "platform": platform_compatibility(),
+            "packages": identity_packages,
+        }
+
+    def existing_workspace(
+        self,
+        context: ProjectContext,
+        *,
+        toolchain_identity: ToolchainBuildIdentity | None,
+        identity_packages: list[dict[str, Any]],
+    ) -> SharedProjectWorkspace | None:
+        """Validate retained graph records and every target without acquiring anything."""
+        identity = self._workspace_identity(context, identity_packages, toolchain_identity)
+        workspace_id = sha256_id("project_workspace", identity)
+        directory = self.root / workspace_id
+        overrides_file = directory / "package-overrides.json"
+        effective = {str(entry["name"]): entry_identity(entry) for entry in identity_packages}
+        try:
+            record = json.loads((directory / "workspace.json").read_text())
+            overrides = json.loads(overrides_file.read_text())["packages"]
+            if not isinstance(record, dict) or any(record.get(k) != v for k, v in identity.items()):
+                return None
+            package_ids = record["package_ids"]
+            git_entries = [entry for entry in identity_packages if entry["type"] == "git"]
+            if (
+                not isinstance(package_ids, list)
+                or len(package_ids) != len(git_entries)
+                or not isinstance(overrides, list)
+                or len(overrides) != len(identity_packages)
+            ):
+                return None
+            if git_entries and toolchain_identity is None:
+                return None
+            ids = iter(package_ids)
+            for entry, override in zip(identity_packages, overrides, strict=True):
+                expected_override: dict[str, Any] = {
+                    key: entry[key]
+                    for key in ("name", "scope", "inherited", "configFile", "manifestFile")
+                    if key in entry
+                }
+                expected_override.setdefault("inherited", False)
+                if entry["type"] == "path":
+                    target = Path(str(entry["dir"]))
+                else:
+                    package_id = next(ids)
+                    if not isinstance(package_id, str) or not PACKAGE_ID_PATTERN.fullmatch(
+                        package_id
+                    ):
+                        return None
+                    package = self.packages / package_id
+                    if (
+                        not _valid_package_marker(package, package_id)
+                        or git_head(package) != entry.get("rev")
+                        or not _git_clean_project_seed(package)
+                    ):
+                        return None
+                    subdir = package_subdir(entry)
+                    target = package / subdir if subdir else package
+                    marker = json.loads((package / ".lean-runtime-package.json").read_text())
+                    expected = compute_package_identity(
+                        context=context,
+                        entry=entry,
+                        source_package=target,
+                        effective_entries=effective,
+                        toolchain_identity=toolchain_identity,
+                    )
+                    normalized = normalized_package_identity(marker)
+                    if (
+                        normalized is None
+                        or expected["artifact_key"] is None
+                        or normalized != normalized_package_identity(expected)
+                    ):
+                        return None
+                if not target.is_dir():
+                    return None
+                expected_override.update(type="path", dir=str(target))
+                if override != expected_override:
+                    return None
+            return SharedProjectWorkspace(
+                workspace_id,
+                directory,
+                overrides_file,
+                True,
+                tuple(str(entry["name"]) for entry in identity_packages),
+                tuple(package_ids),
+            )
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+            AttributeError,
+            StopIteration,
+            ProjectError,
+        ):
+            return None
+
+    def cached_source(
+        self, entry: dict[str, Any], inventory: SourceSelectionInventory | None = None
+    ) -> Path | None:
+        """An exact local source inventory, independent of artifact compatibility."""
+        source_id = sha256_id(
+            "project_source",
+            {
+                "url": canonical_git_url(str(entry.get("url", ""))),
+                "revision": entry.get("rev"),
+            },
+        )
+        source = self.sources / source_id
+        return (
+            source
+            if (inventory.head(source) if inventory else git_head(source)) == entry.get("rev")
+            and (inventory.clean(source) if inventory else git_clean(source))
+            else None
+        )
+
     def prepare(
         self,
         context: ProjectContext,
@@ -783,15 +1168,7 @@ class SharedProjectManager:
         toolchain_identity = self._build_identity(context.toolchain, cancel)
         packages = manifest["packages"]
         identity_packages = resolved_path_entries(context, packages)
-        identity = {
-            "schema": SHARED_PROJECT_SCHEMA,
-            "toolchain": context.toolchain,
-            "toolchain_build": (
-                toolchain_identity.to_dict() if toolchain_identity is not None else None
-            ),
-            "platform": platform_compatibility(),
-            "packages": identity_packages,
-        }
+        identity = self._workspace_identity(context, identity_packages, toolchain_identity)
         workspace_id = sha256_id("project_workspace", identity)
         destination = self.root / workspace_id
         overrides_file = destination / "package-overrides.json"
@@ -805,37 +1182,20 @@ class SharedProjectManager:
             on_wait=self._announce_lock_wait,
         ):
             if overrides_file.is_file():
-                try:
-                    workspace_record = json.loads(
-                        (destination / "workspace.json").read_text(encoding="utf-8")
+                existing = self.existing_workspace(
+                    context,
+                    toolchain_identity=toolchain_identity,
+                    identity_packages=identity_packages,
+                )
+                if existing is not None:
+                    self.events.emit(
+                        "project.shared.workspace_reused",
+                        f"Reusing shared dependency workspace for {project_name}",
+                        phase="shared-project",
+                        workspace_id=workspace_id,
+                        packages=len(packages),
                     )
-                    ready_package_ids = tuple(
-                        str(value) for value in workspace_record["package_ids"]
-                    )
-                    if all(
-                        _PACKAGE_ID_PATTERN.fullmatch(package_id) is not None
-                        for package_id in ready_package_ids
-                    ) and all(
-                        _valid_package_marker(self.packages / package_id, package_id)
-                        for package_id in ready_package_ids
-                    ):
-                        self.events.emit(
-                            "project.shared.workspace_reused",
-                            f"Reusing shared dependency workspace for {project_name}",
-                            phase="shared-project",
-                            workspace_id=workspace_id,
-                            packages=len(packages),
-                        )
-                        return SharedProjectWorkspace(
-                            workspace_id,
-                            destination,
-                            overrides_file,
-                            True,
-                            package_names,
-                            ready_package_ids,
-                        )
-                except (OSError, json.JSONDecodeError, KeyError, TypeError):
-                    pass
+                    return existing
                 remove_tree(destination)
             self.events.emit(
                 "project.shared.workspace_started",
@@ -848,29 +1208,19 @@ class SharedProjectManager:
             self.root.mkdir(parents=True, exist_ok=True)
             staging = self.root / f".{workspace_id}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
             try:
-                local_packages = context.root / str(manifest.get("packagesDir", ".lake/packages"))
                 overrides: list[dict[str, Any]] = []
                 package_ids: list[str] = []
                 effective_entries = {
                     str(entry["name"]): entry_identity(identity_entry)
                     for entry, identity_entry in zip(packages, identity_packages, strict=True)
                 }
-                reusable_packages = self.reusable_packages(
+                preparation = self.preparation_inputs(
                     context,
                     packages,
                     effective_entries=effective_entries,
                     toolchain_identity=toolchain_identity,
-                )
-                remembered_packages = self.registered_package_seeds(
-                    context,
-                    packages,
-                    effective_entries=effective_entries,
-                    toolchain_identity=toolchain_identity,
-                )
-                registered_graph, registered_root = self.registered_graph_seeds(
-                    context.toolchain,
-                    packages,
-                    exclude_root=context.root,
+                    seed_packages=seed_packages,
+                    seed_package_paths=seed_package_paths,
                 )
                 git_packages = [entry for entry in packages if entry["type"] == "git"]
                 git_position = 0
@@ -902,65 +1252,37 @@ class SharedProjectManager:
                             current=git_position,
                             total=len(git_packages),
                         )
-                        local = local_packages / str(entry["name"])
-                        remembered = remembered_packages.get(package_name)
-                        preserve_seed_artifacts = False
-                        if seed_package_paths is not None:
-                            seed = seed_package_paths.get(package_name, local)
-                        elif seed_packages is not None:
-                            seed = seed_packages / package_name
-                        elif package_name in registered_graph:
-                            seed = registered_graph[package_name]
-                            requested = entry.get("inputRev")
+                        decision = preparation[package_name]
+                        seed = decision.seed
+                        if decision.donor is not None:
                             self.events.emit(
                                 "project.shared.project_seed_selected",
                                 f"Reusing registered project source for {package_name}",
                                 phase="shared-project",
                                 package=package_name,
-                                input_revision=requested,
+                                input_revision=entry.get("inputRev"),
                                 revision=revision,
-                                donor=str(registered_root),
-                                artifacts=False,
-                                artifact_miss=(
-                                    "toolchain differs; compiled artifacts are not eligible"
-                                    if registered_root is not None
-                                    and discover_project(registered_root).toolchain
-                                    != context.toolchain
-                                    else "registered graph donates source only"
-                                ),
+                                donor=str(decision.donor),
+                                artifacts=decision.artifact_miss is None,
+                                artifact_miss=decision.donor_miss,
                             )
-                        elif local.is_dir() and git_head(local) == revision and git_clean(local):
-                            seed = local
-                        elif remembered is not None:
-                            seed = remembered.path
-                            preserve_seed_artifacts = remembered.artifact is not None
-                            requested = entry.get("inputRev")
-                            label = (
-                                f"{package_name} {requested} ({revision[:8]}…)"
-                                if isinstance(requested, str) and requested
-                                else f"{package_name} {revision[:8]}…"
-                            )
-                            if preserve_seed_artifacts:
-                                message = f"Reusing remembered project artifacts for {label}"
-                            else:
-                                message = f"Reusing remembered project source for {label}"
-                            self.events.emit(
-                                "project.shared.project_seed_selected",
-                                message,
-                                phase="shared-project",
-                                package=package_name,
-                                input_revision=requested,
-                                revision=revision,
-                                donor=str(remembered.path),
-                                artifacts=preserve_seed_artifacts,
-                                artifact_miss=remembered.artifact_miss,
-                            )
-                        else:
-                            seed = local
-                        if is_link(seed):
-                            seed = seed.resolve()
+                        artifact_miss = decision.artifact_miss
+                        preserve_seed_artifacts = artifact_miss is None
+                        self.events.emit(
+                            "project.shared.artifact_migration",
+                            f"{package_name}: "
+                            + (
+                                "preserving compatible build outputs"
+                                if preserve_seed_artifacts
+                                else f"artifacts rejected: {artifact_miss}"
+                            ),
+                            phase="shared-project",
+                            package=package_name,
+                            artifacts=preserve_seed_artifacts,
+                            artifact_miss=artifact_miss,
+                        )
                         subdir = package_subdir(entry)
-                        reusable = reusable_packages.get(package_name)
+                        reusable = decision.reusable
                         if reusable is not None:
                             package_id = reusable.name
                             final_target = reusable
@@ -1010,6 +1332,8 @@ class SharedProjectManager:
                             and seed.resolve().parent == self.packages.resolve()
                             and _PACKAGE_ID_PATTERN.fullmatch(seed_id) is not None
                             and _valid_package_marker(seed, seed_id)
+                            and normalized_package_identity(seed_marker) is not None
+                            and package_identity.get("artifact_key") is not None
                             and normalized_package_identity(seed_marker)
                             == normalized_package_identity(package_identity)
                         ):
@@ -1023,6 +1347,11 @@ class SharedProjectManager:
                                 final_target, package_id
                             ):
                                 remove_tree(final_target)
+                            if final_target.is_dir() and not _git_clean_project_seed(final_target):
+                                raise ProjectError(
+                                    f"managed package {package_name} has local changes; "
+                                    "refusing to reuse or overwrite it"
+                                )
                             if not final_target.is_dir():
                                 self.events.emit(
                                     "project.shared.package_import_started",
@@ -1038,28 +1367,10 @@ class SharedProjectManager:
                                     f".{package_id}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
                                 )
                                 try:
-                                    # Preserve compatible local artifacts on first import. CoW
-                                    # cloning prevents later writes from mutating the donor.
-                                    donor = (
-                                        seed
-                                        if preserve_seed_artifacts
-                                        and seed.is_dir()
-                                        and git_head(seed) == revision
-                                        and _git_clean_project_seed(seed)
-                                        else source
-                                    )
-                                    clone_tree(donor, package_staging)
+                                    clone_tree(source, package_staging)
+                                    _strip_build_state(package_staging)
                                     _remove_managed_project_config(package_staging)
-                                    # A verified sparse environment carries compiled package
-                                    # artifacts but intentionally omits Git sources. Graft those
-                                    # artifacts onto the independently verified exact checkout so
-                                    # project onboarding does not discard the capsule and rebuild
-                                    # the dependency graph from scratch.
-                                    if (
-                                        preserve_seed_artifacts
-                                        and seed.is_dir()
-                                        and donor.resolve() != seed.resolve()
-                                    ):
+                                    if preserve_seed_artifacts:
                                         seed_package = seed / subdir if subdir is not None else seed
                                         staged_package = (
                                             package_staging / subdir
@@ -1068,9 +1379,9 @@ class SharedProjectManager:
                                         )
                                         seed_build = seed_package / ".lake" / "build"
                                         staged_build = staged_package / ".lake" / "build"
-                                        if seed_build.is_dir() and not staged_build.exists():
-                                            staged_build.parent.mkdir(parents=True, exist_ok=True)
-                                            clone_tree(seed_build, staged_build)
+                                        if staged_build.exists():
+                                            remove_tree(staged_build)
+                                        _copy_build_outputs(seed_build, staged_build)
                                     write_json_atomic(
                                         package_staging / ".lean-runtime-package.json",
                                         package_identity,
