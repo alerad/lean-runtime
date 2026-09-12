@@ -697,14 +697,6 @@ class ProjectAdopter:
             }
             write_json_atomic(marker, record)
             config.write_text(_CONFIG_CONTENT, encoding="utf-8")
-            _remove_path(backup)
-            self.shared.events.emit(
-                "project.attach.completed",
-                f"Attached shared dependencies for {context.root.name}",
-                phase="project-attach",
-                packages=len(workspace.package_ids),
-                checkout_bytes=reclaimed,
-            )
         except BaseException:
             _remove_path(staging)
             if swapped:
@@ -717,6 +709,14 @@ class ProjectAdopter:
             _restore_file(marker, previous_marker)
             _restore_file(config, previous_config)
             raise
+        self._cleanup_committed_backup(backup)
+        self.shared.events.emit(
+            "project.attach.completed",
+            f"Attached shared dependencies for {context.root.name}",
+            phase="project-attach",
+            packages=len(workspace.package_ids),
+            checkout_bytes=reclaimed,
+        )
         return AdoptionResult(
             context.root,
             "attached",
@@ -724,6 +724,19 @@ class ProjectAdopter:
             reclaimed,
             workspace.workspace_id,
         )
+
+    def _cleanup_committed_backup(self, backup: Path) -> bool:
+        try:
+            _remove_path(backup)
+            return True
+        except OSError as exc:
+            self.shared.events.emit(
+                "project.backup.cleanup_failed",
+                f"Attachment transaction committed; backup cleanup failed: {exc}",
+                phase="project-cleanup",
+                backup=str(backup),
+            )
+            return False
 
     def detach(
         self,
@@ -780,7 +793,6 @@ class ProjectAdopter:
             marker.unlink()
             if project_sharing_enabled(context.root):
                 config.unlink()
-            _remove_path(backup)
         except BaseException:
             _remove_path(staging)
             if swapped:
@@ -792,4 +804,5 @@ class ProjectAdopter:
             if not config.exists():
                 config.write_text(_CONFIG_CONTENT, encoding="utf-8")
             raise
+        self._cleanup_committed_backup(backup)
         return AdoptionResult(context.root, "detached", copied, 0)
