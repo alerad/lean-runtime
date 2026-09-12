@@ -3,6 +3,7 @@
 import hashlib
 import os
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from test_adoption_safety import identity, setup_project
 from test_published_estimates import sample
 
 from lean_runtime._adoption_estimates import AdoptionEstimates, CostComponent
+from lean_runtime._paths import link_directory, remove_tree
 from lean_runtime.cli import _render_adoption_plan
 from lean_runtime.oci import missing_capsule_frames
 from lean_runtime.packs import PackFrame
@@ -102,10 +104,11 @@ def test_inventory_hardlinks_links_and_failed_scan(tmp_path, monkeypatch):
     original = root / "a"
     original.write_bytes(b"abc")
     os.link(original, root / "b")
-    (root / "external").symlink_to(tmp_path, target_is_directory=True)
+    link_directory(tmp_path, root / "external")
     usage = tree_usage(root)
     assert usage.logical_bytes == 6 and usage.files == 2 and usage.complete
-    assert usage.allocated_bytes == original.stat().st_blocks * 512
+    blocks = getattr(original.stat(), "st_blocks", None)
+    assert usage.allocated_bytes == (blocks * 512 if blocks is not None else None)
     original_scan = os.scandir
 
     def scan(path):
@@ -115,6 +118,29 @@ def test_inventory_hardlinks_links_and_failed_scan(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, "scandir", scan)
     assert not tree_usage(root).complete
+
+
+def test_inventory_without_block_counts(tmp_path, monkeypatch):
+    original = tmp_path / "a"
+    original.write_bytes(b"abc")
+    real_stat = Path.stat
+
+    def without_blocks(path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        if path == original:
+            # Exercise Windows' unavailable allocation information on every OS.
+            return SimpleNamespace(
+                st_mode=info.st_mode,
+                st_dev=info.st_dev,
+                st_ino=info.st_ino,
+                st_size=info.st_size,
+            )
+        return info
+
+    monkeypatch.setattr(Path, "stat", without_blocks)
+    usage = tree_usage(tmp_path)
+    assert usage.logical_bytes == 3 and usage.files == 1 and usage.complete
+    assert usage.allocated_bytes is None
 
 
 def test_missing_sparse_frame_selection_deduplicates_and_revalidates(tmp_path):
@@ -280,7 +306,7 @@ def test_unresolved_earlier_action_does_not_promise_a_source(tmp_path, monkeypat
     second = tmp_path / "second"
     shutil.copytree(context.root, second)
     (second / "lean-toolchain").write_text("leanprover/lean4:v4.33.1\n")
-    shutil.rmtree(second / ".lake/packages")
+    remove_tree(second / ".lake/packages")
     lookup = runtime.shared_projects.local_toolchain_build_identity
     monkeypatch.setattr(
         runtime.shared_projects,

@@ -7,6 +7,7 @@ import pytest
 from test_projects import ProjectToolchains, _shared_project
 
 from lean_runtime import Runtime, discover_project
+from lean_runtime._paths import remove_tree
 from lean_runtime._project_identity import compute_package_identity, resolved_path_entries
 from lean_runtime.package_ids import package_directory_id
 
@@ -159,11 +160,11 @@ def test_plan_reports_reuse_and_unknown_acquisition(tmp_path):
     plan = runtime.plan_project_adoption(second)
     assert plan.shared_bytes_reused > 0
     assert plan.new_shared_bytes == 0
-    shutil.rmtree(second / ".lake/packages/dep")
+    remove_tree(second / ".lake/packages/dep")
     # Exact retained content still supplies known costs without a local copy.
     assert runtime.plan_project_adoption(second).shared_bytes_reused > 0
     runtime.toolchains.executable_digests["lean"] = "sha256:changed"
-    shutil.rmtree(runtime.shared_projects.sources)
+    remove_tree(runtime.shared_projects.sources)
     missing = runtime.plan_project_adoption(second)
     assert not missing.storage_estimate_complete
     assert missing.estimated_machine_reclaimable_bytes is None
@@ -368,8 +369,8 @@ def test_source_cache_does_not_authorize_artifact_migration(tmp_path):
     stale.mkdir(parents=True)
     (stale / "Dep.olean").write_bytes(b"unproven source-cache artifact")
     (source / ".git/info/exclude").write_text("/.lake/\n")
-    shutil.rmtree(runtime.shared_projects.packages)
-    shutil.rmtree(runtime.shared_projects.root)
+    remove_tree(runtime.shared_projects.packages)
+    remove_tree(runtime.shared_projects.root)
     assert runtime.attach_projects(context.root).ok
     assert not (context.root / ".lake/packages/dep/.lake/build/lib/lean/Dep.olean").exists()
 
