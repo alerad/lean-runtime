@@ -269,6 +269,7 @@ class LocalBackend:
         policy: ExecutionPolicy,
         cancel: threading.Event | None = None,
         on_output: Callable[[str], None] | None = None,
+        on_bytes: Callable[[str, bytes], None] | None = None,
     ) -> BackendResult:
         enforced, limits = self._process_options(policy)
         outcome = run_process(
@@ -279,6 +280,7 @@ class LocalBackend:
             cancel=cancel,
             max_output_bytes=policy.max_output_bytes,
             on_output=on_output,
+            on_bytes=on_bytes,
             limits=limits,
         )
         return BackendResult.from_outcome(outcome, enforced)

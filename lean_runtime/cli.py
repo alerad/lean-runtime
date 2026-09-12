@@ -266,28 +266,10 @@ def _render_cleanup(
     print(retained_note)
 
 
-def _render_adoption_plan(plan: AdoptionPlan) -> None:
-    print(
-        f"Found {len(plan.projects)} Lake project(s): "
-        f"{plan.ready} ready, {plan.blocked} requiring attention"
-    )
-    for project in plan.projects:
-        state = "attached" if project.attached else "ready" if project.ready else "blocked"
-        print(
-            f"  {state:8} {project.root} · {len(project.packages)} packages · "
-            f"{format_byte_size(project.dependency_bytes)}"
-        )
-        for blocker in project.blockers:
-            print(f"           blocker: {blocker}")
-        for warning in project.warnings:
-            print(f"           note: {warning}")
-    print()
-    print(f"Checkout bytes removed:    {format_byte_size(plan.checkout_bytes_removed)}")
-    print(f"Shared bytes already ready:{format_byte_size(plan.shared_bytes_reused):>10}")
-    print(f"New shared bytes needed:   {format_byte_size(plan.new_shared_bytes)}")
-    print(
-        f"Estimated machine recovery: {format_byte_size(plan.estimated_machine_reclaimable_bytes)}"
-    )
+def _render_adoption_plan(plan: AdoptionPlan, *, verbose: bool = False) -> None:
+    from ._adoption_rendering import render_adoption_plan
+
+    render_adoption_plan(plan, verbose=verbose)
 
 
 def _status_report(runtime: Runtime, args: argparse.Namespace) -> dict[str, Any]:
@@ -1184,6 +1166,11 @@ Advanced namespaces:
         nargs="?",
         default=Path.cwd(),
         help="Lake project or directory to scan (default: current directory)",
+    )
+    adopt.add_argument(
+        "--jobs",
+        type=int,
+        help="planning workers (default: auto from CPUs and available RAM; use 1 for serial)",
     )
     adopt.add_argument("--yes", action="store_true", help="adopt without a confirmation prompt")
     adopt.add_argument(
@@ -2193,15 +2180,17 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "attach":
                 if args.recursive is None:
                     args.recursive = not _path_is_project_root(args.path)
-                adoption_plan = runtime.plan_project_adoption(args.path, recursive=args.recursive)
+                adoption_plan = runtime.plan_project_adoption(
+                    args.path, recursive=args.recursive, jobs=getattr(args, "jobs", None)
+                )
                 if args.dry_run:
                     if args.json:
                         _json(adoption_plan.to_dict())
                     else:
-                        _render_adoption_plan(adoption_plan)
+                        _render_adoption_plan(adoption_plan, verbose=args.verbose)
                     return 0 if adoption_plan.blocked == 0 else 1
                 if not args.json:
-                    _render_adoption_plan(adoption_plan)
+                    _render_adoption_plan(adoption_plan, verbose=args.verbose)
                 if not adoption_plan.ready:
                     return 1
                 if not _confirm("Adopt these projects?", yes=args.yes, json_mode=args.json):
@@ -2234,7 +2223,7 @@ def main(argv: list[str] | None = None) -> int:
                         }
                     )
                 else:
-                    _render_adoption_plan(adoption_result.plan)
+                    _render_adoption_plan(adoption_result.plan, verbose=args.verbose)
                     for attached in adoption_result.results:
                         print(
                             f"{attached.action}: {attached.root} · "
