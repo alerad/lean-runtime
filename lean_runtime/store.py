@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import time
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -144,6 +144,66 @@ def clone_tree(source: Path, destination: Path) -> None:
             return
     shutil.copytree(source, destination, symlinks=True)
     progress.advance()
+
+
+@dataclass(frozen=True, slots=True)
+class TreeUsage:
+    """Regular-file logical bytes per path; allocated bytes per unique inode.
+
+    Links are not followed or charged as target trees. Allocated bytes describe
+    observed blocks, not exclusive ownership or reclaimable filesystem extents.
+    """
+
+    logical_bytes: int = 0
+    allocated_bytes: int | None = 0
+    files: int = 0
+    complete: bool = True
+    errors: tuple[str, ...] = ()
+
+
+def tree_usage(
+    root: Path,
+    *,
+    include: Callable[[Path], bool] | None = None,
+    missing_ok: bool = False,
+) -> TreeUsage:
+    from ._paths import is_link
+
+    logical = allocated = files = 0
+    allocation_known = True
+    errors: list[str] = []
+    inodes: set[tuple[int, int]] = set()
+    pending = [root]
+    while pending:
+        path = pending.pop()
+        try:
+            if include is not None and not include(path.relative_to(root)):
+                continue
+            if is_link(path):
+                continue
+            info = path.stat(follow_symlinks=False)
+            if path.is_dir():
+                with os.scandir(path) as entries:
+                    pending.extend(Path(entry.path) for entry in entries)
+            elif path.is_file():
+                logical += info.st_size
+                files += 1
+                inode = (info.st_dev, info.st_ino)
+                if inode not in inodes:
+                    inodes.add(inode)
+                    blocks = getattr(info, "st_blocks", None)
+                    if blocks is None:
+                        allocation_known = False
+                    else:
+                        allocated += blocks * 512
+        except FileNotFoundError as exc:
+            if path != root or not missing_ok:
+                errors.append(f"{path}: {exc}")
+        except OSError as exc:
+            errors.append(f"{path}: {exc}")
+    return TreeUsage(
+        logical, allocated if allocation_known else None, files, not errors, tuple(errors)
+    )
 
 
 def _tree_bytes(root: Path) -> int:

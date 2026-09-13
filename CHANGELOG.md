@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+- Refactor adoption into read-only action planning, component accounting, and report
+  rendering. Share donor/source selection with execution and retain execution-time
+  validation. Separate logical replacement, retained source/package/artifact content,
+  and payload transfer. Deduplicate source objects by source identity; never add
+  publication samples to measured totals. Remove the misleading aggregate published
+  artifact-size headline. Report signed logical change when complete; physical disk
+  recovery and peak allocation remain unknown. Add typed uncertainty and versioned
+  additive JSON estimates; deprecate aggregate sample and physical-recovery scalars.
+- Measure inventory completeness and local post-operation observations. Reuse one
+  missing-frame validator for sparse OCI planning/pulling, deduplicate exact ranges,
+  and expose remaining payload separately from config metadata read during planning.
+- Correct attach/detach transaction cleanup: failed backup deletion after commit
+  reports cleanup failure without attempting rollback from a partially removed backup.
+
+- Add OCI metadata-backed artifact size references to adoption planning, with
+  explicitly approximate same-repository revision fallbacks. Keep these separate
+  from exact reuse/storage decisions. Summarize unknown costs and substituted
+  versions in normal output; expose per-project provenance with `--verbose` and
+  JSON. Metadata lookup never installs compilers or downloads artifact packs.
+
+- Parallelize adoption project inspection and hashing of unique local dependency
+  directories. Automatically size the planning pool from available CPUs and RAM,
+  capped at eight workers; add `adopt --jobs` for explicit control. Deduplicate
+  source hashes and repeated size inventories within each plan, preserve result
+  order and worker progress, and retain fresh execution-time validation. Package
+  preparation and attachment remain serialized.
+
+- Make shared package and artifact identities cover the full normalized effective
+  root graph, including dependencies introduced by overrides. This fixes an
+  unsound reuse key; it does not demonstrate an incorrect Lean verdict. Bump
+  shared-project identity to v4 and artifact compatibility to v3; older records
+  cannot authorize artifact reuse. Unrelated graph changes now conservatively
+  invalidate reuse too.
+- During first adoption, retain compatible build outputs from the original local
+  dependency checkout only when its recorded compiler and graph provenance match.
+  Exclude linked state and path-sensitive traces; report rejected donors and the
+  need to rebuild when provenance is unavailable. Source import remains separate
+  from artifact migration, including for subdirectory packages.
+- Revalidate every project during batch adoption instead of skipping projects
+  merely because an attachment marker exists. Broken or stale links are repaired
+  through normal adoption; modified local checkouts remain protected. Planning,
+  adoption, and `verify PROJECT` share attachment validation. Project verification
+  is local-only and reports `subject_kind: project` with null lock/environment IDs;
+  it verifies attachment state, not a Lean proof verdict.
+- Plan reuse with locally hashed Lean/Lake identities without installing tools.
+  Report incomplete storage estimates, unknown download amounts, and unknown
+  recovery instead of treating missing dependencies as zero-cost acquisitions.
+  Storage figures describe materialized content, not physical disk allocation.
+
 - Exercise Windows unit tests, macOS real-Lean integration, and clean anonymous
   Mathlib consumption of the PR checkout in CI. Add active HTTP cancellation
   and descendant-termination regressions; cancellation now checks between

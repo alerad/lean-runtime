@@ -643,6 +643,25 @@ class ToolchainManager:
         write_json_atomic(cache_path, persisted)
         return value
 
+    def local_build_identity(self, toolchain: str) -> ToolchainBuildIdentity | None:
+        """Hash a full installed Lean/Lake pair without installing or invoking elan."""
+        name = normalize_toolchain(toolchain)
+        root = self._full_toolchain_dir(name)
+        binaries = [self._binary(root, executable) for executable in ("lean", "lake")]
+        if not all(binary.is_file() for binary in binaries):
+            return None
+        digests = []
+        try:
+            for binary in binaries:
+                digest = hashlib.sha256()
+                with binary.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                digests.append("sha256:" + digest.hexdigest())
+        except OSError:
+            return None
+        return ToolchainBuildIdentity(name, digests[0], digests[1])
+
     def build_identity(
         self, toolchain: str, *, cancel: threading.Event | None = None
     ) -> ToolchainBuildIdentity:

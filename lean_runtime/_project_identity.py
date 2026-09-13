@@ -7,6 +7,7 @@ identity. Nothing in this module touches the store."""
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,8 @@ from .projects import ProjectContext
 from .store import source_snapshot_digest
 from .toolchains import ToolchainBuildIdentity
 
-SHARED_PROJECT_SCHEMA = "lean-runtime-shared-project/3"
+SHARED_PROJECT_SCHEMA = "lean-runtime-shared-project/4"
+PACKAGE_ARTIFACT_SCHEMA = "lean-runtime-package-artifact-key/3"
 
 
 def canonical_git_url(value: str) -> str:
@@ -121,7 +123,7 @@ class PackageArtifactKey:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema": "lean-runtime-package-artifact-key/2",
+            "schema": PACKAGE_ARTIFACT_SCHEMA,
             "package_name": self.package_name,
             "source": self.source.to_dict(),
             "toolchain": self.toolchain,
@@ -135,7 +137,10 @@ class PackageArtifactKey:
 
 
 def resolved_path_entries(
-    context: ProjectContext, packages: list[dict[str, Any]]
+    context: ProjectContext,
+    packages: list[dict[str, Any]],
+    *,
+    digest: Callable[[Path], str] | None = None,
 ) -> list[dict[str, Any]]:
     identity: list[dict[str, Any]] = []
     for entry in packages:
@@ -148,29 +153,21 @@ def resolved_path_entries(
             if not path.is_dir():
                 raise ProjectError(f"path dependency {entry['name']!r} does not exist: {path}")
             normalized["dir"] = str(path)
-            normalized["content_digest"] = source_snapshot_digest(path)
+            normalized["content_digest"] = (digest or source_snapshot_digest)(path)
         identity.append(normalized)
     return identity
 
 
 def entry_identity(entry: dict[str, Any]) -> dict[str, Any]:
     """Keep only fields that can alter a materialized package or its name."""
-    keys = (
-        "name",
-        "type",
-        "url",
-        "rev",
-        "subDir",
-        "dir",
-        "configFile",
-        "manifestFile",
-        "content_digest",
-    )
-    identity = {key: entry[key] for key in keys if key in entry}
-    url = identity.get("url")
-    if entry.get("type") == "git" and isinstance(url, str):
-        identity["url"] = canonical_git_url(url)
-    return identity
+    return DependencyKey.from_entry(entry).to_dict()
+
+
+def effective_dependency_entries(
+    entries: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Conservative effective graph; stored manifests cannot establish its edges."""
+    return tuple(DependencyKey.from_entry(entries[name]).to_dict() for name in sorted(entries))
 
 
 def package_subdir(entry: dict[str, Any]) -> Path | None:
@@ -231,13 +228,9 @@ def package_artifact_key(
     if source is None:
         return None
     manifest_name = str(entry.get("manifestFile", "lake-manifest.json"))
-    dependency_names = resolved_dependency_names(source_package, manifest_name)
-    if dependency_names is None:
-        dependency_names = set(effective_entries)
-    if not dependency_names.issubset(effective_entries):
-        return None
     cone = tuple(
-        DependencyKey.from_entry(effective_entries[name]) for name in sorted(dependency_names)
+        DependencyKey.from_entry(dependency)
+        for dependency in effective_dependency_entries(effective_entries)
     )
     return PackageArtifactKey(
         package_name=str(entry.get("name", "")),
@@ -260,16 +253,7 @@ def compute_package_identity(
     effective_entries: dict[str, dict[str, Any]],
     toolchain_identity: ToolchainBuildIdentity | None,
 ) -> dict[str, Any]:
-    manifest_name = entry.get("manifestFile", "lake-manifest.json")
-    dependency_names = resolved_dependency_names(source_package, str(manifest_name))
-    if dependency_names is None:
-        # A package without its own manifest gets the full root graph as a conservative key.
-        dependencies = list(effective_entries.values())
-    else:
-        dependencies = [
-            effective_entries.get(name, {"name": name, "type": "missing"})
-            for name in sorted(dependency_names)
-        ]
+    dependencies = list(effective_dependency_entries(effective_entries))
     artifact_key = package_artifact_key(
         context=context,
         entry=entry,
@@ -289,6 +273,8 @@ def compute_package_identity(
 
 def normalized_package_identity(identity: dict[str, Any]) -> dict[str, Any] | None:
     """Normalize legacy marker spellings without weakening graph compatibility."""
+    if identity.get("schema") != SHARED_PROJECT_SCHEMA:
+        return None
     package = identity.get("package")
     dependencies = identity.get("effective_dependencies")
     if not isinstance(package, dict) or not isinstance(dependencies, list):
@@ -301,8 +287,7 @@ def normalized_package_identity(identity: dict[str, Any]) -> dict[str, Any] | No
     artifact_key = identity.get("artifact_key")
     normalized_artifact = (
         artifact_key
-        if isinstance(artifact_key, dict)
-        and artifact_key.get("schema") == "lean-runtime-package-artifact-key/2"
+        if isinstance(artifact_key, dict) and artifact_key.get("schema") == PACKAGE_ARTIFACT_SCHEMA
         else None
     )
     return {

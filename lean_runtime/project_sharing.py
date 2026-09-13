@@ -8,25 +8,25 @@ import shutil
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ._git import git_clean, git_head
+from ._adoption_estimates import AdoptionEstimates, PackageAdoptionAction
+from ._git import git_head
 from ._paths import is_link, link_directory, remove_tree
 from ._project_identity import (
-    compute_package_identity,
-    entry_identity,
     package_subdir,
-    resolved_path_entries,
 )
+from ._published_estimates import PublishedPackageSize, SizeReferenceRequest
 from ._relpath import packages_directory
 from .errors import ProjectError
 from .policies import format_byte_size
 from .projects import ProjectContext, discover_project
-from .serialization import sha256_id, write_json_atomic
-from .shared_projects import SharedProjectManager
-from .store import clone_tree
+from .serialization import write_json_atomic
+from .shared_projects import SharedProjectManager, SharedProjectWorkspace, _git_clean_project_seed
+from .store import clone_tree, tree_usage
+from .store import source_snapshot_digest as source_snapshot_digest
 
 PROJECT_CONFIG = "lean-runtime.toml"
 PROJECT_CONFIG_SCHEMA = "lean-runtime-project/1"
@@ -52,7 +52,12 @@ def _restore_file(path: Path, previous: bytes | None) -> None:
 
 
 def _remove_path(path: Path) -> None:
-    if is_link(path) or path.is_file():
+    if is_link(path):
+        if path.is_symlink():
+            path.unlink()
+        else:
+            path.rmdir()
+    elif path.is_file():
         path.unlink()
     elif path.exists():
         remove_tree(path)
@@ -181,6 +186,15 @@ class AdoptionPlan:
     estimated_shared_bytes: int
     shared_bytes_reused: int = 0
     new_shared_bytes: int = 0
+    storage_estimate_complete: bool = True
+    unknown_dependencies: tuple[str, ...] = ()
+    download_bytes: int | None = None
+    download_estimate_complete: bool = False
+    new_source_bytes: int = 0
+    jobs: int = 1
+    size_references: tuple[dict[str, Any], ...] = ()
+    actions: tuple[PackageAdoptionAction, ...] = ()
+    estimates: AdoptionEstimates | None = None
 
     @property
     def ready(self) -> int:
@@ -191,7 +205,7 @@ class AdoptionPlan:
         return len(self.projects) - self.ready
 
     @property
-    def estimated_reclaimable_bytes(self) -> int:
+    def estimated_reclaimable_bytes(self) -> int | None:
         """Compatibility alias for estimated machine-level recovery."""
         return self.estimated_machine_reclaimable_bytes
 
@@ -200,12 +214,18 @@ class AdoptionPlan:
         return self.current_dependency_bytes
 
     @property
-    def estimated_machine_reclaimable_bytes(self) -> int:
-        return max(0, self.current_dependency_bytes - self.new_shared_bytes)
+    def estimated_machine_reclaimable_bytes(self) -> int | None:
+        # Logical copies cannot establish exclusive physical allocation.
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "recursive": self.recursive,
+            "jobs": self.jobs,
+            "size_references": list(self.size_references),
+            "approximate_artifact_bytes": None,  # deprecated: samples are not additive
+            "actions": [action.to_dict() for action in self.actions],
+            "estimates": self.estimates.to_dict() if self.estimates else None,
             "projects": [project.to_dict() for project in self.projects],
             "ready": self.ready,
             "blocked": self.blocked,
@@ -214,6 +234,12 @@ class AdoptionPlan:
             "checkout_bytes_removed": self.checkout_bytes_removed,
             "shared_bytes_reused": self.shared_bytes_reused,
             "new_shared_bytes": self.new_shared_bytes,
+            "new_source_bytes": self.new_source_bytes,
+            "storage_estimate_complete": self.storage_estimate_complete,
+            "unknown_dependencies": list(self.unknown_dependencies),
+            "download_bytes": self.download_bytes,
+            "download_estimate_complete": self.download_estimate_complete,
+            "storage_byte_basis": "estimated materialized bytes; not physical allocation",
             "estimated_machine_reclaimable_bytes": (self.estimated_machine_reclaimable_bytes),
             "estimated_reclaimable_bytes": self.estimated_reclaimable_bytes,
         }
@@ -226,6 +252,7 @@ class AdoptionResult:
     packages: int
     reclaimed_bytes: int
     workspace_id: str | None = None
+    observations: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -234,6 +261,9 @@ class AdoptionResult:
             "packages": self.packages,
             "reclaimed_bytes": self.reclaimed_bytes,
             "workspace_id": self.workspace_id,
+            "observations": self.observations,
+            "logical_directory_bytes_replaced": self.reclaimed_bytes,
+            "physical_recovery_bytes": None,
         }
 
 
@@ -423,7 +453,7 @@ def inspect_adoption(root: Path) -> ProjectAdoption:
                 f"dependency {name} is checked out at {head[:12]}, not manifest revision "
                 f"{str(revision)[:12]}"
             )
-        elif not git_clean(local):
+        elif not _git_clean_project_seed(local):
             blockers.append(f"dependency {name} has local changes")
     attached = (
         project_sharing_enabled(context.root)
@@ -440,93 +470,68 @@ def inspect_adoption(root: Path) -> ProjectAdoption:
     )
 
 
+def attachment_matches_workspace(
+    context: ProjectContext, workspace: SharedProjectWorkspace
+) -> bool:
+    """Validate links/junctions against an independently validated expected workspace."""
+    if not project_sharing_enabled(context.root):
+        return False
+    try:
+        attachment = json.loads((context.root / ".lake" / ATTACHMENT_RECORD).read_text())
+        if (
+            not isinstance(attachment, dict)
+            or attachment.get("schema") != ATTACHMENT_SCHEMA
+            or attachment.get("workspace_id") != workspace.workspace_id
+        ):
+            return False
+        overrides = {
+            entry["name"]: Path(entry["dir"])
+            for entry in json.loads(workspace.overrides_file.read_text())["packages"]
+        }
+        package_dir = _packages_directory(context)
+        expected_links = {}
+        for entry in _manifest_packages(context):
+            if entry["type"] != "git":
+                continue
+            name = str(entry["name"])
+            target = overrides[name]
+            if not target.is_dir():
+                return False
+            subdir = package_subdir(entry)
+            if subdir:
+                for _part in subdir.parts:
+                    target = target.parent
+            link = package_dir / name
+            if not is_link(link) or link.resolve() != target.resolve():
+                return False
+            expected_links[name] = str(target.resolve())
+        return attachment.get("packages") == expected_links
+    except (OSError, ValueError, KeyError, TypeError, ProjectError):
+        return False
+
+
 def plan_adoption(
     path: Path,
     *,
     recursive: bool,
     shared: SharedProjectManager | None = None,
+    jobs: int | None = None,
+    size_samples: Callable[[], tuple[PublishedPackageSize, ...]] | None = None,
+    reference_provider: Callable[
+        [tuple[SizeReferenceRequest, ...]], tuple[PublishedPackageSize, ...]
+    ]
+    | None = None,
 ) -> AdoptionPlan:
-    roots = discover_shareable_projects(path, recursive=recursive)
-    events = shared.events if shared is not None else None
-    inspected: list[ProjectAdoption] = []
-    for index, root in enumerate(roots, start=1):
-        if events is not None:
-            events.emit(
-                "adopt.inspect_started",
-                f"Inspecting {root.name} ({index}/{len(roots)})",
-                phase="adopt-plan",
-                project=str(root),
-                name=root.name,
-                current=index,
-                total=len(roots),
-            )
-        inspected.append(inspect_adoption(root))
-    projects = tuple(inspected)
-    candidates = [project for project in projects if project.ready and not project.attached]
-    groups: dict[str, int] = {}
-    reused_groups: set[str] = set()
-    for index, project in enumerate(candidates, start=1):
-        if events is not None:
-            events.emit(
-                "adopt.identity_started",
-                f"Resolving dependency identities for {project.root.name} "
-                f"({index}/{len(candidates)})",
-                phase="adopt-plan",
-                project=str(project.root),
-                name=project.root.name,
-                current=index,
-                total=len(candidates),
-            )
-        context = discover_project(project.root)
-        manifest = _read_manifest(context)
-        entries = _manifest_packages(context)
-        identity_entries = resolved_path_entries(context, entries)
-        effective_entries = {
-            str(entry["name"]): entry_identity(identity_entry)
-            for entry, identity_entry in zip(entries, identity_entries, strict=True)
-        }
-        reusable = (
-            shared.reusable_packages(
-                context,
-                entries,
-                effective_entries=effective_entries,
-            )
-            if shared is not None
-            else {}
-        )
-        package_dir = _packages_directory(context)
-        for entry in entries:
-            if entry["type"] != "git":
-                continue
-            local = package_dir / str(entry["name"])
-            local_bytes = _tree_bytes(local)
-            subdir = entry.get("subDir")
-            source_package = local / subdir if isinstance(subdir, str) and subdir else local
-            reusable_package = reusable.get(str(entry["name"]))
-            if reusable_package is not None:
-                key = reusable_package.name
-                reused_groups.add(key)
-            elif git_head(local) == entry.get("rev") and source_package.is_dir():
-                identity = compute_package_identity(
-                    context=context,
-                    entry=entry,
-                    source_package=source_package,
-                    effective_entries=effective_entries,
-                    toolchain_identity=None,
-                )
-                key = sha256_id("project_package", identity)
-            else:
-                identity = {
-                    "toolchain": context.toolchain,
-                    "manifest": manifest,
-                    "package": entry,
-                }
-                key = sha256_id("project_adoption_estimate", identity)
-            groups[key] = max(groups.get(key, 0), local_bytes)
-    current = sum(project.dependency_bytes for project in projects if not project.attached)
-    reused = sum(size for key, size in groups.items() if key in reused_groups)
-    new = sum(size for key, size in groups.items() if key not in reused_groups)
-    return AdoptionPlan(projects, recursive, current, sum(groups.values()), reused, new)
+    from ._adoption_planning import build_adoption_plan
+
+    return build_adoption_plan(
+        path,
+        recursive=recursive,
+        shared=shared,
+        jobs=jobs,
+        size_samples=size_samples,
+        reference_provider=reference_provider,
+    )
 
 
 def plan_detachment(root: Path) -> DetachmentPlan:
@@ -607,32 +612,7 @@ class ProjectAdopter:
         lake_dir.mkdir(parents=True, exist_ok=True)
         packages_dir = _packages_directory(context)
         marker = lake_dir / ATTACHMENT_RECORD
-        try:
-            attachment = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            attachment = None
-        links_match = isinstance(attachment, dict) and (
-            attachment.get("schema") == ATTACHMENT_SCHEMA
-            and attachment.get("workspace_id") == workspace.workspace_id
-        )
-        if links_match:
-            for entry in manifest_packages:
-                if entry["type"] != "git":
-                    continue
-                name = str(entry["name"])
-                package_dir = override_package_dirs.get(name)
-                link = packages_dir / name
-                if package_dir is None or not is_link(link):
-                    links_match = False
-                    break
-                subdir = package_subdir(entry)
-                target = package_dir
-                if subdir is not None:
-                    for _part in subdir.parts:
-                        target = target.parent
-                if link.resolve() != target.resolve():
-                    links_match = False
-                    break
+        links_match = attachment_matches_workspace(context, workspace)
         if links_match:
             return AdoptionResult(
                 context.root,
@@ -646,7 +626,8 @@ class ProjectAdopter:
         token = f"{os.getpid()}.{uuid.uuid4().hex}"
         staging = packages_dir.parent / f".{packages_dir.name}.lean-runtime.{token}.tmp"
         backup = packages_dir.parent / f".{packages_dir.name}.lean-runtime.{token}.backup"
-        reclaimed = _tree_bytes(packages_dir)
+        before_usage = tree_usage(packages_dir, missing_ok=True)
+        reclaimed = before_usage.logical_bytes
         staging.mkdir()
         swapped = False
         had_original = packages_dir.exists() or is_link(packages_dir)
@@ -709,7 +690,7 @@ class ProjectAdopter:
             _restore_file(marker, previous_marker)
             _restore_file(config, previous_config)
             raise
-        self._cleanup_committed_backup(backup)
+        cleanup_complete = self._cleanup_committed_backup(backup)
         self.shared.events.emit(
             "project.attach.completed",
             f"Attached shared dependencies for {context.root.name}",
@@ -723,6 +704,13 @@ class ProjectAdopter:
             len(workspace.package_ids),
             reclaimed,
             workspace.workspace_id,
+            {
+                "local_inventory_before": asdict(before_usage),
+                "local_inventory_after": asdict(tree_usage(packages_dir)),
+                "backup_cleanup_complete": cleanup_complete,
+                "retained_backup": str(backup) if not cleanup_complete else None,
+                "measurement_scope": "local dependency directories; not machine disk recovery",
+            },
         )
 
     def _cleanup_committed_backup(self, backup: Path) -> bool:
@@ -804,5 +792,16 @@ class ProjectAdopter:
             if not config.exists():
                 config.write_text(_CONFIG_CONTENT, encoding="utf-8")
             raise
-        self._cleanup_committed_backup(backup)
-        return AdoptionResult(context.root, "detached", copied, 0)
+        cleanup_complete = self._cleanup_committed_backup(backup)
+        return AdoptionResult(
+            context.root,
+            "detached",
+            copied,
+            0,
+            observations={
+                "local_inventory_after": asdict(tree_usage(packages_dir)),
+                "backup_cleanup_complete": cleanup_complete,
+                "retained_backup": str(backup) if not cleanup_complete else None,
+                "measurement_scope": "local dependency directories; not machine disk recovery",
+            },
+        )

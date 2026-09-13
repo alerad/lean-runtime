@@ -13,12 +13,12 @@
       "additionalProperties": false,
       "properties": {
         "subject": {"type": "string"},
-        "subject_kind": {"enum": ["lock", "environment"]},
+        "subject_kind": {"enum": ["lock", "environment", "project"]},
         "ok": {"type": "boolean"},
         "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
         "failures": {"type": "array", "items": {"$ref": "#/$defs/check"}},
         "warnings": {"type": "array", "items": {"$ref": "#/$defs/check"}},
-        "lock_id": {"type": "string"},
+        "lock_id": {"type": ["string", "null"]},
         "environment_id": {"type": ["string", "null"]},
         "artifact_match": {"type": ["boolean", "null"]}
       }

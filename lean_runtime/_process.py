@@ -132,6 +132,7 @@ def drain(
     chunks: list[bytes],
     on_output: Callable[[str], None] | None = None,
     stop: threading.Event | None = None,
+    on_bytes: Callable[[bytes], None] | None = None,
 ) -> None:
     """Copy ``stream`` into ``chunks`` under ``budget``; report lines to the observer.
 
@@ -152,6 +153,8 @@ def drain(
             kept = budget.take(chunk)
             if kept:
                 chunks.append(kept)
+                if on_bytes is not None:
+                    on_bytes(kept)
             if on_output is None:
                 continue
             # Progress bars redraw with bare carriage returns; treat those as lines too.
@@ -285,6 +288,7 @@ def run_process(
     cancel: threading.Event | None = None,
     max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
     on_output: Callable[[str], None] | None = None,
+    on_bytes: Callable[[str, bytes], None] | None = None,
     merge_stderr: bool = False,
     limits: ResourceLimits | None = None,
 ) -> ProcessOutcome:
@@ -310,10 +314,35 @@ def run_process(
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []
     stop_readers = threading.Event()
+    byte_errors: list[BaseException] = []
+    byte_lock = threading.Lock()
+
+    def byte_observer(name: str) -> Callable[[bytes], None] | None:
+        if on_bytes is None:
+            return None
+
+        def observe(data: bytes) -> None:
+            with byte_lock:
+                if byte_errors:
+                    return
+                try:
+                    on_bytes(name, data)
+                except BaseException as exc:
+                    byte_errors.append(exc)
+
+        return observe
+
     readers = [
         threading.Thread(
             target=drain,
-            args=(process.stdout, budget, stdout_chunks, on_output, stop_readers),
+            args=(
+                process.stdout,
+                budget,
+                stdout_chunks,
+                on_output,
+                stop_readers,
+                byte_observer("stdout"),
+            ),
             name=f"lean-runtime-stdout-{process.pid}",
             daemon=True,
         )
@@ -322,7 +351,14 @@ def run_process(
         readers.append(
             threading.Thread(
                 target=drain,
-                args=(process.stderr, budget, stderr_chunks, on_output, stop_readers),
+                args=(
+                    process.stderr,
+                    budget,
+                    stderr_chunks,
+                    on_output,
+                    stop_readers,
+                    byte_observer("stderr"),
+                ),
                 name=f"lean-runtime-stderr-{process.pid}",
                 daemon=True,
             )
@@ -333,6 +369,9 @@ def run_process(
     cancelled = False
     try:
         while process.poll() is None:
+            if byte_errors:
+                shutdown(process)
+                break
             if cancel is not None and cancel.is_set():
                 cancelled = True
                 shutdown(process)
@@ -347,6 +386,8 @@ def run_process(
         _join_readers(process, readers, stop_readers)
         raise
     readers_truncated = _join_readers(process, readers, stop_readers)
+    if byte_errors:
+        raise byte_errors[0]
     if timed_out:
         exit_code = EXIT_TIMED_OUT
     elif cancelled:

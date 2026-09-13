@@ -381,6 +381,9 @@ class ConsoleRenderer:
             text = _truncate(line, _OUTPUT_WIDTH)
             self._draw_line(text, self.style.dim(text))
 
+    def _render_adopt_workers_selected(self, event: RuntimeEvent) -> None:
+        self._print(event.message)
+
     def _render_adopt_inspect_started(self, event: RuntimeEvent) -> None:
         self._count_from(event, "Inspecting projects", "name")
 

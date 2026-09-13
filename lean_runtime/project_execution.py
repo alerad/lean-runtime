@@ -355,6 +355,51 @@ class ProjectExecutor:
         hints = self.runtime.identifier_resolver.suggestions(context, result)
         return result if not hints else replace(result, hints=hints)
 
+    def execute(
+        self,
+        context: ProjectContext,
+        command: Sequence[str],
+        *,
+        policy: ExecutionPolicy,
+        cancel: threading.Event | None = None,
+        on_bytes: Callable[[str, bytes], None] | None = None,
+    ) -> ExecutionResult:
+        """Run in a persistent pinned project; outputs survive the invocation.
+
+        The command is explicit trusted-local work. Lake remains authoritative
+        for search paths. Commands needing shared build coordination should use
+        build(); execute does not serialize independent read-only workers.
+        Byte callbacks receive bounded, per-stream ordered output and must be
+        short-lived. Callback failures stop execution and propagate.
+        """
+        if (
+            isinstance(command, (str, bytes))
+            or not command
+            or not command[0]
+            or any(not isinstance(part, str) or "\0" in part for part in command)
+        ):
+            raise ProjectError("execute requires a nonempty command without NUL bytes")
+        self.runtime.toolchains.ensure_full(context.toolchain, cancel=cancel)
+        with self._bootstrap_guard(context):
+            selected = (
+                self.runtime.toolchains.command(context.toolchain, command[0], *command[1:])
+                if command[0] in {"lean", "lake", "leanc"}
+                else list(command)
+            )
+            return self.runtime._raw_result(
+                selected,
+                cwd=context.root,
+                toolchain=context.toolchain,
+                source_digest=sha256_text(""),
+                policy=policy,
+                project=self._provenance(context),
+                packages=context.package_provenance(),
+                logical_command=command,
+                environment=self.runtime.toolchains.environment_for(context.toolchain),
+                cancel=cancel,
+                on_bytes=on_bytes,
+            )
+
     def build(
         self,
         context: ProjectContext,

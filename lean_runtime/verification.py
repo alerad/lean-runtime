@@ -208,7 +208,7 @@ class VerificationReport:
     checks: tuple[VerificationCheck, ...]
     failures: tuple[VerificationCheck, ...]
     warnings: tuple[VerificationCheck, ...]
-    lock_id: str
+    lock_id: str | None
     environment_id: str | None
     artifact_match: bool | None = None
 
@@ -256,6 +256,40 @@ def attestation_predicate(report: VerificationReport, workspace: Path) -> dict[s
             "bytes": inventory.bytes,
         },
     }
+
+
+def verify_project_attachment(runtime: Runtime, root: Path) -> VerificationReport:
+    """Verify shared attachment state locally; this is not a Lean proof verdict."""
+    from ._project_identity import resolved_path_entries
+    from .errors import ProjectError
+    from .project_sharing import attachment_matches_workspace
+    from .projects import discover_project
+    from .shared_projects import _load_manifest
+
+    message = "attachment or local build identity is unavailable or stale; rerun adopt to repair"
+    try:
+        context = discover_project(root)
+        manager = runtime.shared_projects
+        toolchain_identity = manager.local_toolchain_build_identity(context.toolchain)
+        entries = resolved_path_entries(context, _load_manifest(context)["packages"])
+        workspace = manager.existing_workspace(
+            context,
+            toolchain_identity=toolchain_identity,
+            identity_packages=entries,
+        )
+        valid = workspace is not None and attachment_matches_workspace(context, workspace)
+    except (OSError, ProjectError, ValueError) as exc:
+        valid = False
+        message = str(exc)
+    check = VerificationCheck(
+        "project_attachment_current",
+        valid,
+        subject=str(root),
+        details={} if valid else {"message": message},
+    )
+    return VerificationReport(
+        str(root), "project", (check,), () if valid else (check,), (), None, None
+    )
 
 
 def verify_lock(lock: EnvironmentLock, *, subject: str) -> VerificationReport:
