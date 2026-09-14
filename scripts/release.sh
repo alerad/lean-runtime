@@ -28,10 +28,13 @@ cleanup() {
   rm -rf "$release_work"
 }
 trap cleanup EXIT
-python -m venv "$release_work/venv"
+# Use uv for an isolated interpreter that matches CI (Python 3.12) regardless
+# of what `python` resolves to on the host.
+command -v uv >/dev/null || { echo "uv is required: https://docs.astral.sh/uv/"; exit 1; }
+release_python_version="${RELEASE_PYTHON:-3.12}"
+uv venv --quiet --python "$release_python_version" "$release_work/venv"
 release_python="$release_work/venv/bin/python"
-"$release_python" -m pip install --quiet --upgrade pip
-"$release_python" -m pip install --quiet -e '.[dev,docs]' build twine
+uv pip install --quiet --python "$release_python" -e '.[dev,docs]' build twine
 
 "$release_python" -m ruff check .
 "$release_python" -m ruff format --check .
@@ -68,7 +71,7 @@ if re.search(rf"^## {re.escape(version)} - \d{{4}}-\d{{2}}-\d{{2}}$", text, re.M
 changelog.write_text(text)
 PY
 
-"$release_python" -m pip install --quiet --no-deps -e .
+uv pip install --quiet --python "$release_python" --no-deps -e .
 release_dist="$release_work/dist"
 mkdir "$release_dist"
 "$release_python" -m build --outdir "$release_dist"
