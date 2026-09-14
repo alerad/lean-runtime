@@ -6,7 +6,7 @@
 set -euo pipefail
 
 VERSION="${1:?usage: scripts/release.sh X.Y.Z}"
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid version: $VERSION"; exit 1; }
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(.[0-9]+)?$ ]] || { echo "invalid version: $VERSION"; exit 1; }
 [[ "$(git branch --show-current)" == "main" ]] || { echo "run on main"; exit 1; }
 git diff --quiet && git diff --cached --quiet || { echo "working tree is not clean"; exit 1; }
 git pull --ff-only
