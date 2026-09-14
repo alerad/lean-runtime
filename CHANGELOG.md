@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.33.0.1 - 2026-09-14
+
 - Refactor adoption into read-only action planning, component accounting, and report
   rendering. Share donor/source selection with execution and retain execution-time
   validation. Separate logical replacement, retained source/package/artifact content,
