@@ -769,3 +769,29 @@ def test_matrix_table_reports_a_verdict_column() -> None:
     source = inspect.getsource(cli)
     assert r"Context\tVerdict\tTime\tEnvironment" in source
     assert r"Context\tResult\tTime\tEnvironment" not in source
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--help"], ["Share compatible repositories", "env compose"]),
+        (
+            ["env", "--help"],
+            ["Repository workflow", "--yes", "not hard disk quotas", "NOT toolchains", "Git-only"],
+        ),
+        (["env", "compose", "--help"], ["Review", "implicit pin upgrades", "default: 200000000"]),
+        (
+            ["env", "warm", "--help"],
+            ["repeatable", "build every selected local library", "timeout in seconds"],
+        ),
+        (["env", "composed-clean", "--help"], ["unreferenced", "default is preview only"]),
+        (["env", "composed-export", "--help"], ["excluding toolchains and build artifacts"]),
+    ],
+)
+def test_composition_help_documents_workflow_and_safety(args, expected, capsys):
+    with pytest.raises(SystemExit) as exc:
+        parser().parse_args(args)
+    assert exc.value.code == 0
+    output = " ".join(capsys.readouterr().out.split())
+    for fragment in expected:
+        assert fragment in output

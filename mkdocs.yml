@@ -31,6 +31,7 @@ nav:
   - Workflows:
       - Check Lean files: workflows/check-files.md
       - Work with Lake projects: workflows/lake-projects.md
+      - Named multi-repository environments: workflows/composed-environments.md
       - Multi-project readiness and budgets: workflows/multi-project-readiness.md
   - Concepts:
       - Context selection: concepts/context-selection.md

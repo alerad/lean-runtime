@@ -29,6 +29,8 @@ reuse.
 
 ## Named multi-repository environments (prerelease)
 
+[Complete workflow, limits, cleanup and Anvil examples](docs/workflows/composed-environments.md).
+
 Compose compatible repositories once, warm the imports you need, then create
 ordinary Lake projects pinned to the immutable composition:
 

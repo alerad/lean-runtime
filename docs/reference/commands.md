@@ -2,6 +2,12 @@
 
 This page summarizes the command surface. Run `lean-runtime COMMAND --help` for the installed version's complete arguments and options.
 
+## Multi-repository environments
+
+See the [preview/capture/warm/new/build walkthrough](../workflows/composed-environments.md)
+for exact compatibility, storage limits, retention, source capsules and Anvil examples.
+`lean-runtime env --help` includes the same essential workflow; each leaf explains its flags.
+
 ## The model
 
 | Noun | Meaning |

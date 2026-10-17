@@ -1088,6 +1088,12 @@ Start here:
 Inspect and fix:
   status · verify · doctor · clean
 
+Share compatible repositories:
+  env compose /path/A /path/B --name research   Preview exact source/dependency pins
+  env warm research --import A.Basic           Warm only the imports you need
+  new ./MyResearch --env research              Preview a pinned consumer project
+  See env --help for the complete preview/apply workflow and storage limits.
+
 Advanced namespaces:
   env · project · program · toolchain · storage · catalog
 """,
@@ -1397,34 +1403,125 @@ first download.""",
     )
     completion.set_defaults(command="completion")
 
-    env = commands.add_parser("env", help="exact immutable environments")
+    env = commands.add_parser(
+        "env",
+        help="exact immutable environments",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Compose compatible repositories into one exact environment, or manage Git-only locks."
+        ),
+        epilog="""Repository workflow (use real repository paths and Lean module names):
+  lean-runtime --availability local env compose /path/A /path/B --name research
+  # Review compatibility and source-byte estimates; capture only after review:
+  lean-runtime --availability local env compose /path/A /path/B --name research --yes
+  lean-runtime --availability local env warm research --import A.Basic --import B.Basic
+  lean-runtime --availability local new ./MyResearch --env research
+  lean-runtime --availability local new ./MyResearch --env research --yes
+  lean-runtime --availability local build ./MyResearch
+  lean-runtime --availability local check ./MyResearch/Main.lean
+
+Safety and reuse:
+  Repositories must agree on toolchain and exact dependency pins. Missing path
+  dependencies, colliding modules and incompatible pins block composition;
+  registration alone does not make every repository jointly importable.
+  Originals are read-only; snapshots omit Git-ignored files and generated .lake.
+  Names are mutable aliases; consumer projects pin immutable environment IDs.
+  Warm imports first; --all-libraries is broader, --all-targets also builds defaults.
+  --availability local never acquires missing dependencies or toolchains.
+  Shared outputs are reused and writes serialized. Do not edit .lake/packages.
+
+Storage and portability:
+  compose defaults: 200000000 source bytes, 20000 files. Build/dependency growth
+  monitors are cooperative, not hard disk quotas; set global budget flags before env.
+  composed-refs inspects retention; composed-clean previews unreferenced cleanup.
+  Destructive actions require --yes. Build readiness is historical, not a promise
+  that externally deleted caches still exist.
+  composed-export/import carry source snapshots and exact pins, NOT toolchains
+  or compiled artifacts. A new machine still needs the exact dependencies.
+  composed-* commands manage repository snapshots; list/info/lock/acquire and
+  export/import (without composed-) manage the separate Git-only lock format.
+""",
+    )
     env_commands = env.add_subparsers(dest="env_command", required=True)
     composed = env_commands.add_parser(
-        "compose", help="preview or capture an exact repository composition"
+        "compose",
+        help="preview or capture an exact repository composition",
+        description=(
+            "Preview compatibility and source storage without capturing. "
+            "Review, then repeat with --yes. Conflicts never trigger implicit pin upgrades."
+        ),
     )
-    composed.add_argument("roots", nargs="+", type=Path)
-    composed.add_argument("--name")
+    composed.add_argument(
+        "roots",
+        nargs="+",
+        type=Path,
+        help="repository roots; include required local path dependencies",
+    )
+    composed.add_argument(
+        "--name", help="alias to register on capture; existing consumers keep their exact pin"
+    )
     composed.add_argument(
         "--yes", action="store_true", help="capture reviewed sources and register alias"
     )
-    composed.add_argument("--max-source-bytes", type=int, default=200_000_000)
-    composed.add_argument("--max-files", type=int, default=20000)
-    composed.add_argument("--exclude", action="append", default=[])
+    composed.add_argument(
+        "--max-source-bytes",
+        type=int,
+        default=200_000_000,
+        help="maximum captured source bytes (default: %(default)s)",
+    )
+    composed.add_argument(
+        "--max-files", type=int, default=20000, help="maximum captured files (default: %(default)s)"
+    )
+    composed.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="additional source exclusion pattern (repeatable); Git ignores also apply",
+    )
     _add_common_output(composed)
     composed.set_defaults(command="composition-compose")
     warm = env_commands.add_parser("warm", help="build imports or all libraries in a composition")
-    warm.add_argument("environment")
-    warm.add_argument("--import", dest="imports", action="append", default=[])
-    warm.add_argument("--all-libraries", action="store_true")
+    warm.add_argument("environment", help="composition alias or immutable composed_ ID")
+    warm.add_argument(
+        "--import",
+        dest="imports",
+        action="append",
+        default=[],
+        help="Lean module to warm, e.g. A.Basic (repeatable; preferred for small builds)",
+    )
+    warm.add_argument(
+        "--all-libraries",
+        action="store_true",
+        help="build every selected local library, excluding executable-only targets",
+    )
     warm.add_argument(
         "--all-targets", action="store_true", help="also build package defaults/executables"
     )
-    warm.add_argument("--timeout", type=float, default=900)
+    warm.add_argument(
+        "--timeout",
+        type=float,
+        default=900,
+        help="compiler timeout in seconds (default: %(default)s)",
+    )
     _add_common_output(warm)
     warm.set_defaults(command="composition-warm")
+    composition_help = {
+        "list": "list captured repository compositions and aliases",
+        "info": "inspect exact source pins and historical build readiness",
+        "diff": "compare exact source and dependency identities",
+        "refs": "inspect retention; preview dropping an alias or project reference",
+        "clean": "preview cleanup of unreferenced compositions and owned package views",
+        "export": "write a verified source-and-pin ZIP, excluding toolchains and build artifacts",
+        "import": (
+            "preview a source capsule import; exact dependencies must be available separately"
+        ),
+        "attach": "preview restoring shared dependency links for an exactly pinned project",
+    }
     for operation in ("list", "info", "diff", "refs", "clean", "export", "import", "attach"):
         item = env_commands.add_parser(
-            "composed-" + operation, help=operation + " composed environments"
+            "composed-" + operation,
+            help=composition_help[operation],
+            description=composition_help[operation] + ".",
         )
         if operation == "diff":
             item.add_argument("left")
@@ -1436,12 +1533,21 @@ first download.""",
         if operation == "export":
             item.add_argument("--output", required=True, type=Path)
         if operation == "refs":
-            item.add_argument("--drop-alias")
-            item.add_argument("--drop-project")
+            item.add_argument(
+                "--drop-alias", help="alias reference to drop after review; requires --yes"
+            )
+            item.add_argument(
+                "--drop-project",
+                help="project reference key from composed-refs to drop; requires --yes",
+            )
         if operation == "import":
             item.add_argument("--name")
         if operation in {"clean", "refs", "import", "attach"}:
-            item.add_argument("--yes", action="store_true")
+            item.add_argument(
+                "--yes",
+                action="store_true",
+                help="apply the reviewed mutation; default is preview only",
+            )
         _add_common_output(item)
         item.set_defaults(command="composition-" + operation)
     env_list = env_commands.add_parser("list", help="list ready environments")
