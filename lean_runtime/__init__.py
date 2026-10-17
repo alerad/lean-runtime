@@ -79,6 +79,7 @@ from .runtime import Runtime, project_toolchain
 from .schema_resources import SCHEMA_NAMES, schema_path
 from .shared_projects import SharedProjectWorkspace
 from .specs import EnvironmentSpec, GitPackage, Package
+from .storage_limits import StorageLimitExceeded, StorageLimits
 from .store import CleanupReport, DownloadCleanupReport, StoreStatus
 from .toolchains import ToolchainManager, normalize_toolchain
 from .verification import VerificationCheck, VerificationReport
@@ -155,6 +156,8 @@ __all__ = [
     "ProjectNotFoundError",
     "ResolutionError",
     "Runtime",
+    "StorageLimits",
+    "StorageLimitExceeded",
     "SCHEMA_NAMES",
     "RuntimeEvent",
     "SpecificationError",

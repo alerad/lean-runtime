@@ -28,6 +28,7 @@ from .lockfiles import EnvironmentLock
 from .models import ExecutionResult, PhaseTiming
 from .policies import ExecutionPolicy, format_byte_size, parse_byte_size
 from .runtime import Runtime
+from .storage_limits import StorageLimits
 from .timings import render_timings
 from .wire import envelope, error, serialize_execution_v1
 
@@ -498,9 +499,16 @@ def run(
                     context_resolution,
                     evidence,
                 )
-                _, plan_libraries = _selected_policy(arguments)
+                plan_availability, plan_libraries = _selected_policy(arguments)
                 runtime = Runtime(
                     home=arguments.home,
+                    availability=plan_availability,
+                    borrowed_elan_roots=getattr(arguments, "borrowed_elan_root", ()),
+                    storage_limits=StorageLimits(
+                        getattr(arguments, "max_toolchain_bytes", None),
+                        getattr(arguments, "max_dependency_bytes", None),
+                        getattr(arguments, "max_build_bytes", None),
+                    ),
                     max_download_bytes=arguments.max_download,
                     libraries=plan_libraries,
                 )
@@ -524,6 +532,12 @@ def run(
             availability, libraries = _selected_policy(arguments)
             runtime = Runtime(
                 home=arguments.home,
+                borrowed_elan_roots=getattr(arguments, "borrowed_elan_root", ()),
+                storage_limits=StorageLimits(
+                    getattr(arguments, "max_toolchain_bytes", None),
+                    getattr(arguments, "max_dependency_bytes", None),
+                    getattr(arguments, "max_build_bytes", None),
+                ),
                 on_event=observe,
                 availability=availability,
                 libraries=libraries,

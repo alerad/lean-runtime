@@ -146,7 +146,40 @@ class ProjectExecutor:
                 return False
         return True
 
-    def _bootstrap_guard(self, context: ProjectContext) -> AbstractContextManager[object]:
+    @staticmethod
+    def _overrides_materialized(
+        context: ProjectContext, manifest: Path, command: Sequence[str]
+    ) -> bool:
+        """Recognize complete, existing path overrides passed to Lake itself."""
+        if not command or Path(command[0]).name != "lake":
+            return False
+        overrides = None
+        for arg in command[1:]:
+            if not arg.startswith("-"):
+                break
+            if arg.startswith("--packages="):
+                if overrides is not None:
+                    return False
+                overrides = context.root / arg.partition("=")[2]
+        if overrides is None:
+            return False
+        try:
+            required = {p["name"] for p in json.loads(manifest.read_text())["packages"]}
+            rows = json.loads(overrides.read_text())["packages"]
+            names = set()
+            for row in rows:
+                if row["type"] != "path" or row["name"] in names:
+                    return False
+                if not (context.root / row["dir"]).is_dir():
+                    return False
+                names.add(row["name"])
+            return required.issubset(names)
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
+    def _bootstrap_guard(
+        self, context: ProjectContext, command: Sequence[str] = ()
+    ) -> AbstractContextManager[object]:
         """Never let a check implicitly resolve dependencies, and never in parallel.
 
         A missing manifest with declared dependencies means ``lake env`` would
@@ -164,8 +197,18 @@ class ProjectExecutor:
                     "run `lake update` once to resolve versions, then `lean-runtime build` "
                     "to restore shared dependency artifacts"
                 )
-        elif self._packages_materialized(context.root, manifest):
+        elif self._packages_materialized(context.root, manifest) or self._overrides_materialized(
+            context, manifest, command
+        ):
             return nullcontext()
+        if manifest is not None and getattr(self.runtime, "availability", "auto") == "local":
+            raise ProjectError(
+                "local-only mode requires all pinned project dependencies materialized"
+            )
+        if manifest is not None and getattr(self.runtime, "max_download_bytes", None) is not None:
+            from .errors import DownloadLimitExceeded
+
+            raise DownloadLimitExceeded("implicit Lake dependency fetch has unknown transfer size")
         return FileLock(
             context.root / ".lake" / "lean-runtime" / "bootstrap.lock",
             timeout=3600,
@@ -380,7 +423,7 @@ class ProjectExecutor:
         ):
             raise ProjectError("execute requires a nonempty command without NUL bytes")
         self.runtime.toolchains.ensure_full(context.toolchain, cancel=cancel)
-        with self._bootstrap_guard(context):
+        with self._bootstrap_guard(context, command):
             selected = (
                 self.runtime.toolchains.command(context.toolchain, command[0], *command[1:])
                 if command[0] in {"lean", "lake", "leanc"}
@@ -420,6 +463,16 @@ class ProjectExecutor:
             if selected_shared
             else None
         )
+        if workspace is not None:
+            from .dependency_views import workspace_overrides
+
+            workspace = replace(
+                workspace,
+                overrides_file=workspace_overrides(
+                    workspace.overrides_file,
+                    workspace.root / "dependency-views",
+                ),
+            )
         lake_arguments = (
             (f"--packages={workspace.overrides_file}", "build", *targets)
             if workspace is not None
@@ -457,7 +510,12 @@ class ProjectExecutor:
             hydration_timings: list[PhaseTiming] = []
             accelerators = (
                 self.runtime.lake_cache.dependency_accelerators(package_provenance)
-                if restore_artifacts and policy.network != "disabled"
+                if (
+                    restore_artifacts
+                    and policy.network != "disabled"
+                    and self.runtime.availability != "local"
+                    and self.runtime.max_download_bytes is None
+                )
                 else ()
             )
             for package, requested in accelerators:
@@ -534,6 +592,11 @@ class ProjectExecutor:
             )
 
         if workspace is None:
+            if self.runtime.availability == "local" or self.runtime.max_download_bytes is not None:
+                # Validate acquisition policy without reacquiring the bootstrap
+                # lock: a focused check can already hold it while asking us to
+                # build a missing local import. FileLock is not reentrant.
+                self._bootstrap_guard(context, ("lake", *lake_arguments))
             return hydrate_and_run()
         lock_started = time.monotonic()
         with self.runtime.shared_projects.build_lock(workspace, cancel=cancel):

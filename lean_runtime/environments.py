@@ -31,7 +31,7 @@ from .capsules import (
     setup_artifact_groups,
     source_import_roots,
 )
-from .errors import EnvironmentError, MaterializationError, PolicyError
+from .errors import DownloadLimitExceeded, EnvironmentError, MaterializationError, PolicyError
 from .events import EventEmitter, submit
 from .import_syntax import IMPORT_STATEMENT
 from .lake import ROOT_MODULE
@@ -46,6 +46,7 @@ from .models import (
 from .policies import ExecutionPolicy
 from .references import artifact_accelerators
 from .serialization import freeze_json, sha256_id, write_json_atomic
+from .storage_limits import StorageLimits, budgeted
 from .store import (
     EnvironmentStore,
     clone_tree,
@@ -480,6 +481,7 @@ class Environment:
         record: dict[str, Any],
     ) -> None:
         self.manager = manager
+        self.storage_limits = getattr(manager, "storage_limits", StorageLimits())
         self.id = environment_id
         self.lock = lock
         self.root = root
@@ -843,6 +845,7 @@ class Environment:
             expected_ok=expected_ok,
         )
 
+    @budgeted("build", lambda self, _args: [self.manager.store.jobs])
     def _execute_in_instance(
         self,
         *,
@@ -1118,6 +1121,7 @@ class EnvironmentManager:
         events: EventEmitter | None = None,
     ) -> None:
         self.store = store
+        self.storage_limits = StorageLimits()
         self.toolchains = toolchains
         self.backend = backend
         self.events = events or EventEmitter()
@@ -1282,7 +1286,11 @@ class EnvironmentManager:
             accelerators = artifact_accelerators() if accelerate else {}
             for package in lock.packages:
                 requested_command = package.artifact_command or accelerators.get(package.url, ())
-                if not requested_command:
+                if (
+                    not requested_command
+                    or not getattr(self.toolchains, "allow_download", True)
+                    or getattr(self.toolchains, "max_download_bytes", None) is not None
+                ):
                     continue
                 accelerated = not package.artifact_command
                 self.events.emit(
@@ -1391,6 +1399,10 @@ class EnvironmentManager:
                     source_id=package.source_id,
                 )
                 continue
+            if not getattr(self.toolchains, "allow_download", True):
+                raise EnvironmentError(f"locked source {package.name} is unavailable locally")
+            if getattr(self.toolchains, "max_download_bytes", None) is not None:
+                raise DownloadLimitExceeded("locked-source Git fetch has unknown transfer size")
             self.events.emit(
                 "source.fetch_started",
                 f"Fetching {package.name}",

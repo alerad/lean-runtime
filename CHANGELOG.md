@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Local acquisition policy is enforced by toolchain command construction, full
+  toolchain acquisition, Elan bootstrap, and source acquisition/resolution seams.
+  Toolchain inspection distinguishes check/build readiness and no longer installs.
+- Add read-only multi-project `readiness`, exact dependency/path diagnostics,
+  cross-project pin conflicts, and deduplicated adoption storage previews.
+- Add explicit borrowed Elan homes with ownership-aware inspection, plus
+  operation-scoped toolchain/dependency/build growth limits and aggregate OCI
+  payload reservations. Unknown Elan/Git acquisition sizes fail closed under
+  acquisition budgets. Storage limits are cooperative monitors, not disk quotas.
+- Shared builds isolate writable Lake configuration state in stable linked views
+  while retaining shared first-build outputs and package build coordination.
+
 ## 4.33.0.1 - 2026-09-14
 
 - Refactor adoption into read-only action planning, component accounting, and report

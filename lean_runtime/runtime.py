@@ -52,6 +52,7 @@ from .errors import (
     LeanRuntimeError,
     PolicyError,
     ProjectError,
+    ProjectNotFoundError,
     SpecificationError,
     ToolchainError,
 )
@@ -109,6 +110,7 @@ from .resolver import EnvironmentResolver
 from .serialization import sha256_id, sha256_text
 from .shared_projects import SharedProjectManager, SharedProjectWorkspace
 from .specs import EnvironmentSpec, GitPackage
+from .storage_limits import StorageLimits, budgeted, dependency_roots, download_budgeted
 from .store import (
     CleanupReport,
     DownloadCleanupReport,
@@ -241,10 +243,13 @@ class Runtime:
         home: str | os.PathLike[str] | None = None,
         toolchains: ToolchainManager | None = None,
         backend: Backend | None = None,
+        borrowed_elan_roots: Sequence[str | os.PathLike[str]] = (),
         on_event: EventCallback | None = None,
         availability: str | None = None,
         libraries: Sequence[str] | None = None,
         max_download_bytes: int | None = None,
+        storage_limits: StorageLimits | None = None,
+        initialize_store: bool = True,
         allow_source_build: bool = True,
         publisher_verification: str = "ignore",
         trusted_publisher: str | None = None,
@@ -268,11 +273,24 @@ class Runtime:
             )
         self.events = EventEmitter(on_event)
         activate(self.events)
-        self.toolchains = toolchains or ToolchainManager(home, events=self.events)
+        self.toolchains = toolchains or ToolchainManager(
+            home,
+            events=self.events,
+            allow_download=availability != "local",
+            borrowed_elan_roots=tuple(borrowed_elan_roots),
+        )
+        if availability == "local":
+            self.toolchains.allow_download = False
+        self.toolchains.max_download_bytes = max_download_bytes
         self.home = self.toolchains.home
+        self.storage_limits = storage_limits or StorageLimits()
+        self.toolchains.storage_limits = self.storage_limits
         self.backend = backend or LocalBackend()
-        self.store = EnvironmentStore(self.home)
+        self.store = EnvironmentStore(self.home, create=initialize_store)
         self.shared_projects = SharedProjectManager(self.home, self.events, self.toolchains)
+        self.shared_projects.storage_limits = self.storage_limits
+        self.shared_projects.allow_download = availability != "local"
+        self.shared_projects.max_download_bytes = max_download_bytes
         self.lake_cache = LakeArtifactCache(self.home, self.toolchains, self.events)
         self.header_cache = LeanHeaderCache(self.home, self.toolchains, self.events)
         self.identifier_resolver = IdentifierResolver(self.home)
@@ -283,6 +301,7 @@ class Runtime:
         self.environments = EnvironmentManager(
             self.store, self.toolchains, self.backend, self.events
         )
+        self.environments.storage_limits = self.storage_limits
         self.bundles = EnvironmentBundles(self.store, self.toolchains, self.backend, self.events)
         self.programs = ProgramManager(self.store, self.backend, self.events)
         configured_libraries = libraries
@@ -360,7 +379,7 @@ class Runtime:
         requested_names = unknown_declaration_names(result)
         if not requested_names:
             return result
-        can_download = self.availability != "local" if allow_download is None else allow_download
+        can_download = self.availability != "local" and allow_download is not False
         try:
             index = retained_declaration_index_set(
                 self.store,
@@ -443,6 +462,8 @@ class Runtime:
             retryable=True,
         )
 
+    @budgeted("dependency", lambda self, _args: dependency_roots(self.home))
+    @download_budgeted
     def prepare(
         self,
         spec: EnvironmentSpec,
@@ -452,6 +473,8 @@ class Runtime:
     ) -> EnvironmentLock:
         return self.resolver.resolve(spec, timeout=timeout, cancel=cancel)
 
+    @budgeted("dependency", lambda self, _args: dependency_roots(self.home))
+    @download_budgeted
     def open_exact(
         self,
         lock: EnvironmentLock,
@@ -584,7 +607,7 @@ class Runtime:
         libraries: list[dict[str, Any]] = []
         environment_download: int | None = 0 if ready and not sparse else None
         if not ready or sparse:
-            for environment_library in self.libraries:
+            for environment_library in self.libraries if self.availability != "local" else ():
                 try:
                     capsule = environment_library.plan_capsule(lock, tuple(import_roots))
                     environment_plan: dict[str, Any] = {
@@ -614,7 +637,9 @@ class Runtime:
         toolchain_plans: list[dict[str, Any]] = []
         toolchain_download: int | None = 0 if self._toolchain_installed(lock.toolchain) else None
         if toolchain_download is None:
-            for toolchain_library in self.toolchain_libraries:
+            for toolchain_library in (
+                self.toolchain_libraries if self.availability != "local" else ()
+            ):
                 try:
                     toolchain_plan = toolchain_library.plan(lock.toolchain)
                 except EnvironmentError as exc:
@@ -698,6 +723,15 @@ class Runtime:
         """Report whether a toolchain is usable locally, without installing anything."""
         return self._toolchain_installed(toolchain)
 
+    def toolchain_build_ready(self, toolchain: str) -> bool:
+        """Inspect Lake-build capability separately from check-only installations."""
+        available = getattr(self.toolchains, "is_build_available_locally", None)
+        return (
+            bool(available(toolchain))
+            if callable(available)
+            else self._toolchain_installed(toolchain)
+        )
+
     def _toolchain_installed(self, toolchain: str) -> bool:
         """Answer without bootstrapping Elan or installing anything."""
         try:
@@ -758,6 +792,8 @@ class Runtime:
             self.signature_verifier,
         )
 
+    @budgeted("dependency", lambda self, _args: dependency_roots(self.home))
+    @download_budgeted
     def download_program(
         self,
         library: str,
@@ -766,6 +802,12 @@ class Runtime:
         expected_source_revision: str | None = None,
     ) -> ReadyProgram:
         """Download the compatible ready-to-run program from a library."""
+        if self.availability == "local":
+            raise DownloadUnavailable(
+                "local-only mode does not permit program downloads",
+                reason_code="local_candidate_missing",
+                retryable=False,
+            )
         return self._program_library(library).pull(
             reference, expected_source_revision=expected_source_revision
         )
@@ -1167,6 +1209,12 @@ class Runtime:
         toolchain: str | None = None,
     ) -> EnvironmentSpec:
         """Discover GitHub-style package references and return an exact specification."""
+        if self.availability == "local":
+            raise SpecificationError(
+                "local-only reference discovery requires a cataloged exact lock"
+            )
+        if self.max_download_bytes is not None:
+            raise DownloadLimitExceeded("reference discovery has unknown Git transfer size")
         references = normalize_references(tuple(packages))
         if not references:
             raise SpecificationError("at least one package reference is required")
@@ -1217,6 +1265,7 @@ class Runtime:
                     )
         return EnvironmentSpec(selected, tuple(package.package for package in discovered))
 
+    @download_budgeted
     def prepare_references(
         self,
         packages: Sequence[str | PackageReference],
@@ -1240,6 +1289,7 @@ class Runtime:
             cancel=cancel,
         )
 
+    @download_budgeted
     def open_references(
         self,
         packages: Sequence[str | PackageReference],
@@ -1256,6 +1306,7 @@ class Runtime:
             cancel=cancel,
         )
 
+    @download_budgeted
     def open_toolchain(
         self,
         toolchain: str,
@@ -1319,6 +1370,22 @@ class Runtime:
             cancel=cancel,
         )
 
+    def _check_storage_roots(self, path: str | os.PathLike[str]) -> list[Path]:
+        selected = Path(path).expanduser().resolve()
+        try:
+            root = discover_project(selected).root
+        except ProjectNotFoundError:
+            root = selected.parent
+        return [
+            root,
+            self.home / "jobs",
+            self.home / "project-packages",
+            self.home / "project-workspaces",
+            self.home / "lake-artifacts",
+        ]
+
+    @budgeted("build", lambda self, args: self._check_storage_roots(args["path"]))
+    @download_budgeted
     def check_file(
         self,
         path: str | os.PathLike[str],
@@ -1495,6 +1562,16 @@ class Runtime:
             files, entrypoint=entrypoint, policy=policy, cancel=cancel
         )
 
+    @budgeted(
+        "build",
+        lambda self, args: [
+            discover_project(args["project"]).root,
+            self.home / "project-packages",
+            self.home / "project-workspaces",
+            self.home / "lake-artifacts",
+        ],
+    )
+    @download_budgeted
     def build(
         self,
         project: str | os.PathLike[str],
@@ -1504,6 +1581,7 @@ class Runtime:
         timeout: float = 900,
         shared: bool | None = None,
         artifact_cache: bool = True,
+        cancel: threading.Event | None = None,
     ) -> ExecutionResult:
         """Build an existing trusted Lake project outside the environment store."""
         context = discover_project(project)
@@ -1521,9 +1599,11 @@ class Runtime:
             targets=targets,
             policy=ExecutionPolicy(timeout_seconds=timeout, max_output_bytes=10_000_000),
             shared=selected_shared,
+            cancel=cancel,
             restore_artifacts=artifact_cache,
         )
 
+    @budgeted("build", lambda self, args: self._check_storage_roots(args["project"]))
     def check_project(
         self,
         project: str | os.PathLike[str] = ".",
@@ -1549,6 +1629,8 @@ class Runtime:
             cancel=cancel,
         )
 
+    @budgeted("dependency", lambda self, _args: dependency_roots(self.home))
+    @download_budgeted
     def prepare_shared_project(
         self,
         project: str | os.PathLike[str],
@@ -1615,6 +1697,8 @@ class Runtime:
                 f"graph for {context.root}" + (f":\n{detail}" if detail else "")
             )
 
+    @budgeted("dependency", lambda self, _args: dependency_roots(self.home))
+    @download_budgeted
     def attach_projects(
         self,
         path: str | os.PathLike[str],
@@ -1682,6 +1766,16 @@ class Runtime:
         guide.write_text(_DEFAULT_AGENTS_GUIDE, encoding="utf-8")
         return guide
 
+    def readiness(
+        self, paths: Sequence[str | os.PathLike[str]], *, recursive: bool = False
+    ) -> dict[str, Any]:
+        """Read-only exact local input inventory; never a Lean verdict."""
+        from .readiness import project_readiness
+
+        return project_readiness(
+            self, [Path(path).expanduser().resolve() for path in paths], recursive=recursive
+        )
+
     def scan_projects(
         self, path: str | os.PathLike[str], *, recursive: bool = True
     ) -> ProjectScanResult:
@@ -1725,7 +1819,7 @@ class Runtime:
 
     def _ensure_project_toolchain(self, toolchain: str) -> None:
         """Ensure the full Lake-capable toolchain under the selected policy."""
-        installed = self._toolchain_installed(toolchain)
+        installed = self.toolchain_build_ready(toolchain)
         if not installed and self.availability == "local":
             raise ProjectError(
                 f"offline project setup requires the full {toolchain} toolchain locally"
@@ -1795,7 +1889,7 @@ class Runtime:
                 0,
                 True,
                 (),
-                self._toolchain_installed(context.toolchain),
+                self.toolchain_build_ready(context.toolchain),
             )
         current_revision = str(mathlib_package.get("rev"))
         current_version = str(mathlib_package.get("inputRev") or current_revision).removeprefix("v")
@@ -1827,7 +1921,7 @@ class Runtime:
             if isinstance(entry, dict) and entry.get("name") == "mathlib"
         )
         target_version = latest.id.removeprefix("mathlib-v")
-        toolchain_installed = self._toolchain_installed(latest.toolchain)
+        toolchain_installed = self.toolchain_build_ready(latest.toolchain)
         changed = current_revision != str(latest_mathlib.get("rev")) or (
             context.toolchain != latest.toolchain
         )
@@ -2094,7 +2188,7 @@ class Runtime:
                     )
             adoption = self.plan_project_adoption(target).projects[0]
             installed = (
-                self._toolchain_installed(adoption.toolchain)
+                self.toolchain_build_ready(adoption.toolchain)
                 if adoption.toolchain is not None
                 else False
             )
@@ -2131,7 +2225,7 @@ class Runtime:
                 f"{selected.toolchain}, not {selected_toolchain}"
             )
         if mathlib is None:
-            installed = self._toolchain_installed(selected_toolchain)
+            installed = self.toolchain_build_ready(selected_toolchain)
             blockers = self._project_toolchain_blockers(selected_toolchain, installed=installed)
             return ProjectInitPlan(
                 target,
@@ -2154,7 +2248,7 @@ class Runtime:
             selected_packages,
             seed_from=Path(seed_from) if seed_from is not None else None,
         )
-        toolchain_installed = self._toolchain_installed(selected_toolchain)
+        toolchain_installed = self.toolchain_build_ready(selected_toolchain)
         init_blockers = list(
             self._project_toolchain_blockers(
                 selected_toolchain,
@@ -2739,6 +2833,15 @@ class Runtime:
             self._backend_streams_output = supported
         return {"on_output": observer.line} if supported else {}
 
+    @budgeted(
+        "build",
+        lambda self, args: [
+            args["cwd"],
+            self.home / "project-packages",
+            self.home / "project-workspaces",
+            self.home / "lake-artifacts",
+        ],
+    )
     def _raw_result(
         self,
         command: Sequence[str],

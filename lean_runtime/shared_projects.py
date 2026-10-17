@@ -31,7 +31,7 @@ from ._project_identity import (
     resolved_path_entries,
 )
 from ._transaction import publish_tree, staged_tree
-from .errors import ProjectError
+from .errors import DownloadLimitExceeded, ProjectError
 from .events import EventEmitter
 from .locking import FileLock, LockPaths
 from .package_ids import (
@@ -42,6 +42,7 @@ from .package_ids import (
 )
 from .projects import ProjectContext, discover_project
 from .serialization import sha256_id, write_json_atomic
+from .storage_limits import StorageLimits, budgeted, check_storage, dependency_roots
 from .store import (
     clone_tree,
     invalidate_storage_ledger,
@@ -247,6 +248,9 @@ class SharedProjectManager:
         toolchains: ToolchainManager | None = None,
     ) -> None:
         self.home = home
+        self.storage_limits = StorageLimits()
+        self.allow_download = True
+        self.max_download_bytes: int | None = None
         self.events = events
         self.toolchains = toolchains
         self.root = home / "project-workspaces"
@@ -1003,6 +1007,14 @@ class SharedProjectManager:
                         cancel=cancel,
                     )
                 else:
+                    if not self.allow_download:
+                        raise ProjectError(
+                            f"exact dependency {url}@{revision} is unavailable locally"
+                        )
+                    if self.max_download_bytes is not None:
+                        raise DownloadLimitExceeded(
+                            "Git fetch size is unknown under download budget"
+                        )
                     self.events.emit(
                         "project.shared.source_started",
                         f"Fetching exact project dependency from {url}",
@@ -1155,6 +1167,7 @@ class SharedProjectManager:
             else None
         )
 
+    @budgeted("dependency", lambda self, _args: dependency_roots(self.home))
     def prepare(
         self,
         context: ProjectContext,
@@ -1386,6 +1399,7 @@ class SharedProjectManager:
                                         package_staging / ".lean-runtime-package.json",
                                         package_identity,
                                     )
+                                    check_storage()
                                     package_staging.replace(final_target)
                                 except BaseException:
                                     if package_staging.exists():
@@ -1401,6 +1415,7 @@ class SharedProjectManager:
                 write_json_atomic(
                     staging / "workspace.json", {**identity, "package_ids": package_ids}
                 )
+                check_storage()
                 if destination.exists():
                     remove_tree(destination)
                 staging.replace(destination)

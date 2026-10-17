@@ -56,8 +56,10 @@ from .publisher_verification import CosignVerifier
 from .run_cli import run as _run_front_door
 from .runtime import Runtime
 from .specs import EnvironmentSpec
+from .storage_limits import StorageLimits
 from .store import CleanupReport, DownloadCleanupReport, StoreStatus
 from .timings import render_timings
+from .toolchains import normalize_toolchain
 from .wire import (
     envelope,
     error,
@@ -941,7 +943,12 @@ def _add_check_v4(parser: argparse.ArgumentParser, *, watch: bool = False) -> No
             action="store_true",
             help="allow standalone discovery to build an environment from source",
         )
-        parser.add_argument("--max-download", type=parse_byte_size, help=argparse.SUPPRESS)
+        parser.add_argument(
+            "--max-download",
+            type=parse_byte_size,
+            help=argparse.SUPPRESS,
+            default=argparse.SUPPRESS,
+        )
     _add_common_output(parser, json_flag=not watch)
     if not watch:
         parser.add_argument(
@@ -987,7 +994,6 @@ def _add_check_v4(parser: argparse.ArgumentParser, *, watch: bool = False) -> No
             lock_out=None,
             no_source_build=False,
             allow_source_build=False,
-            max_download=None,
             json=False,
             repeat=None,
             warmup=1,
@@ -1129,7 +1135,41 @@ Advanced namespaces:
         default=configured.get("verification_tool", "cosign"),
         help=argparse.SUPPRESS,
     )
+    root.add_argument(
+        "--max-download",
+        type=parse_byte_size,
+        default=None,
+        help="maximum OCI payload transfer per operation",
+    )
+    root.add_argument(
+        "--borrowed-elan-root",
+        action="append",
+        default=[],
+        type=Path,
+        help="borrow toolchains from an existing Elan home (repeatable; never pruned)",
+    )
+    root.add_argument(
+        "--max-toolchain-bytes",
+        type=parse_byte_size,
+        help="maximum new unpacked toolchain bytes per operation",
+    )
+    root.add_argument(
+        "--max-dependency-bytes",
+        type=parse_byte_size,
+        help="maximum dependency-cache growth per operation (monitored)",
+    )
+    root.add_argument(
+        "--max-build-bytes",
+        type=parse_byte_size,
+        help="maximum build storage growth per operation (monitored)",
+    )
     commands = root.add_subparsers(dest="surface_command", required=True, metavar="COMMAND")
+
+    readiness = commands.add_parser("readiness", help="inspect exact local inputs across projects")
+    readiness.add_argument("paths", nargs="+", type=Path)
+    readiness.add_argument("--recursive", action="store_true")
+    readiness.add_argument("--json", action="store_true")
+    readiness.set_defaults(command="readiness")
 
     new = commands.add_parser("new", help="create a new Lean project")
     new.add_argument("path", type=Path, help="directory to create the project in")
@@ -1156,7 +1196,6 @@ Advanced namespaces:
         toolchain=None,
         seed_from=None,
         plan=False,
-        max_download=None,
     )
 
     adopt = commands.add_parser("adopt", help="adopt existing Lake project(s)")
@@ -1248,7 +1287,7 @@ this without running Lean.""",
         "--offline", action="store_true", help="use only local artifacts; never download"
     )
     _add_common_output(update)
-    update.set_defaults(command="update", seed_from=None, plan=False, max_download=None)
+    update.set_defaults(command="update", seed_from=None, plan=False)
 
     publish = commands.add_parser("publish", help="configure publication for the current project")
     publish.add_argument(
@@ -1679,6 +1718,14 @@ first download.""",
         help="prior catalog whose unchanged entries skip module re-inventory",
     )
     cb.set_defaults(command="catalog-build")
+    for subparser in (build, adopt, readiness):
+        subparser.add_argument("--max-download", type=parse_byte_size, default=argparse.SUPPRESS)
+    for subparser in (build, check, adopt, readiness):
+        subparser.add_argument(
+            "--borrowed-elan-root", action="append", type=Path, default=argparse.SUPPRESS
+        )
+        for flag in ("--max-toolchain-bytes", "--max-dependency-bytes", "--max-build-bytes"):
+            subparser.add_argument(flag, type=parse_byte_size, default=argparse.SUPPRESS)
     return root
 
 
@@ -1787,6 +1834,10 @@ def _standalone_check_args(args: argparse.Namespace, source: Path) -> argparse.N
         quiet=args.quiet,
         verbose=args.verbose,
         max_download=args.max_download,
+        borrowed_elan_root=args.borrowed_elan_root,
+        max_toolchain_bytes=args.max_toolchain_bytes,
+        max_dependency_bytes=args.max_dependency_bytes,
+        max_build_bytes=args.max_build_bytes,
         plan=args.plan,
         explain=False,
         timings=args.timings,
@@ -1923,13 +1974,17 @@ def main(argv: list[str] | None = None) -> int:
                 if args.command in {"init", "update"} and args.offline
                 else args.availability
             )
-            selected_download_limit = (
-                parse_byte_size(args.max_download)
-                if args.command in {"init", "update"} and args.max_download is not None
-                else None
-            )
+            selected_download_limit = getattr(args, "max_download", None)
+            if isinstance(selected_download_limit, str):
+                selected_download_limit = parse_byte_size(selected_download_limit)
             runtime = Runtime(
                 home=args.home,
+                borrowed_elan_roots=args.borrowed_elan_root,
+                initialize_store=args.command
+                not in {"readiness", "toolchain-info", "toolchain-list"},
+                storage_limits=StorageLimits(
+                    args.max_toolchain_bytes, args.max_dependency_bytes, args.max_build_bytes
+                ),
                 on_event=renderer,
                 availability=selected_availability,
                 libraries=args.libraries,
@@ -1939,6 +1994,22 @@ def main(argv: list[str] | None = None) -> int:
                 trusted_issuer=args.trusted_issuer,
                 verification_tool=args.verification_tool,
             )
+            if args.command == "readiness":
+                readiness_report = runtime.readiness(args.paths, recursive=args.recursive)
+                if args.json:
+                    print(json.dumps(readiness_report))
+                else:
+                    for project in readiness_report["projects"]:
+                        print(
+                            f"{project['root']}: "
+                            + (
+                                "inputs local (artifacts unverified)"
+                                if project["inputs_ready"]
+                                else ", ".join(item["code"] for item in project["blockers"])
+                            )
+                        )
+                    print(f"Pool graph conflicts: {len(readiness_report['pool_conflicts'])}")
+                return 0 if readiness_report["inputs_ready"] else 2
             if args.command == "declaration-index-build":
                 lock = EnvironmentLock.load(args.lock)
                 built = build_declaration_index(
@@ -2347,17 +2418,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.command in {"toolchain-list", "toolchain-info"}:
                 toolchains = runtime.toolchains.available_toolchains()
                 if args.command == "toolchain-info":
-                    selected = runtime.toolchains.ensure(args.toolchain)
+                    selected = normalize_toolchain(args.toolchain)
                     toolchains = (selected,)
                 toolchain_payload = [
-                    {
-                        "toolchain": name,
-                        "full": (
-                            runtime.toolchains._full_toolchain_dir(name) / "bin" / "lake"
-                        ).is_file(),
-                        "slim": runtime.toolchains.has_slim(name),
-                    }
-                    for name in toolchains
+                    runtime.toolchains.local_capabilities(name) for name in toolchains
                 ]
                 if args.json:
                     _json(toolchain_payload)
