@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .compositions import CompositionManager
     from .context_resolution import FileContextResolution
     from .discovery.analyzer import SourceEvidence
     from .discovery.candidate import DiscoveryPlan
@@ -236,6 +237,13 @@ def project_toolchain(project: str | os.PathLike[str]) -> str:
 
 class Runtime:
     """Compile environments and execute trusted Lean inputs within them."""
+
+    @property
+    def compositions(self) -> CompositionManager:
+        """Exact snapshot compositions, separate from Git-only environment locks."""
+        from .compositions import CompositionManager
+
+        return CompositionManager(self)
 
     def __init__(
         self,
@@ -1376,12 +1384,17 @@ class Runtime:
             root = discover_project(selected).root
         except ProjectNotFoundError:
             root = selected.parent
+        from .compositions import PIN
+
+        if (root / PIN).is_file():
+            return [root, self.home / "compositions"]
         return [
             root,
             self.home / "jobs",
             self.home / "project-packages",
             self.home / "project-workspaces",
             self.home / "lake-artifacts",
+            self.home / "compositions",
         ]
 
     @budgeted("build", lambda self, args: self._check_storage_roots(args["path"]))
@@ -1562,15 +1575,7 @@ class Runtime:
             files, entrypoint=entrypoint, policy=policy, cancel=cancel
         )
 
-    @budgeted(
-        "build",
-        lambda self, args: [
-            discover_project(args["project"]).root,
-            self.home / "project-packages",
-            self.home / "project-workspaces",
-            self.home / "lake-artifacts",
-        ],
-    )
+    @budgeted("build", lambda self, args: self._check_storage_roots(args["project"]))
     @download_budgeted
     def build(
         self,
@@ -1585,6 +1590,14 @@ class Runtime:
     ) -> ExecutionResult:
         """Build an existing trusted Lake project outside the environment store."""
         context = discover_project(project)
+        from .compositions import PIN
+
+        if (context.root / PIN).is_file():
+            if toolchain is not None and normalize_toolchain(toolchain) != context.toolchain:
+                raise ProjectError("composed projects cannot override their pinned toolchain")
+            return self.compositions.build_project(
+                context.root, targets=targets, timeout=timeout, cancel=cancel
+            )
         self.shared_projects.remember_project(context)
         if toolchain is not None:
             context = replace(context, toolchain=normalize_toolchain(toolchain))
@@ -1615,6 +1628,28 @@ class Runtime:
     ) -> ExecutionResult:
         """Check all declared local libraries through Lake's dependency ordering."""
         context = discover_project(project)
+        from .compositions import PIN
+
+        if (context.root / PIN).is_file():
+            if toolchain is not None and normalize_toolchain(toolchain) != context.toolchain:
+                raise ProjectError("composed projects cannot override their pinned toolchain")
+            from .composition_sources import lean_name
+
+            metadata = tomllib.loads((context.root / "lakefile.toml").read_text())
+            targets = tuple(
+                lean_name(lib["name"]) + ":leanArts" for lib in metadata.get("lean_lib", [])
+            )
+            if not targets:
+                raise ProjectError("project declares no local libraries")
+            return self.compositions.build_project(
+                context.root,
+                targets=targets,
+                timeout=timeout or 900,
+                policy=replace(policy, timeout_seconds=timeout)
+                if policy is not None and timeout is not None
+                else policy,
+                cancel=cancel,
+            )
         self.shared_projects.remember_project(context)
         if toolchain is not None:
             context = replace(context, toolchain=normalize_toolchain(toolchain))
@@ -2758,7 +2793,21 @@ class Runtime:
         policy: ExecutionPolicy,
         cancel: threading.Event | None = None,
     ) -> ExecutionResult:
-        return self.project_executor.check_file(context, source, policy=policy, cancel=cancel)
+        from .compositions import PIN
+
+        def operation(active_cancel: threading.Event | None) -> ExecutionResult:
+            return self.project_executor.check_file(context, source, policy=policy, cancel=cancel)
+
+        if (context.root / PIN).is_file():
+            return self.compositions.check_project_source(
+                context.root,
+                source.read_text(),
+                operation,
+                timeout=policy.timeout_seconds,
+                policy=policy,
+                cancel=cancel,
+            )
+        return operation(cancel)
 
     def _check_project_source(
         self,
@@ -2769,13 +2818,18 @@ class Runtime:
         policy: ExecutionPolicy,
         cancel: threading.Event | None = None,
     ) -> ExecutionResult:
-        return self.project_executor.check_source(
-            context,
-            source,
-            filename=filename,
-            policy=policy,
-            cancel=cancel,
-        )
+        from .compositions import PIN
+
+        def operation(active_cancel: threading.Event | None) -> ExecutionResult:
+            return self.project_executor.check_source(
+                context, source, filename=filename, policy=policy, cancel=active_cancel
+            )
+
+        if (context.root / PIN).is_file():
+            return self.compositions.check_project_source(
+                context.root, source, operation, timeout=policy.timeout_seconds, cancel=cancel
+            )
+        return operation(cancel)
 
     def _build_project(
         self,
@@ -2840,6 +2894,7 @@ class Runtime:
             self.home / "project-packages",
             self.home / "project-workspaces",
             self.home / "lake-artifacts",
+            self.home / "compositions",
         ],
     )
     def _raw_result(

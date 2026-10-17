@@ -1172,6 +1172,7 @@ Advanced namespaces:
     readiness.set_defaults(command="readiness")
 
     new = commands.add_parser("new", help="create a new Lean project")
+    new.add_argument("--env", dest="composed_environment", help="pin a named composed environment")
     new.add_argument("path", type=Path, help="directory to create the project in")
     new.add_argument(
         "--core", action="store_true", help="create a core Lean project without Mathlib"
@@ -1398,6 +1399,51 @@ first download.""",
 
     env = commands.add_parser("env", help="exact immutable environments")
     env_commands = env.add_subparsers(dest="env_command", required=True)
+    composed = env_commands.add_parser(
+        "compose", help="preview or capture an exact repository composition"
+    )
+    composed.add_argument("roots", nargs="+", type=Path)
+    composed.add_argument("--name")
+    composed.add_argument(
+        "--yes", action="store_true", help="capture reviewed sources and register alias"
+    )
+    composed.add_argument("--max-source-bytes", type=int, default=200_000_000)
+    composed.add_argument("--max-files", type=int, default=20000)
+    composed.add_argument("--exclude", action="append", default=[])
+    _add_common_output(composed)
+    composed.set_defaults(command="composition-compose")
+    warm = env_commands.add_parser("warm", help="build imports or all libraries in a composition")
+    warm.add_argument("environment")
+    warm.add_argument("--import", dest="imports", action="append", default=[])
+    warm.add_argument("--all-libraries", action="store_true")
+    warm.add_argument(
+        "--all-targets", action="store_true", help="also build package defaults/executables"
+    )
+    warm.add_argument("--timeout", type=float, default=900)
+    _add_common_output(warm)
+    warm.set_defaults(command="composition-warm")
+    for operation in ("list", "info", "diff", "refs", "clean", "export", "import", "attach"):
+        item = env_commands.add_parser(
+            "composed-" + operation, help=operation + " composed environments"
+        )
+        if operation == "diff":
+            item.add_argument("left")
+            item.add_argument("right")
+        if operation in {"info", "export"}:
+            item.add_argument("environment")
+        if operation in {"import", "attach"}:
+            item.add_argument("path", type=Path)
+        if operation == "export":
+            item.add_argument("--output", required=True, type=Path)
+        if operation == "refs":
+            item.add_argument("--drop-alias")
+            item.add_argument("--drop-project")
+        if operation == "import":
+            item.add_argument("--name")
+        if operation in {"clean", "refs", "import", "attach"}:
+            item.add_argument("--yes", action="store_true")
+        _add_common_output(item)
+        item.set_defaults(command="composition-" + operation)
     env_list = env_commands.add_parser("list", help="list ready environments")
     _add_common_output(env_list)
     env_list.set_defaults(command="environments")
@@ -1981,7 +2027,17 @@ def main(argv: list[str] | None = None) -> int:
                 home=args.home,
                 borrowed_elan_roots=args.borrowed_elan_root,
                 initialize_store=args.command
-                not in {"readiness", "toolchain-info", "toolchain-list"},
+                not in {
+                    "readiness",
+                    "toolchain-info",
+                    "toolchain-list",
+                    "composition-compose",
+                    "composition-info",
+                    "composition-list",
+                    "composition-refs",
+                    "composition-clean",
+                    "composition-import",
+                },
                 storage_limits=StorageLimits(
                     args.max_toolchain_bytes, args.max_dependency_bytes, args.max_build_bytes
                 ),
@@ -1994,6 +2050,63 @@ def main(argv: list[str] | None = None) -> int:
                 trusted_issuer=args.trusted_issuer,
                 verification_tool=args.verification_tool,
             )
+            if args.command.startswith("composition-"):
+                manager = runtime.compositions
+                action = args.command.removeprefix("composition-")
+                if action == "compose":
+                    composition_report = manager.plan(
+                        args.roots,
+                        max_source_bytes=args.max_source_bytes,
+                        max_files=args.max_files,
+                        exclude=tuple(args.exclude),
+                    )
+                    if args.yes:
+                        composition_report = manager.compose(composition_report, name=args.name)
+                    _json(composition_report)
+                    return 0 if composition_report.get("ready", True) else 1
+                if action == "warm":
+                    result = manager.warm(
+                        args.environment,
+                        imports=args.imports,
+                        all_libraries=args.all_libraries,
+                        all_targets=args.all_targets,
+                        timeout=args.timeout,
+                    )
+                    _emit_result(result, args.json)
+                    return 0 if result.ok else 1
+                if action == "list":
+                    _json(manager.list())
+                elif action == "diff":
+                    _json(manager.compare(args.left, args.right).to_dict())
+                elif action == "info":
+                    _json(manager.inspect(args.environment))
+                elif action == "refs":
+                    _json(
+                        manager.references(
+                            alias=args.drop_alias, project=args.drop_project, apply=args.yes
+                        )
+                    )
+                elif action == "clean":
+                    _json(manager.clean(apply=args.yes))
+                elif action == "export":
+                    _json(manager.export(args.environment, args.output))
+                elif action == "import":
+                    _json(manager.import_sources(args.path, name=args.name, apply=args.yes))
+                elif action == "attach":
+                    _json(manager.attach(args.path, apply=args.yes))
+                return 0
+            if args.command == "init" and getattr(args, "composed_environment", None):
+                if args.core or args.ci or not args.agents:
+                    raise ProjectError("--env cannot be combined with --core, --ci or --no-agents")
+                _json(
+                    runtime.compositions.init_project(
+                        args.composed_environment,
+                        args.path,
+                        name=args.name or "Research",
+                        apply=args.yes,
+                    )
+                )
+                return 0
             if args.command == "readiness":
                 readiness_report = runtime.readiness(args.paths, recursive=args.recursive)
                 if args.json:

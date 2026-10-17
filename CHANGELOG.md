@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Add exact named multi-repository compositions with portable snapshot locks,
+  bounded Git-policy source capture, recursive path dependencies, explicit pin,
+  namespace and cycle conflicts, and source-only/check/full-build readiness.
+- Initialize ordinary Lake consumers with immutable composition pins and shared
+  package views. Coordinate shared writes, build imported dependency cones, and
+  preserve unrelated declarative-package artifacts across composition changes;
+  dynamic configurations use conservative whole-composition/consumer keys.
+- Add source-capsule export/import, semantic comparison, explicit consumer/name
+  references and preview/apply cleanup protected against active builds.
+- Scope composition storage monitors to their mutable dependency closure and new
+  shared objects; avoid full-store scans, deduplicate overlapping inventory roots
+  and support cancellation before Lean starts. Source/build growth remains
+  monitored rather than a filesystem quota.
+
 - Local acquisition policy is enforced by toolchain command construction, full
   toolchain acquisition, Elan bootstrap, and source acquisition/resolution seams.
   Toolchain inspection distinguishes check/build readiness and no longer installs.
