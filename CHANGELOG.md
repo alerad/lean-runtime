@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Keep one composition-wide build/dependency growth guard active through raw
+  execution and shared preparation, preventing nested whole-store scans. Budget
+  the exact validated retained workspace (including nested-package/custom-output
+  directories), not a different compatible donor graph.
+
 - Add exact named multi-repository compositions with portable snapshot locks,
   bounded Git-policy source capture, recursive path dependencies, explicit pin,
   namespace and cycle conflicts, and source-only/check/full-build readiness.

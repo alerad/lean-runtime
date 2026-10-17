@@ -7,6 +7,7 @@ cooperative checkpoints. This is a growth guard, never a filesystem quota.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,18 +28,24 @@ class CompositionStorageScope:
             parent: {path.name for path in parent.iterdir()} if parent.exists() else set()
             for parent in self.parents
         }
-        self.mutable = [
-            path / ".lake"
-            for path in seeds.values()
-            if path.resolve().parent == (runtime.home / "project-packages").resolve()
-        ]
+        self.mutable: list[Path] = []
+        for path in seeds.values():
+            self._include_package(path)
+
+    def _include_package(self, path: Path) -> None:
+        owner = (self.runtime.home / "project-packages").resolve()
+        path = path.resolve()
+        if path.is_relative_to(owner):
+            relative = path.relative_to(owner)
+            if relative.parts:
+                # Include the whole selected Git checkout, including nested package
+                # source directories and custom generated targets outside .lake.
+                self.mutable.append(owner / relative.parts[0])
 
     def include(self, workspace: SharedProjectWorkspace) -> None:
-        self.mutable += [workspace.root]
-        self.mutable += [
-            self.runtime.home / "project-packages" / name / ".lake"
-            for name in workspace.package_ids
-        ]
+        self.mutable.append(workspace.root)
+        for entry in json.loads(workspace.overrides_file.read_text())["packages"]:
+            self._include_package(Path(entry["dir"]))
 
     def covers(self, destination: Path) -> bool:
         destination = destination.absolute()

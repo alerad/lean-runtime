@@ -47,7 +47,7 @@ from .dependency_views import dependency_view
 from .errors import EnvironmentError, ProjectError
 from .locking import FileLock
 from .policies import ExecutionPolicy, NetworkPolicy
-from .projects import discover_project
+from .projects import ProjectContext, discover_project
 from .serialization import sha256_id, write_json_atomic
 from .shared_projects import SharedProjectWorkspace
 from .storage_limits import StorageGuard, active_scope_budget, budgeted, owned_bytes
@@ -923,8 +923,26 @@ class CompositionManager:
         return overrides, workspace
 
     def _scope(self, lock: dict[str, Any]) -> CompositionStorageScope:
-        seeds = self.runtime.shared_projects.graph_seeds(lock["toolchain"], lock["git_packages"])
-        return CompositionStorageScope(self.runtime, self.root, seeds)
+        external = self.root / "environments" / sha256_id("composed", lock) / "external"
+        context = ProjectContext(
+            external, lock["toolchain"], external / "lakefile.toml", external / "lake-manifest.json"
+        )
+        workspace = self.runtime.shared_projects.existing_workspace(
+            context,
+            toolchain_identity=self.runtime.toolchains.local_build_identity(lock["toolchain"]),
+            identity_packages=lock["git_packages"],
+        )
+        if workspace is not None:
+            entries = json.loads(workspace.overrides_file.read_text())["packages"]
+            seeds = {item["name"]: Path(item["dir"]) for item in entries}
+        else:
+            seeds = self.runtime.shared_projects.graph_seeds(
+                lock["toolchain"], lock["git_packages"]
+            )
+        scope = CompositionStorageScope(self.runtime, self.root, seeds)
+        if workspace is not None:
+            scope.mutable.append(workspace.root)
+        return scope
 
     def _execute(self, identifier: str, **kwargs: Any) -> ExecutionResult:
         _, _, lock = self.resolve(identifier)
@@ -938,7 +956,9 @@ class CompositionManager:
                 return self._execute_unbudgeted(identifier, **kwargs)
             if limit < 0:
                 raise ValueError("build allowance must be nonnegative")
-            with StorageGuard("dependency", scope, limit, kwargs.get("cancel")) as guard:
+            with StorageGuard(
+                "build", scope, limit, kwargs.get("cancel"), categories=("dependency",)
+            ) as guard:
                 kwargs["cancel"] = guard.cancel
                 guard_token = self._guard_context.set(guard)
                 try:
@@ -1234,7 +1254,9 @@ class CompositionManager:
             limit = self.storage_limits.build_bytes
             if limit is None:
                 return self._build_project(destination, **kwargs)
-            with StorageGuard("dependency", scope, limit, kwargs.get("cancel")) as guard:
+            with StorageGuard(
+                "build", scope, limit, kwargs.get("cancel"), categories=("dependency",)
+            ) as guard:
                 kwargs["cancel"] = guard.cancel
                 return self._build_project(destination, **kwargs)
         finally:

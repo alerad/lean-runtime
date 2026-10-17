@@ -131,11 +131,28 @@ def test_corrupt_snapshot_and_registry_fail_closed(manager, tmp_path):
 
 
 @pytest.mark.integration
-def test_real_shared_build_init_checks_and_add_member(tmp_path):
+def test_real_shared_build_init_checks_and_add_member(tmp_path, monkeypatch):
     elan = os.environ.get("LEAN_RUNTIME_TEST_ELAN")
     if not elan:
         pytest.skip("set LEAN_RUNTIME_TEST_ELAN to an existing full 4.33.1 toolchain root")
-    runtime = Runtime(home=tmp_path / "runtime", availability="local", borrowed_elan_roots=[elan])
+    import lean_runtime.storage_limits as accounting
+    from lean_runtime.storage_limits import StorageLimits
+
+    original_inventory = accounting.owned_bytes
+    home = tmp_path / "runtime"
+
+    def scoped_inventory(roots, **kwargs):
+        assert home / "project-packages" not in roots, "raw build re-entered whole-store budgeting"
+        assert home / "project-workspaces" not in roots, "prepare re-entered whole-store budgeting"
+        return original_inventory(roots, **kwargs)
+
+    monkeypatch.setattr(accounting, "owned_bytes", scoped_inventory)
+    runtime = Runtime(
+        home=home,
+        availability="local",
+        borrowed_elan_roots=[elan],
+        storage_limits=StorageLimits(build_bytes=16_000_000, dependency_bytes=32_000_000),
+    )
     manager = runtime.compositions
     roots = [project(tmp_path / name, name) for name in ["Alpha", "Beta", "Gamma"]]
     originals = [inventory(root) for root in roots]
@@ -269,3 +286,68 @@ def test_gc_reclaims_unreferenced_views_while_retaining_live_environment(manager
     with pytest.raises(ProjectError, match="references"):
         manager.clean(apply=True)
     assert (manager.root / "packages" / kept).exists()
+
+
+def test_composition_guard_covers_nested_build_and_dependency_budgets(tmp_path):
+    from lean_runtime.storage_limits import StorageGuard, StorageLimits, budgeted
+
+    class Owner:
+        storage_limits = StorageLimits(build_bytes=1, dependency_bytes=1)
+
+        @budgeted("build", lambda *_: pytest.fail("nested build must not scan whole store"))
+        def build(self):
+            return True
+
+        @budgeted("dependency", lambda *_: pytest.fail("nested prepare must not scan whole store"))
+        def prepare(self):
+            return True
+
+    with StorageGuard("build", [tmp_path], 1, categories=("dependency",)):
+        assert Owner().build()
+        assert Owner().prepare()
+
+
+def test_selected_nested_package_scope_counts_custom_outputs(tmp_path):
+    from lean_runtime.composition_storage import CompositionStorageScope
+    from lean_runtime.storage_limits import owned_bytes
+
+    runtime = Runtime(home=tmp_path / "runtime", availability="local", initialize_store=False)
+    package = runtime.home / "project-packages" / "pkg_fixture"
+    nested = package / "lean"
+    nested.mkdir(parents=True)
+    (package / "custom-output").write_bytes(b"12345")
+    scope = CompositionStorageScope(runtime, runtime.home / "compositions", {"lib": nested})
+    assert scope.covers(package / "custom-output")
+    assert owned_bytes(scope()) == 5
+
+
+@pytest.mark.integration
+def test_real_captured_path_dependencies_survive_original_relocation(tmp_path):
+    from lean_runtime.storage_limits import StorageLimits
+
+    elan = os.environ.get("LEAN_RUNTIME_TEST_ELAN")
+    if not elan:
+        pytest.skip("set LEAN_RUNTIME_TEST_ELAN to an existing full 4.33.1 toolchain root")
+    runtime = Runtime(
+        home=tmp_path / "runtime",
+        availability="local",
+        borrowed_elan_roots=[elan],
+        storage_limits=StorageLimits(build_bytes=16_000_000, dependency_bytes=32_000_000),
+    )
+    beta = project(tmp_path / "b", "Beta")
+    alpha = project(
+        tmp_path / "a", "Alpha", packages=[{"type": "path", "name": "beta", "dir": "../b"}]
+    )
+    with (alpha / "lakefile.toml").open("a") as handle:
+        handle.write('\n[[require]]\nname="beta"\npath="../b"\n')
+    (alpha / "Alpha.lean").write_text("import Beta\ndef alpha : Nat := beta + 1\n")
+    manager = runtime.compositions
+    manager.compose(manager.plan([alpha]), name="paths")
+    alpha.rename(tmp_path / "original-a")
+    beta.rename(tmp_path / "original-b")
+    target = tmp_path / "new"
+    manager.init_project("paths", target, apply=True)
+    (target / "Research.lean").write_text("import Alpha\nexample : alpha = 2 := rfl\n")
+    result = runtime.build(target)
+    assert result.ok, result.stdout + result.stderr
+    assert runtime.check_file(target / "Research.lean").ok

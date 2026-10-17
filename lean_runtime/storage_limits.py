@@ -119,8 +119,11 @@ class StorageGuard:
         roots: list[Path] | Callable[[], list[Path]],
         limit: int,
         cancel: threading.Event | None = None,
+        *,
+        categories: tuple[str, ...] = (),
     ) -> None:
         self.category, self.roots, self.limit = category, roots, limit
+        self.categories = (category, *categories)
         self.cancel = threading.Event()
         self.parent_cancel = cancel
         self.finished = threading.Event()
@@ -196,7 +199,7 @@ def budgeted(
         def run(self: Any, *args: Any, **kwargs: Any) -> R:
             limits = getattr(self, "storage_limits", StorageLimits())
             limit = getattr(limits, f"{category}_bytes")
-            if limit is None or any(guard.category == category for guard in _ACTIVE.get()):
+            if limit is None or any(category in guard.categories for guard in _ACTIVE.get()):
                 return function(self, *args, **kwargs)
             bound = signature.bind(self, *args, **kwargs)
             bound.apply_defaults()
