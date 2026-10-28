@@ -104,3 +104,26 @@ def test_corrupt_manifest_defers_to_lake(tmp_path: Path) -> None:
     context = discover_project(tmp_path)
     guard = _executor()._bootstrap_guard(context)
     assert isinstance(guard, nullcontext)
+
+
+@pytest.mark.parametrize("invalid", [None, "missing", "partial", "duplicate", "git", "argument"])
+def test_shared_overrides_only_bypass_lock_when_complete(tmp_path: Path, invalid) -> None:
+    _pin(tmp_path)
+    _manifest(tmp_path, "mathlib")
+    shared = tmp_path / "shared-mathlib"
+    if invalid != "missing":
+        shared.mkdir()
+    rows = [{"name": "mathlib", "type": "path", "dir": str(shared)}]
+    if invalid == "partial":
+        rows = []
+    if invalid == "duplicate":
+        rows *= 2
+    if invalid == "git":
+        rows[0]["type"] = "git"
+    overrides = tmp_path / "overrides.json"
+    overrides.write_text(json.dumps({"packages": rows}))
+    command = ["lake", f"--packages={overrides}", "env", "extract"]
+    if invalid == "argument":
+        command = ["lake", "env", "extract", f"--packages={overrides}"]
+    guard = _executor()._bootstrap_guard(discover_project(tmp_path), command)
+    assert isinstance(guard, nullcontext if invalid is None else FileLock)

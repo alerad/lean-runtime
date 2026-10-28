@@ -246,6 +246,7 @@ def test_new_rejects_an_existing_project(monkeypatch: pytest.MonkeyPatch, tmp_pa
         toolchain_installed=True,
         seed_root=None,
         download_bytes=0,
+        download_bytes_complete=True,
         blockers=(),
         ready=True,
     )
@@ -264,6 +265,7 @@ def test_new_guided_creation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
         toolchain_installed=True,
         seed_root=None,
         download_bytes=0,
+        download_bytes_complete=True,
         blockers=(),
         ready=True,
     )
@@ -286,6 +288,7 @@ def test_new_hint_uses_the_module_directory_lake_created(
         toolchain_installed=True,
         seed_root=None,
         download_bytes=0,
+        download_bytes_complete=True,
         blockers=(),
         ready=True,
     )
@@ -769,3 +772,29 @@ def test_matrix_table_reports_a_verdict_column() -> None:
     source = inspect.getsource(cli)
     assert r"Context\tVerdict\tTime\tEnvironment" in source
     assert r"Context\tResult\tTime\tEnvironment" not in source
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--help"], ["Share compatible repositories", "env compose"]),
+        (
+            ["env", "--help"],
+            ["Repository workflow", "--yes", "not hard disk quotas", "NOT toolchains", "Git-only"],
+        ),
+        (["env", "compose", "--help"], ["Review", "implicit pin upgrades", "default: 200000000"]),
+        (
+            ["env", "warm", "--help"],
+            ["repeatable", "build every selected local library", "timeout in seconds"],
+        ),
+        (["env", "composed-clean", "--help"], ["unreferenced", "default is preview only"]),
+        (["env", "composed-export", "--help"], ["excluding toolchains and build artifacts"]),
+    ],
+)
+def test_composition_help_documents_workflow_and_safety(args, expected, capsys):
+    with pytest.raises(SystemExit) as exc:
+        parser().parse_args(args)
+    assert exc.value.code == 0
+    output = " ".join(capsys.readouterr().out.split())
+    for fragment in expected:
+        assert fragment in output

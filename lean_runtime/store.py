@@ -109,6 +109,9 @@ def environment_identity(lock: EnvironmentLock, build_profile: str = "release") 
 
 def clone_tree(source: Path, destination: Path) -> None:
     """Clone a tree using copy-on-write where the host supports it."""
+    from .storage_limits import preflight_clone
+
+    preflight_clone(source, destination)
     if destination.exists():
         raise EnvironmentError(f"clone destination already exists: {destination}")
     progress = CountedProgress(
@@ -454,7 +457,7 @@ class StoreStatus:
 class EnvironmentStore:
     """Filesystem-backed, atomically published content-addressed store."""
 
-    def __init__(self, home: Path) -> None:
+    def __init__(self, home: Path, *, create: bool = True) -> None:
         self.home = home
         self.sources = home / "sources" / "git"
         self.locks = home / "locks"
@@ -472,6 +475,8 @@ class EnvironmentStore:
         self.declaration_index_locks = self.declaration_indexes / "locks"
         self.lock_paths = LockPaths(home)
         self.lock_dir = self.lock_paths.root
+        if not create:
+            return
         for path in (
             self.sources,
             self.locks,

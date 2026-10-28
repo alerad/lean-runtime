@@ -24,6 +24,13 @@ def pytest_configure(config: pytest.Config) -> None:
         config.option.basetemp = os.path.join(tempfile.gettempdir(), "lrt")
 
 
+@pytest.fixture(autouse=True)
+def _no_upstream_release_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep `new`/`update` tests off the network; tests opt back in explicitly."""
+    monkeypatch.setenv("LEAN_RUNTIME_NO_UPSTREAM_CHECK", "1")
+    monkeypatch.setenv("LEAN_RUNTIME_CATALOG", "bundled")
+
+
 def make_lock(
     marker: str,
     *,

@@ -18,11 +18,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .compositions import CompositionManager
     from .context_resolution import FileContextResolution
     from .discovery.analyzer import SourceEvidence
     from .discovery.candidate import DiscoveryPlan
-    from .discovery.catalog import Catalog
+    from .discovery.catalog import Catalog, CatalogEntry
     from .discovery.policy import DiscoveryPolicy
+    from .discovery.remote import RefreshOutcome
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -52,6 +54,7 @@ from .errors import (
     LeanRuntimeError,
     PolicyError,
     ProjectError,
+    ProjectNotFoundError,
     SpecificationError,
     ToolchainError,
 )
@@ -109,6 +112,7 @@ from .resolver import EnvironmentResolver
 from .serialization import sha256_id, sha256_text
 from .shared_projects import SharedProjectManager, SharedProjectWorkspace
 from .specs import EnvironmentSpec, GitPackage
+from .storage_limits import StorageLimits, budgeted, dependency_roots, download_budgeted
 from .store import (
     CleanupReport,
     DownloadCleanupReport,
@@ -172,9 +176,11 @@ through Lean Runtime. Read `lean-toolchain`, the Lake configuration, and
 
 
 def _bundled_lock_for_references(
-    packages: Sequence[str | PackageReference], toolchain: str | None
+    packages: Sequence[str | PackageReference],
+    toolchain: str | None,
+    catalog: Catalog | None = None,
 ) -> EnvironmentLock | None:
-    """Match a single exact alias tag to its bundled, downloadable catalog lock."""
+    """Match a single exact alias tag to its cataloged, downloadable lock."""
     references = normalize_references(packages)
     if len(references) != 1:
         return None
@@ -192,10 +198,12 @@ def _bundled_lock_for_references(
     if alias is None:
         return None
     entry_id = f"{alias}-{reference.revision}"
-    # Imported lazily: discovery's probe layer also imports Runtime.
-    from .discovery.defaults import default_catalog
+    if catalog is None:
+        # Imported lazily: discovery's probe layer also imports Runtime.
+        from .discovery.defaults import default_catalog
 
-    entry = next((item for item in default_catalog().entries if item.id == entry_id), None)
+        catalog = default_catalog()
+    entry = next((item for item in catalog.entries if item.id == entry_id), None)
     if entry is None:
         return None
     if toolchain is not None and normalize_toolchain(toolchain) != entry.toolchain:
@@ -235,16 +243,26 @@ def project_toolchain(project: str | os.PathLike[str]) -> str:
 class Runtime:
     """Compile environments and execute trusted Lean inputs within them."""
 
+    @property
+    def compositions(self) -> CompositionManager:
+        """Exact snapshot compositions, separate from Git-only environment locks."""
+        from .compositions import CompositionManager
+
+        return CompositionManager(self)
+
     def __init__(
         self,
         *,
         home: str | os.PathLike[str] | None = None,
         toolchains: ToolchainManager | None = None,
         backend: Backend | None = None,
+        borrowed_elan_roots: Sequence[str | os.PathLike[str]] = (),
         on_event: EventCallback | None = None,
         availability: str | None = None,
         libraries: Sequence[str] | None = None,
         max_download_bytes: int | None = None,
+        storage_limits: StorageLimits | None = None,
+        initialize_store: bool = True,
         allow_source_build: bool = True,
         publisher_verification: str = "ignore",
         trusted_publisher: str | None = None,
@@ -268,11 +286,24 @@ class Runtime:
             )
         self.events = EventEmitter(on_event)
         activate(self.events)
-        self.toolchains = toolchains or ToolchainManager(home, events=self.events)
+        self.toolchains = toolchains or ToolchainManager(
+            home,
+            events=self.events,
+            allow_download=availability != "local",
+            borrowed_elan_roots=tuple(borrowed_elan_roots),
+        )
+        if availability == "local":
+            self.toolchains.allow_download = False
+        self.toolchains.max_download_bytes = max_download_bytes
         self.home = self.toolchains.home
+        self.storage_limits = storage_limits or StorageLimits()
+        self.toolchains.storage_limits = self.storage_limits
         self.backend = backend or LocalBackend()
-        self.store = EnvironmentStore(self.home)
+        self.store = EnvironmentStore(self.home, create=initialize_store)
         self.shared_projects = SharedProjectManager(self.home, self.events, self.toolchains)
+        self.shared_projects.storage_limits = self.storage_limits
+        self.shared_projects.allow_download = availability != "local"
+        self.shared_projects.max_download_bytes = max_download_bytes
         self.lake_cache = LakeArtifactCache(self.home, self.toolchains, self.events)
         self.header_cache = LeanHeaderCache(self.home, self.toolchains, self.events)
         self.identifier_resolver = IdentifierResolver(self.home)
@@ -283,6 +314,7 @@ class Runtime:
         self.environments = EnvironmentManager(
             self.store, self.toolchains, self.backend, self.events
         )
+        self.environments.storage_limits = self.storage_limits
         self.bundles = EnvironmentBundles(self.store, self.toolchains, self.backend, self.events)
         self.programs = ProgramManager(self.store, self.backend, self.events)
         configured_libraries = libraries
@@ -336,6 +368,7 @@ class Runtime:
         self.toolchains.remote_ensure = self._acquire_check_toolchain
         self.environments.sparse_acquirer = self._acquire_sparse_modules
         self.environments.declaration_hint_resolver = self._environment_declaration_hints
+        self._uncataloged_entries: dict[str, CatalogEntry] = {}
 
     def _environment_declaration_hints(
         self,
@@ -360,7 +393,7 @@ class Runtime:
         requested_names = unknown_declaration_names(result)
         if not requested_names:
             return result
-        can_download = self.availability != "local" if allow_download is None else allow_download
+        can_download = self.availability != "local" and allow_download is not False
         try:
             index = retained_declaration_index_set(
                 self.store,
@@ -443,6 +476,8 @@ class Runtime:
             retryable=True,
         )
 
+    @budgeted("dependency", lambda self, _args: dependency_roots(self.home))
+    @download_budgeted
     def prepare(
         self,
         spec: EnvironmentSpec,
@@ -452,6 +487,8 @@ class Runtime:
     ) -> EnvironmentLock:
         return self.resolver.resolve(spec, timeout=timeout, cancel=cancel)
 
+    @budgeted("dependency", lambda self, _args: dependency_roots(self.home))
+    @download_budgeted
     def open_exact(
         self,
         lock: EnvironmentLock,
@@ -584,7 +621,7 @@ class Runtime:
         libraries: list[dict[str, Any]] = []
         environment_download: int | None = 0 if ready and not sparse else None
         if not ready or sparse:
-            for environment_library in self.libraries:
+            for environment_library in self.libraries if self.availability != "local" else ():
                 try:
                     capsule = environment_library.plan_capsule(lock, tuple(import_roots))
                     environment_plan: dict[str, Any] = {
@@ -614,7 +651,9 @@ class Runtime:
         toolchain_plans: list[dict[str, Any]] = []
         toolchain_download: int | None = 0 if self._toolchain_installed(lock.toolchain) else None
         if toolchain_download is None:
-            for toolchain_library in self.toolchain_libraries:
+            for toolchain_library in (
+                self.toolchain_libraries if self.availability != "local" else ()
+            ):
                 try:
                     toolchain_plan = toolchain_library.plan(lock.toolchain)
                 except EnvironmentError as exc:
@@ -698,6 +737,15 @@ class Runtime:
         """Report whether a toolchain is usable locally, without installing anything."""
         return self._toolchain_installed(toolchain)
 
+    def toolchain_build_ready(self, toolchain: str) -> bool:
+        """Inspect Lake-build capability separately from check-only installations."""
+        available = getattr(self.toolchains, "is_build_available_locally", None)
+        return (
+            bool(available(toolchain))
+            if callable(available)
+            else self._toolchain_installed(toolchain)
+        )
+
     def _toolchain_installed(self, toolchain: str) -> bool:
         """Answer without bootstrapping Elan or installing anything."""
         try:
@@ -758,6 +806,8 @@ class Runtime:
             self.signature_verifier,
         )
 
+    @budgeted("dependency", lambda self, _args: dependency_roots(self.home))
+    @download_budgeted
     def download_program(
         self,
         library: str,
@@ -766,6 +816,12 @@ class Runtime:
         expected_source_revision: str | None = None,
     ) -> ReadyProgram:
         """Download the compatible ready-to-run program from a library."""
+        if self.availability == "local":
+            raise DownloadUnavailable(
+                "local-only mode does not permit program downloads",
+                reason_code="local_candidate_missing",
+                retryable=False,
+            )
         return self._program_library(library).pull(
             reference, expected_source_revision=expected_source_revision
         )
@@ -1167,6 +1223,12 @@ class Runtime:
         toolchain: str | None = None,
     ) -> EnvironmentSpec:
         """Discover GitHub-style package references and return an exact specification."""
+        if self.availability == "local":
+            raise SpecificationError(
+                "local-only reference discovery requires a cataloged exact lock"
+            )
+        if self.max_download_bytes is not None:
+            raise DownloadLimitExceeded("reference discovery has unknown Git transfer size")
         references = normalize_references(tuple(packages))
         if not references:
             raise SpecificationError("at least one package reference is required")
@@ -1217,6 +1279,7 @@ class Runtime:
                     )
         return EnvironmentSpec(selected, tuple(package.package for package in discovered))
 
+    @download_budgeted
     def prepare_references(
         self,
         packages: Sequence[str | PackageReference],
@@ -1226,7 +1289,7 @@ class Runtime:
         cancel: threading.Event | None = None,
     ) -> EnvironmentLock:
         """Discover package references and resolve their exact Lake graph."""
-        catalog_lock = _bundled_lock_for_references(packages, toolchain)
+        catalog_lock = _bundled_lock_for_references(packages, toolchain, self.catalog())
         if catalog_lock is not None:
             self.events.emit(
                 "catalog.reference_matched",
@@ -1240,6 +1303,7 @@ class Runtime:
             cancel=cancel,
         )
 
+    @download_budgeted
     def open_references(
         self,
         packages: Sequence[str | PackageReference],
@@ -1256,6 +1320,7 @@ class Runtime:
             cancel=cancel,
         )
 
+    @download_budgeted
     def open_toolchain(
         self,
         toolchain: str,
@@ -1319,6 +1384,27 @@ class Runtime:
             cancel=cancel,
         )
 
+    def _check_storage_roots(self, path: str | os.PathLike[str]) -> list[Path]:
+        selected = Path(path).expanduser().resolve()
+        try:
+            root = discover_project(selected).root
+        except ProjectNotFoundError:
+            root = selected.parent
+        from .compositions import PIN
+
+        if (root / PIN).is_file():
+            return [root, self.home / "compositions"]
+        return [
+            root,
+            self.home / "jobs",
+            self.home / "project-packages",
+            self.home / "project-workspaces",
+            self.home / "lake-artifacts",
+            self.home / "compositions",
+        ]
+
+    @budgeted("build", lambda self, args: self._check_storage_roots(args["path"]))
+    @download_budgeted
     def check_file(
         self,
         path: str | os.PathLike[str],
@@ -1346,7 +1432,6 @@ class Runtime:
                 from .context_resolution import resolve_file_context
                 from .discovery.analyzer import analyze_source
                 from .discovery.api import Discovery
-                from .discovery.defaults import default_catalog
                 from .frontmatter import LeanFrontmatter, parse_frontmatter
 
                 source = source_path.read_text(encoding="utf-8")
@@ -1404,7 +1489,7 @@ class Runtime:
                         cancel=cancel,
                     )
                 discovered = Discovery(
-                    catalog=default_catalog(),
+                    catalog=self.catalog(),
                     runtime=self,
                     filename=source_path.name,
                 ).discover_and_check(source, evidence=evidence, cancel=cancel)
@@ -1446,14 +1531,13 @@ class Runtime:
 
         from .discovery.analyzer import analyze_source
         from .discovery.api import Discovery
-        from .discovery.defaults import default_catalog
         from .discovery.policy import DiscoveryPolicy
 
         source_path = Path(path).expanduser().resolve()
         source = source_path.read_text(encoding="utf-8")
         evidence = analyze_source(source)
         return Discovery(
-            catalog=catalog or default_catalog(),
+            catalog=catalog or self.catalog(),
             policy=policy or DiscoveryPolicy(),
         ).plan(
             source,
@@ -1495,6 +1579,8 @@ class Runtime:
             files, entrypoint=entrypoint, policy=policy, cancel=cancel
         )
 
+    @budgeted("build", lambda self, args: self._check_storage_roots(args["project"]))
+    @download_budgeted
     def build(
         self,
         project: str | os.PathLike[str],
@@ -1504,9 +1590,18 @@ class Runtime:
         timeout: float = 900,
         shared: bool | None = None,
         artifact_cache: bool = True,
+        cancel: threading.Event | None = None,
     ) -> ExecutionResult:
         """Build an existing trusted Lake project outside the environment store."""
         context = discover_project(project)
+        from .compositions import PIN
+
+        if (context.root / PIN).is_file():
+            if toolchain is not None and normalize_toolchain(toolchain) != context.toolchain:
+                raise ProjectError("composed projects cannot override their pinned toolchain")
+            return self.compositions.build_project(
+                context.root, targets=targets, timeout=timeout, cancel=cancel
+            )
         self.shared_projects.remember_project(context)
         if toolchain is not None:
             context = replace(context, toolchain=normalize_toolchain(toolchain))
@@ -1521,9 +1616,11 @@ class Runtime:
             targets=targets,
             policy=ExecutionPolicy(timeout_seconds=timeout, max_output_bytes=10_000_000),
             shared=selected_shared,
+            cancel=cancel,
             restore_artifacts=artifact_cache,
         )
 
+    @budgeted("build", lambda self, args: self._check_storage_roots(args["project"]))
     def check_project(
         self,
         project: str | os.PathLike[str] = ".",
@@ -1535,6 +1632,28 @@ class Runtime:
     ) -> ExecutionResult:
         """Check all declared local libraries through Lake's dependency ordering."""
         context = discover_project(project)
+        from .compositions import PIN
+
+        if (context.root / PIN).is_file():
+            if toolchain is not None and normalize_toolchain(toolchain) != context.toolchain:
+                raise ProjectError("composed projects cannot override their pinned toolchain")
+            from .composition_sources import lean_name
+
+            metadata = tomllib.loads((context.root / "lakefile.toml").read_text())
+            targets = tuple(
+                lean_name(lib["name"]) + ":leanArts" for lib in metadata.get("lean_lib", [])
+            )
+            if not targets:
+                raise ProjectError("project declares no local libraries")
+            return self.compositions.build_project(
+                context.root,
+                targets=targets,
+                timeout=timeout or 900,
+                policy=replace(policy, timeout_seconds=timeout)
+                if policy is not None and timeout is not None
+                else policy,
+                cancel=cancel,
+            )
         self.shared_projects.remember_project(context)
         if toolchain is not None:
             context = replace(context, toolchain=normalize_toolchain(toolchain))
@@ -1549,6 +1668,8 @@ class Runtime:
             cancel=cancel,
         )
 
+    @budgeted("dependency", lambda self, _args: dependency_roots(self.home))
+    @download_budgeted
     def prepare_shared_project(
         self,
         project: str | os.PathLike[str],
@@ -1574,7 +1695,11 @@ class Runtime:
             shared=self.shared_projects,
             jobs=jobs,
             reference_provider=(
-                (lambda requests: published_package_sizes(self.libraries, requests))
+                (
+                    lambda requests: published_package_sizes(
+                        self.libraries, requests, catalog=self.catalog()
+                    )
+                )
                 if self.libraries and self.availability != "local"
                 else None
             ),
@@ -1615,6 +1740,8 @@ class Runtime:
                 f"graph for {context.root}" + (f":\n{detail}" if detail else "")
             )
 
+    @budgeted("dependency", lambda self, _args: dependency_roots(self.home))
+    @download_budgeted
     def attach_projects(
         self,
         path: str | os.PathLike[str],
@@ -1682,6 +1809,16 @@ class Runtime:
         guide.write_text(_DEFAULT_AGENTS_GUIDE, encoding="utf-8")
         return guide
 
+    def readiness(
+        self, paths: Sequence[str | os.PathLike[str]], *, recursive: bool = False
+    ) -> dict[str, Any]:
+        """Read-only exact local input inventory; never a Lean verdict."""
+        from .readiness import project_readiness
+
+        return project_readiness(
+            self, [Path(path).expanduser().resolve() for path in paths], recursive=recursive
+        )
+
     def scan_projects(
         self, path: str | os.PathLike[str], *, recursive: bool = True
     ) -> ProjectScanResult:
@@ -1725,7 +1862,7 @@ class Runtime:
 
     def _ensure_project_toolchain(self, toolchain: str) -> None:
         """Ensure the full Lake-capable toolchain under the selected policy."""
-        installed = self._toolchain_installed(toolchain)
+        installed = self.toolchain_build_ready(toolchain)
         if not installed and self.availability == "local":
             raise ProjectError(
                 f"offline project setup requires the full {toolchain} toolchain locally"
@@ -1795,13 +1932,11 @@ class Runtime:
                 0,
                 True,
                 (),
-                self._toolchain_installed(context.toolchain),
+                self.toolchain_build_ready(context.toolchain),
             )
         current_revision = str(mathlib_package.get("rev"))
         current_version = str(mathlib_package.get("inputRev") or current_revision).removeprefix("v")
-        from .discovery.defaults import default_catalog
-
-        for entry in default_catalog().entries:
+        for entry in self.catalog().entries:
             if not entry.id.startswith("mathlib-v"):
                 continue
             packages = entry.lock.manifest.get("packages")
@@ -1827,7 +1962,7 @@ class Runtime:
             if isinstance(entry, dict) and entry.get("name") == "mathlib"
         )
         target_version = latest.id.removeprefix("mathlib-v")
-        toolchain_installed = self._toolchain_installed(latest.toolchain)
+        toolchain_installed = self.toolchain_build_ready(latest.toolchain)
         changed = current_revision != str(latest_mathlib.get("rev")) or (
             context.toolchain != latest.toolchain
         )
@@ -1974,34 +2109,97 @@ class Runtime:
         """Report the independent-copy cost without changing the project."""
         return plan_detachment(Path(path))
 
-    @staticmethod
-    def _mathlib_catalog_entry(version: str = "latest") -> Any:
-        from .discovery.defaults import default_catalog
+    def catalog(self) -> Catalog:
+        """The bundled catalog plus published additions retained in this home."""
+        from .discovery.remote import effective_catalog
 
+        return effective_catalog(self.home)
+
+    def refresh_catalog(self, *, force: bool = False) -> RefreshOutcome:
+        """Fetch newly published catalog entries; failures leave the catalog unchanged."""
+        from .discovery.remote import RefreshOutcome, refresh_catalog
+
+        if self.availability == "local":
+            return RefreshOutcome("offline")
+        outcome = refresh_catalog(
+            self.home,
+            tuple(library.repository for library in self.libraries),
+            verifier=self.signature_verifier,
+            force=force,
+        )
+        if outcome.added:
+            self.events.emit(
+                "catalog.refreshed",
+                "Catalog gained " + ", ".join(outcome.added),
+                phase="catalog",
+            )
+        return outcome
+
+    def _mathlib_catalog_entry(
+        self, version: str = "latest", *, uncataloged: bool = False
+    ) -> CatalogEntry:
         entries = [
             entry
-            for entry in default_catalog().entries
+            for entry in self.catalog().entries
             if entry.id.startswith("mathlib-v") and "mathlib" in entry.package_names
         ]
         if not entries:
-            raise ProjectError("bundled catalog contains no Mathlib project template")
+            raise ProjectError("catalog contains no Mathlib project template")
 
         def version_key(entry: Any) -> tuple[int, ...]:
             value = entry.id.removeprefix("mathlib-v")
             return tuple(int(part) for part in value.split(".") if part.isdigit())
 
         if version == "latest":
+            if uncataloged:
+                raise ProjectError("--uncataloged needs an explicit --mathlib version")
             return max(entries, key=version_key)
         requested = version.removeprefix("v")
         matching = next((entry for entry in entries if entry.id == f"mathlib-v{requested}"), None)
         if matching is not None:
             return matching
+        if uncataloged:
+            return self._uncataloged_mathlib_entry(requested)
         available = ", ".join(
             entry.id.removeprefix("mathlib-v") for entry in sorted(entries, key=version_key)
         )
         raise ProjectError(
-            f"Mathlib {requested} is not in the bundled catalog; available: {available}"
+            f"Mathlib {requested} is not in the catalog; available: {available}. "
+            "Pass --uncataloged to resolve it from its release tag and build without "
+            "published Lean Runtime artifacts"
         )
+
+    def _uncataloged_mathlib_entry(self, version: str) -> CatalogEntry:
+        """Resolve a Mathlib tag's exact graph the same way catalog builds do."""
+        from .discovery.catalog import CatalogEntry
+
+        retained = self._uncataloged_entries.get(version)
+        if retained is not None:
+            return retained
+        if self.availability == "local":
+            raise ProjectError("offline mode cannot resolve an uncataloged Mathlib release")
+        # Mathlib's post-update hook would otherwise download its multi-gigabyte
+        # compiled cache while only the exact dependency graph is being resolved.
+        previous = os.environ.get("MATHLIB_NO_CACHE_ON_UPDATE")
+        os.environ["MATHLIB_NO_CACHE_ON_UPDATE"] = "1"
+        try:
+            lock = self.prepare(
+                self.spec_from_references([f"github:leanprover-community/mathlib4@v{version}"])
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("MATHLIB_NO_CACHE_ON_UPDATE", None)
+            else:
+                os.environ["MATHLIB_NO_CACHE_ON_UPDATE"] = previous
+        entry = CatalogEntry(
+            id=f"mathlib-v{version}",
+            channel="uncataloged",
+            toolchain=lock.toolchain,
+            lock=lock,
+            created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        self._uncataloged_entries[version] = entry
+        return entry
 
     def _explicit_seed_roots(self, seed_from: Path | None) -> tuple[Path, ...]:
         if seed_from is None:
@@ -2073,6 +2271,7 @@ class Runtime:
         mathlib: str | None = "latest",
         toolchain: str | None = None,
         seed_from: str | os.PathLike[str] | None = None,
+        uncataloged: bool = False,
     ) -> ProjectInitPlan:
         """Plan project creation or adoption without changing the target."""
         target = Path(path).expanduser().resolve()
@@ -2094,7 +2293,7 @@ class Runtime:
                     )
             adoption = self.plan_project_adoption(target).projects[0]
             installed = (
-                self._toolchain_installed(adoption.toolchain)
+                self.toolchain_build_ready(adoption.toolchain)
                 if adoption.toolchain is not None
                 else False
             )
@@ -2123,7 +2322,9 @@ class Runtime:
             or any(not (character.isalnum() or character == "_") for character in name)
         ):
             raise ProjectError("project --name must be a Lean identifier")
-        selected = self._mathlib_catalog_entry(mathlib or "latest")
+        selected = self._mathlib_catalog_entry(
+            mathlib or "latest", uncataloged=uncataloged and mathlib is not None
+        )
         selected_toolchain = normalize_toolchain(toolchain or selected.toolchain)
         if mathlib is not None and selected_toolchain != selected.toolchain:
             raise ProjectError(
@@ -2131,7 +2332,7 @@ class Runtime:
                 f"{selected.toolchain}, not {selected_toolchain}"
             )
         if mathlib is None:
-            installed = self._toolchain_installed(selected_toolchain)
+            installed = self.toolchain_build_ready(selected_toolchain)
             blockers = self._project_toolchain_blockers(selected_toolchain, installed=installed)
             return ProjectInitPlan(
                 target,
@@ -2154,7 +2355,7 @@ class Runtime:
             selected_packages,
             seed_from=Path(seed_from) if seed_from is not None else None,
         )
-        toolchain_installed = self._toolchain_installed(selected_toolchain)
+        toolchain_installed = self.toolchain_build_ready(selected_toolchain)
         init_blockers = list(
             self._project_toolchain_blockers(
                 selected_toolchain,
@@ -2201,6 +2402,7 @@ class Runtime:
         agents: bool = True,
         ci: bool = False,
         seed_from: str | os.PathLike[str] | None = None,
+        uncataloged: bool = False,
     ) -> AdoptionResult:
         """Create or adopt a project; new projects become visible only when complete."""
         target = Path(path).expanduser().resolve()
@@ -2223,8 +2425,11 @@ class Runtime:
             mathlib=mathlib,
             toolchain=toolchain,
             seed_from=seed_from,
+            uncataloged=uncataloged,
         )
-        selected = self._mathlib_catalog_entry(mathlib or "latest")
+        selected = self._mathlib_catalog_entry(
+            mathlib or "latest", uncataloged=uncataloged and mathlib is not None
+        )
         selected_packages = selected.lock.manifest["packages"]
         assert isinstance(selected_packages, list)
         self._ensure_project_toolchain(plan.toolchain)
@@ -2664,7 +2869,21 @@ class Runtime:
         policy: ExecutionPolicy,
         cancel: threading.Event | None = None,
     ) -> ExecutionResult:
-        return self.project_executor.check_file(context, source, policy=policy, cancel=cancel)
+        from .compositions import PIN
+
+        def operation(active_cancel: threading.Event | None) -> ExecutionResult:
+            return self.project_executor.check_file(context, source, policy=policy, cancel=cancel)
+
+        if (context.root / PIN).is_file():
+            return self.compositions.check_project_source(
+                context.root,
+                source.read_text(),
+                operation,
+                timeout=policy.timeout_seconds,
+                policy=policy,
+                cancel=cancel,
+            )
+        return operation(cancel)
 
     def _check_project_source(
         self,
@@ -2675,13 +2894,18 @@ class Runtime:
         policy: ExecutionPolicy,
         cancel: threading.Event | None = None,
     ) -> ExecutionResult:
-        return self.project_executor.check_source(
-            context,
-            source,
-            filename=filename,
-            policy=policy,
-            cancel=cancel,
-        )
+        from .compositions import PIN
+
+        def operation(active_cancel: threading.Event | None) -> ExecutionResult:
+            return self.project_executor.check_source(
+                context, source, filename=filename, policy=policy, cancel=active_cancel
+            )
+
+        if (context.root / PIN).is_file():
+            return self.compositions.check_project_source(
+                context.root, source, operation, timeout=policy.timeout_seconds, cancel=cancel
+            )
+        return operation(cancel)
 
     def _build_project(
         self,
@@ -2739,6 +2963,16 @@ class Runtime:
             self._backend_streams_output = supported
         return {"on_output": observer.line} if supported else {}
 
+    @budgeted(
+        "build",
+        lambda self, args: [
+            args["cwd"],
+            self.home / "project-packages",
+            self.home / "project-workspaces",
+            self.home / "lake-artifacts",
+            self.home / "compositions",
+        ],
+    )
     def _raw_result(
         self,
         command: Sequence[str],

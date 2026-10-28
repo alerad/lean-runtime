@@ -1,6 +1,13 @@
 name: Publish sparse bundled catalog
 
 on:
+  # Merging a catalog update publishes its artifacts, then the catalog itself,
+  # so released Runtimes offer the new environment only once it is downloadable.
+  push:
+    branches: [main]
+    paths:
+      - "catalog/locks/**"
+      - "lean_runtime/discovery/data/catalog.json"
   workflow_dispatch:
     inputs:
       entry:
@@ -28,30 +35,49 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       entries: ${{ steps.entries.outputs.entries }}
+      count: ${{ steps.entries.outputs.count }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - id: entries
         env:
           REQUESTED_ENTRY: ${{ inputs.entry }}
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
         run: |
           python - <<'PY'
-          import glob, json, os, pathlib
-          requested = os.environ["REQUESTED_ENTRY"]
+          import glob, json, os, pathlib, subprocess
           paths = sorted(glob.glob("catalog/locks/*.lock.json"))
+          if os.environ["EVENT_NAME"] == "push":
+              # Only locks added or changed by this push need new artifacts.
+              before = os.environ["BEFORE"]
+              if before.strip("0"):
+                  changed = subprocess.run(
+                      ["git", "diff", "--name-only", "--diff-filter=AM", before, "HEAD",
+                       "--", "catalog/locks"],
+                      check=True, capture_output=True, text=True,
+                  ).stdout.split()
+                  paths = [path for path in paths if path in changed]
+              requested = None
+          else:
+              requested = os.environ["REQUESTED_ENTRY"]
           entries = [
               {"id": pathlib.Path(path).name.removesuffix(".lock.json"), "lock": path}
               for path in paths
           ]
-          if requested != "all":
+          if requested not in {None, "all"}:
               entries = [entry for entry in entries if entry["id"] == requested]
-          if not entries:
-              raise SystemExit(f"unknown catalog entry: {requested}")
+              if not entries:
+                  raise SystemExit(f"unknown catalog entry: {requested}")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("entries=" + json.dumps(entries, separators=(",", ":")) + "\n")
+              output.write(f"count={len(entries)}\n")
           PY
 
   platform:
     needs: matrix
+    if: needs.matrix.outputs.count != '0'
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -97,7 +123,7 @@ jobs:
           # check-capsule frames lacks the authoritative import inventories a
           # publication input needs, so repairing a capsule-only lock must
           # build from source.
-          if [[ "${{ inputs.rebuild }}" == "true" ]]; then
+          if [[ "${{ inputs.rebuild || false }}" == "true" ]]; then
             availability=local
           else
             availability=auto
@@ -184,3 +210,36 @@ jobs:
       - run: python -m pip install .
       - name: Verify every public v3 artifact anonymously
         run: python scripts/registry_preflight.py
+
+  catalog:
+    # Publish the catalog Runtimes fetch at `new`/`update` time. Runs only from
+    # main, after any new artifacts finalized, and only when every cataloged
+    # environment and toolchain is publicly downloadable.
+    needs: [matrix, finalize]
+    if: >-
+      always() && github.ref == 'refs/heads/main'
+      && needs.matrix.result == 'success'
+      && (needs.finalize.result == 'success' || needs.finalize.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install .
+      - uses: sigstore/cosign-installer@v4.1.2
+      - name: Require every cataloged capsule and runtime to be public
+        run: python scripts/registry_preflight.py --capsules-only
+      - name: Publish the signed catalog
+        env:
+          LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
+          LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ github.token }}
+          LIBRARY: ghcr.io/alerad/lean-runtime-cache
+        run: |
+          # The commit time orders publications: re-running an older workflow
+          # is refused instead of rolling clients back, and a later commit that
+          # removes an entry retracts it.
+          lean-runtime catalog publish lean_runtime/discovery/data/catalog.json \
+            --to "$LIBRARY" --sequence "$(git log -1 --format=%ct)" --sign --yes

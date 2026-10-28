@@ -57,6 +57,7 @@ from .oci_protocol import (
 from .packs import PACK_MEDIA_TYPE, PackFrame, SparsePack, project_artifacts, unpack_frame
 from .policies import format_byte_size
 from .serialization import canonical_json_bytes, write_bytes_atomic
+from .storage_limits import check_storage, check_transfer
 from .store import (
     EnvironmentStore,
     environment_identity,
@@ -494,6 +495,7 @@ class OCIRegistryClient:
                 if temporary.exists() and temporary.stat().st_size > size:
                     temporary.unlink()
                 offset = temporary.stat().st_size if temporary.exists() else 0
+                check_transfer(size - offset, consume=True)
                 request = urllib.request.Request(self._url(f"blobs/{digest}"))
                 if offset:
                     request.add_header("Range", f"bytes={offset}-")
@@ -516,6 +518,8 @@ class OCIRegistryClient:
                 try:
                     response = self._request(request)
                     if offset and response.status != 206:
+                        # Reserve the restarted prefix before reading more bytes.
+                        check_transfer(offset, consume=True)
                         offset = 0
                         written = 0
                         observed = hashlib.sha256()
@@ -540,6 +544,7 @@ class OCIRegistryClient:
                             written += len(chunk)
                             if written > size:
                                 raise EnvironmentError("OCI blob exceeds its declared size")
+                            check_storage()
                             observed.update(chunk)
                             output.write(chunk)
                             now = time.monotonic()
@@ -626,6 +631,7 @@ class OCIRegistryClient:
         failure = ""
         for attempt in range(1, _BLOB_INTEGRITY_ATTEMPTS + 1):
             _check_cancelled(cancel, "OCI range download")
+            check_transfer(size, consume=True)
             request = urllib.request.Request(self._url(f"blobs/{digest}"))
             request.add_header("Range", f"bytes={offset}-{offset + size - 1}")
             if attempt > 1:
@@ -647,6 +653,7 @@ class OCIRegistryClient:
                         _check_cancelled(cancel, "OCI range download")
                         if not chunk:
                             break
+                        check_storage()
                         downloaded.extend(chunk)
                     data = bytes(downloaded)
             except urllib.error.HTTPError as exc:

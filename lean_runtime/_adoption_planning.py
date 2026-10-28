@@ -77,6 +77,7 @@ def build_adoption_plan(
     recursive: bool,
     shared: SharedProjectManager | None = None,
     jobs: int | None = None,
+    project_roots: tuple[Path, ...] | None = None,
     size_samples: Callable[[], tuple[PublishedPackageSize, ...]] | None = None,
     reference_provider: Callable[
         [tuple[SizeReferenceRequest, ...]], tuple[PublishedPackageSize, ...]
@@ -84,7 +85,11 @@ def build_adoption_plan(
     | None = None,
 ) -> AdoptionPlan:
     workers = adoption_jobs(jobs)
-    roots = discover_shareable_projects(path, recursive=recursive)
+    roots = (
+        discover_shareable_projects(path, recursive=recursive)
+        if project_roots is None
+        else project_roots
+    )
     events = shared.events if shared is not None else None
     if events is not None:
         events.emit(

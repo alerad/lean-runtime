@@ -2,6 +2,46 @@
 
 Lean Runtime uses the project toolchain and `lake-manifest.json` as the authority for mutable Lake projects.
 
+## Create a project
+
+```console
+lean-runtime new MyProof
+lean-runtime new MyProof --mathlib 4.33.0
+lean-runtime new MyProof --core
+```
+
+`new` pins an exact cataloged Mathlib release: its toolchain and complete
+dependency graph are frozen in the catalog and their artifacts are published, so
+creation downloads instead of compiling Mathlib. Without `--mathlib` it uses the
+newest cataloged release.
+
+The catalog has two layers. Each Lean Runtime release bundles the catalog it was
+tested with. Releases cataloged later are published to the same library that
+serves their artifacts, and `new` and `update` fetch that published catalog
+(at most every six hours, or 30 minutes after a failed attempt;
+`lean-runtime catalog refresh` forces it). The published catalog only adds
+entries: it never replaces or removes a bundled one, and it is checked under the
+same `publisher_verification` policy as downloaded environments. Before an added
+entry is offered, every package must come from a source the bundled catalog
+already uses or from the `leanprover`/`leanprover-community` organizations, and
+an entry named after a release (such as `mathlib-v4.34.1`) must pin the exact
+commit that release tag names upstream. Each publication carries a sequence (the
+publishing commit's time): an older publication is never accepted, and a newer
+one can retract entries. Offline commands use whatever was last fetched. Set
+`LEAN_RUNTIME_CATALOG=bundled` to use only the release's own catalog.
+
+When a newer stable Mathlib exists upstream but is not cataloged yet, `new`
+says so on stderr. To use it anyway:
+
+```console
+lean-runtime new MyProof --mathlib 4.35.0 --uncataloged
+```
+
+`--uncataloged` resolves that release's exact dependency graph from its tag, the
+same way a catalog entry is frozen. No Lean Runtime artifacts exist for it yet, so
+the environment is built with Mathlib's own cache where available and otherwise
+from source. Set `LEAN_RUNTIME_NO_UPSTREAM_CHECK=1` to skip the upstream lookup.
+
 ## Inspect a project
 
 From the project root:
@@ -75,8 +115,9 @@ resolved to the same commit.
 ## Update safely
 
 `update` moves a locked Mathlib project to the latest cataloged stable Mathlib and
-matching toolchain. Projects without a cataloged Mathlib dependency have nothing to
-update and report a successful no-op.
+matching toolchain, including releases published after this Lean Runtime release
+(see [Create a project](#create-a-project)). Projects without a cataloged Mathlib
+dependency have nothing to update and report a successful no-op.
 
 Preview the update plan:
 
