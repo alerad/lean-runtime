@@ -1,9 +1,10 @@
-"""Detect the newest stable Mathlib release and extend the discovery catalog.
+"""Detect uncataloged stable Mathlib releases and extend the discovery catalog.
 
-`check` compares the newest stable `leanprover-community/mathlib4` tag against
-`catalog/environments.toml` and prints GitHub Actions output lines. `apply`
-appends the missing manifest entry, then rebuilds the bundled catalog, which
-resolves and freezes the new exact lock under `catalog/locks/`.
+`check` lists every stable `leanprover-community/mathlib4` tag newer than the
+newest cataloged Mathlib entry (so a quick 4.34.0 → 4.34.1 sequence catalogs
+both) and prints GitHub Actions output lines. `apply` appends the missing
+manifest entries, then rebuilds the bundled catalog once, which resolves and
+freezes each new exact lock under `catalog/locks/`.
 """
 
 from __future__ import annotations
@@ -44,64 +45,77 @@ def _github_rows(url: str) -> list[dict[str, object]]:
     return rows
 
 
-def newest_stable_tag() -> str:
-    """Return the newest `vX.Y.Z` mathlib4 tag by version order."""
-    best: tuple[tuple[int, int], str] | None = None
+def _version(tag: str) -> tuple[int, int]:
+    match = STABLE_TAG.fullmatch(tag)
+    if match is None:
+        raise SystemExit(f"not a stable mathlib4 tag: {tag!r}")
+    return int(match.group(1)), int(match.group(2))
+
+
+def stable_tags() -> list[str]:
+    """Return every `vX.Y.Z` mathlib4 tag in version order."""
+    tags: set[str] = set()
     for page in range(1, 6):
         rows = _github_rows(f"{MATHLIB_TAGS_URL}?per_page=100&page={page}")
         if not rows:
             break
         for row in rows:
             name = row.get("name")
-            if not isinstance(name, str):
-                continue
-            match = STABLE_TAG.fullmatch(name)
-            if match is None:
-                continue
-            key = (int(match.group(1)), int(match.group(2)))
-            if best is None or key > best[0]:
-                best = (key, name)
-    if best is None:
+            if isinstance(name, str) and STABLE_TAG.fullmatch(name) is not None:
+                tags.add(name)
+    if not tags:
         raise SystemExit("no stable mathlib4 tags found")
-    return best[1]
+    return sorted(tags, key=_version)
 
 
 def cataloged_ids() -> set[str]:
     return set(MANIFEST_ID.findall(MANIFEST_PATH.read_text(encoding="utf-8")))
 
 
+def missing_tags(tags: list[str], cataloged: set[str]) -> list[str]:
+    """Stable tags newer than the newest cataloged Mathlib release."""
+    versions = [
+        _version(entry.removeprefix("mathlib-"))
+        for entry in cataloged
+        if entry.startswith("mathlib-") and STABLE_TAG.fullmatch(entry.removeprefix("mathlib-"))
+    ]
+    newest = max(versions, default=(0, 0))
+    return [tag for tag in tags if _version(tag) > newest]
+
+
 def check() -> int:
-    tag = newest_stable_tag()
-    entry_id = f"mathlib-{tag}"
-    missing = entry_id not in cataloged_ids()
-    print(f"tag={tag}")
-    print(f"id={entry_id}")
-    print(f"missing={str(missing).lower()}")
-    state = "missing from" if missing else "already in"
-    print(f"newest stable release {tag} is {state} the catalog", file=sys.stderr)
+    missing = missing_tags(stable_tags(), cataloged_ids())
+    ids = [f"mathlib-{tag}" for tag in missing]
+    print(f"tags={' '.join(missing)}")
+    print(f"ids={' '.join(ids)}")
+    print(f"missing={str(bool(missing)).lower()}")
+    detail = ", ".join(missing) if missing else "none"
+    print(f"uncataloged stable releases: {detail}", file=sys.stderr)
     return 0
 
 
-def apply_tag(tag: str) -> int:
-    if STABLE_TAG.fullmatch(tag) is None:
-        raise SystemExit(f"not a stable mathlib4 tag: {tag!r}")
-    entry_id = f"mathlib-{tag}"
-    if entry_id in cataloged_ids():
-        raise SystemExit(f"catalog already contains {entry_id}")
+def apply_tags(tags: list[str]) -> int:
+    cataloged = cataloged_ids()
+    for tag in tags:
+        _version(tag)
+        if f"mathlib-{tag}" in cataloged:
+            raise SystemExit(f"catalog already contains mathlib-{tag}")
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     manifest = MANIFEST_PATH.read_text(encoding="utf-8")
     manifest = re.sub(r'generated_at = "[^"]+"', f'generated_at = "{now}"', manifest, count=1)
     if not manifest.endswith("\n"):
         manifest += "\n"
-    manifest += (
-        "\n[[environment]]\n"
-        f'id = "{entry_id}"\n'
-        'channel = "stable"\n'
-        f'lock = "locks/{entry_id}.lock.json"\n'
-        f'references = ["github:leanprover-community/mathlib4@{tag}"]\n'
-        'inventory_packages = ["mathlib"]\n'
-        f'created_at = "{now}"\n'
-    )
+    for tag in sorted(tags, key=_version):
+        entry_id = f"mathlib-{tag}"
+        manifest += (
+            "\n[[environment]]\n"
+            f'id = "{entry_id}"\n'
+            'channel = "stable"\n'
+            f'lock = "locks/{entry_id}.lock.json"\n'
+            f'references = ["github:leanprover-community/mathlib4@{tag}"]\n'
+            'inventory_packages = ["mathlib"]\n'
+            f'created_at = "{now}"\n'
+        )
     MANIFEST_PATH.write_text(manifest, encoding="utf-8")
     subprocess.run(
         [
@@ -118,23 +132,29 @@ def apply_tag(tag: str) -> int:
         ],
         check=True,
     )
-    lock_path = MANIFEST_PATH.parent / "locks" / f"{entry_id}.lock.json"
-    if not lock_path.is_file():
-        raise SystemExit(f"catalog build did not freeze the expected lock: {lock_path}")
-    print(f"added {entry_id}; lock frozen at {lock_path}", file=sys.stderr)
+    for tag in tags:
+        lock_path = MANIFEST_PATH.parent / "locks" / f"mathlib-{tag}.lock.json"
+        if not lock_path.is_file():
+            raise SystemExit(f"catalog build did not freeze the expected lock: {lock_path}")
+    print(f"added {', '.join(tags)}", file=sys.stderr)
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("check", help="report the newest stable release and catalog state")
-    apply_parser = commands.add_parser("apply", help="add one release and rebuild the catalog")
-    apply_parser.add_argument("--tag", required=True, help="stable mathlib4 tag such as v4.34.0")
+    commands.add_parser("check", help="report uncataloged stable releases")
+    apply_parser = commands.add_parser("apply", help="add releases and rebuild the catalog")
+    apply_parser.add_argument(
+        "--tag",
+        required=True,
+        action="append",
+        help="stable mathlib4 tag such as v4.34.0 (repeatable)",
+    )
     arguments = parser.parse_args(argv)
     if arguments.command == "check":
         return check()
-    return apply_tag(arguments.tag)
+    return apply_tags(arguments.tag)
 
 
 if __name__ == "__main__":

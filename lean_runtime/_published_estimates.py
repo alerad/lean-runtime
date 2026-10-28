@@ -90,6 +90,7 @@ def published_package_sizes(
     libraries: tuple[OCIEnvironmentCache, ...],
     requests: tuple[SizeReferenceRequest, ...] | None = None,
     *,
+    catalog: Catalog | None = None,
     cancel: threading.Event | None = None,
 ) -> tuple[PublishedPackageSize, ...]:
     """Read verified OCI metadata only; never pull packs or install toolchains.
@@ -101,7 +102,8 @@ def published_package_sizes(
     # Discovery imports Runtime; load it only after module initialization.
 
     samples: list[PublishedPackageSize] = []
-    for entry in sorted(_catalog().entries, key=lambda e: e.created_timestamp, reverse=True):
+    selected_catalog = catalog if catalog is not None else _catalog()
+    for entry in sorted(selected_catalog.entries, key=lambda e: e.created_timestamp, reverse=True):
         if cancel is not None and cancel.is_set():
             break
         if requests is not None and not any(

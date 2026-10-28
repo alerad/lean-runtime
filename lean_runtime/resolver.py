@@ -12,7 +12,7 @@ from typing import Any
 
 from ._process import git_command, run_git
 from .backends import Backend
-from .errors import ResolutionError
+from .errors import DownloadLimitExceeded, ResolutionError
 from .events import EventEmitter
 from .lake import ROOT_MODULE, generate_lakefile, generate_root_module
 from .lockfiles import EnvironmentLock, LockedPackage
@@ -63,6 +63,15 @@ class EnvironmentResolver:
                 "Environment resolution was cancelled",
                 phase="resolution",
                 exit_code=130,
+            )
+        if spec.packages and not getattr(self.toolchains, "allow_download", True):
+            raise ResolutionError(
+                "local-only mode requires an existing exact lock; "
+                "Lake resolution may fetch dependencies"
+            )
+        if spec.packages and getattr(self.toolchains, "max_download_bytes", None) is not None:
+            raise DownloadLimitExceeded(
+                "Lake resolution has unknown transfer size under download budget"
             )
         self.events.emit(
             "resolution.started",

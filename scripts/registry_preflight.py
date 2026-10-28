@@ -269,6 +269,11 @@ def main() -> int:
     parser.add_argument("--platforms", default=DEFAULT_PLATFORMS)
     parser.add_argument("--skip", action="append", default=[], help="catalog entry id to skip")
     parser.add_argument("--library", default=None, help="override oci://HOST/REPOSITORY")
+    parser.add_argument(
+        "--capsules-only",
+        action="store_true",
+        help="require capsules and slim runtimes, but not declaration shards (optional hints)",
+    )
     arguments = parser.parse_args()
 
     from lean_runtime.discovery import default_catalog
@@ -303,15 +308,16 @@ def main() -> int:
             entry.toolchain,
             platforms,
         )
-        entry_failures.extend(
-            check_declaration_index(
-                registry,
-                repository,
-                token,
-                entry.id,
-                entry.lock.lock_id,
+        if not arguments.capsules_only:
+            entry_failures.extend(
+                check_declaration_index(
+                    registry,
+                    repository,
+                    token,
+                    entry.id,
+                    entry.lock.lock_id,
+                )
             )
-        )
         failures.extend(entry_failures)
         checked += 1
         print(("FAIL" if entry_failures else "ok  ") + f"  {entry.id}")
@@ -320,10 +326,8 @@ def main() -> int:
         for failure in failures:
             print(f"  - {failure}")
         return 1
-    print(
-        f"\nall {checked} catalog entries have public sparse capsules, slim runtimes, "
-        "and declaration shards"
-    )
+    shards = "" if arguments.capsules_only else ", and declaration shards"
+    print(f"\nall {checked} catalog entries have public sparse capsules, slim runtimes{shards}")
     return 0
 
 

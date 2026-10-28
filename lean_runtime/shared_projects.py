@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import threading
 import uuid
 from contextlib import ExitStack, contextmanager, suppress
@@ -13,6 +14,7 @@ from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from ._cow import copy_file
 from ._git import git_clean, git_has_commit, git_head, git_remote
 from ._paths import is_link, remove_tree
 from ._process import git_output, run_git
@@ -31,7 +33,7 @@ from ._project_identity import (
     resolved_path_entries,
 )
 from ._transaction import publish_tree, staged_tree
-from .errors import ProjectError
+from .errors import DownloadLimitExceeded, EnvironmentError, ProjectError
 from .events import EventEmitter
 from .locking import FileLock, LockPaths
 from .package_ids import (
@@ -42,6 +44,7 @@ from .package_ids import (
 )
 from .projects import ProjectContext, discover_project
 from .serialization import sha256_id, write_json_atomic
+from .storage_limits import StorageLimits, budgeted, check_storage, dependency_roots
 from .store import (
     clone_tree,
     invalidate_storage_ledger,
@@ -225,7 +228,9 @@ def _copy_build_outputs(source: Path, destination: Path) -> None:
     for name in ("lib", "ir", "bin"):
         tree = source / name
         if tree.is_dir() and not is_link(tree):
-            shutil.copytree(tree, destination / name, symlinks=True, ignore=ignored)
+            shutil.copytree(
+                tree, destination / name, symlinks=True, ignore=ignored, copy_function=copy_file
+            )
 
 
 def _has_root_olean(build: Path, package_name: str) -> bool:
@@ -247,6 +252,9 @@ class SharedProjectManager:
         toolchains: ToolchainManager | None = None,
     ) -> None:
         self.home = home
+        self.storage_limits = StorageLimits()
+        self.allow_download = True
+        self.max_download_bytes: int | None = None
         self.events = events
         self.toolchains = toolchains
         self.root = home / "project-workspaces"
@@ -1003,6 +1011,14 @@ class SharedProjectManager:
                         cancel=cancel,
                     )
                 else:
+                    if not self.allow_download:
+                        raise ProjectError(
+                            f"exact dependency {url}@{revision} is unavailable locally"
+                        )
+                    if self.max_download_bytes is not None:
+                        raise DownloadLimitExceeded(
+                            "Git fetch size is unknown under download budget"
+                        )
                     self.events.emit(
                         "project.shared.source_started",
                         f"Fetching exact project dependency from {url}",
@@ -1155,6 +1171,7 @@ class SharedProjectManager:
             else None
         )
 
+    @budgeted("dependency", lambda self, _args: dependency_roots(self.home))
     def prepare(
         self,
         context: ProjectContext,
@@ -1386,6 +1403,7 @@ class SharedProjectManager:
                                         package_staging / ".lean-runtime-package.json",
                                         package_identity,
                                     )
+                                    check_storage()
                                     package_staging.replace(final_target)
                                 except BaseException:
                                     if package_staging.exists():
@@ -1401,6 +1419,7 @@ class SharedProjectManager:
                 write_json_atomic(
                     staging / "workspace.json", {**identity, "package_ids": package_ids}
                 )
+                check_storage()
                 if destination.exists():
                     remove_tree(destination)
                 staging.replace(destination)
@@ -1459,6 +1478,22 @@ class SharedProjectManager:
                 )
             try:
                 yield
+                # Keep graph-sensitive build identities, but share byte-identical disk
+                # blocks. A failed/unsupported optimization must not fail a Lean build.
+                if os.environ.get("LEAN_RUNTIME_DEDUP", "1") != "0":
+                    from .storage_dedup import deduplicate
+
+                    try:
+                        deduplicate(
+                            self.home, dry_run=False, package_ids=workspace.package_ids,
+                            already_locked=True,
+                        )
+                    except (OSError, ValueError, sqlite3.Error, EnvironmentError) as exc:
+                        self.events.emit(
+                            "storage.deduplication_failed",
+                            f"Build outputs retained; CoW compaction failed: {exc}",
+                            phase="storage",
+                        )
             finally:
                 # Shared package trees were (possibly) rebuilt in place.
                 invalidate_storage_ledger(self.home)

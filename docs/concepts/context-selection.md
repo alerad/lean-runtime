@@ -63,7 +63,7 @@ context-selection instructions.
 
 ## Automatic discovery
 
-Discovery begins with declared source imports. The bundled catalog associates exact environments with module inventories. Plausible candidates are ordered under a bounded policy and checked in turn.
+Discovery begins with declared source imports. The catalog associates exact environments with module inventories: the catalog bundled with the release plus any entries published since and last fetched by `new`, `update`, or `catalog refresh` (discovery itself never fetches it). Plausible candidates are ordered under a bounded policy and checked in turn.
 
 Static analysis proposes candidates. It does not prove compatibility. A candidate is accepted only if Lean accepts the source inside that exact environment.
 

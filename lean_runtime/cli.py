@@ -29,8 +29,8 @@ from .declaration_index_build import (
 from .declaration_index_oci import OCIDeclarationIndexPublisher
 from .discovery.api import Discovery
 from .discovery.catalog_build import build_catalog_file
-from .discovery.defaults import default_catalog
 from .discovery.errors import DiscoveryError
+from .discovery.remote import CATALOG_REFERENCE, publish_catalog
 from .environments import ExecutionCapture
 from .errors import (
     LeanRuntimeError,
@@ -40,7 +40,7 @@ from .errors import (
     PublicationError,
     ResolutionError,
 )
-from .events import RuntimeEvent
+from .events import RuntimeEvent, activated
 from .header_cache import ENABLE_VARIABLE as _HEADER_SNAPSHOTS_VARIABLE
 from .health import DoctorReport
 from .lake import ROOT_MODULE
@@ -56,8 +56,11 @@ from .publisher_verification import CosignVerifier
 from .run_cli import run as _run_front_door
 from .runtime import Runtime
 from .specs import EnvironmentSpec
+from .storage_limits import StorageLimits
 from .store import CleanupReport, DownloadCleanupReport, StoreStatus
 from .timings import render_timings
+from .toolchains import normalize_toolchain
+from .upstream import newer_upstream_mathlib, upstream_notice
 from .wire import (
     envelope,
     error,
@@ -355,7 +358,7 @@ def _standalone_status(
     unowned_project: Any,
     probe: bool,
 ) -> dict[str, Any]:
-    catalog = default_catalog()
+    catalog = runtime.catalog()
     source_text = subject_path.read_text(encoding="utf-8")
     discovery = Discovery(catalog=catalog, runtime=runtime)
     evidence = discovery.analyze(source_text)
@@ -557,12 +560,33 @@ def _render_init_plan(plan: ProjectInitPlan) -> None:
     if plan.seed_root is not None:
         print(f"Reuse exact local graph: {plan.seed_root}")
         print("Download: 0 B")
-    elif plan.download_bytes is not None:
+    elif plan.download_bytes is not None and plan.download_bytes_complete:
         print(f"Download: {format_byte_size(plan.download_bytes)}")
     else:
         print("Download: unknown (no compatible published artifact could be priced)")
     for blocker in plan.blockers:
         print(f"Blocker: {blocker}")
+
+
+def _refresh_catalog(runtime: Runtime, args: argparse.Namespace) -> None:
+    """Pick up newly published catalog entries before choosing a Mathlib release."""
+    outcome = runtime.refresh_catalog()
+    if args.quiet or not args.verbose:
+        return
+    if outcome.status == "unavailable":
+        detail = "; ".join(outcome.errors) or "no library answered"
+        print(f"Catalog refresh skipped ({detail}); using retained catalog", file=sys.stderr)
+    if outcome.rejected:
+        print("Catalog entries rejected: " + ", ".join(outcome.rejected), file=sys.stderr)
+
+
+def _note_newer_upstream(runtime: Runtime, args: argparse.Namespace, cataloged: str | None) -> None:
+    """Say on stderr when the newest cataloged Mathlib is behind upstream."""
+    if cataloged is None or args.quiet or args.offline or args.availability == "local":
+        return
+    newest = newer_upstream_mathlib(cataloged, home=runtime.home)
+    if newest is not None:
+        print(upstream_notice(cataloged, newest, command=args.surface_command), file=sys.stderr)
 
 
 def _render_update_plan(plan: ProjectUpdatePlan) -> None:
@@ -584,7 +608,7 @@ def _render_update_plan(plan: ProjectUpdatePlan) -> None:
     if plan.seed_root is not None:
         print(f"Reuse exact local graph: {plan.seed_root}")
         print("Download: 0 B")
-    elif plan.download_bytes is not None:
+    elif plan.download_bytes is not None and plan.download_bytes_complete:
         print(f"Download: {format_byte_size(plan.download_bytes)}")
     else:
         print("Download: unknown")
@@ -775,9 +799,10 @@ def _policy(arguments: argparse.Namespace) -> ExecutionPolicy:
 
 
 def _mathlib_version(value: str) -> str:
-    if value == "latest" or re.fullmatch(r"\d+\.\d+\.\d+", value):
+    value = value.removeprefix("v")
+    if value == "latest" or re.fullmatch(r"\d+\.\d+\.\d+(?:-rc\d+)?", value):
         return value
-    raise argparse.ArgumentTypeError("expected a version such as 4.33.0")
+    raise argparse.ArgumentTypeError("expected latest or a version such as 4.33.0")
 
 
 # The complete v4 public vocabulary used by shell completion.
@@ -941,7 +966,12 @@ def _add_check_v4(parser: argparse.ArgumentParser, *, watch: bool = False) -> No
             action="store_true",
             help="allow standalone discovery to build an environment from source",
         )
-        parser.add_argument("--max-download", type=parse_byte_size, help=argparse.SUPPRESS)
+        parser.add_argument(
+            "--max-download",
+            type=parse_byte_size,
+            help=argparse.SUPPRESS,
+            default=argparse.SUPPRESS,
+        )
     _add_common_output(parser, json_flag=not watch)
     if not watch:
         parser.add_argument(
@@ -987,7 +1017,6 @@ def _add_check_v4(parser: argparse.ArgumentParser, *, watch: bool = False) -> No
             lock_out=None,
             no_source_build=False,
             allow_source_build=False,
-            max_download=None,
             json=False,
             repeat=None,
             warmup=1,
@@ -1082,6 +1111,12 @@ Start here:
 Inspect and fix:
   status · verify · doctor · clean
 
+Share compatible repositories:
+  env compose /path/A /path/B --name research   Preview exact source/dependency pins
+  env warm research --import A.Basic           Warm only the imports you need
+  new ./MyResearch --env research              Preview a pinned consumer project
+  See env --help for the complete preview/apply workflow and storage limits.
+
 Advanced namespaces:
   env · project · program · toolchain · storage · catalog
 """,
@@ -1129,12 +1164,61 @@ Advanced namespaces:
         default=configured.get("verification_tool", "cosign"),
         help=argparse.SUPPRESS,
     )
+    root.add_argument(
+        "--max-download",
+        type=parse_byte_size,
+        default=None,
+        help="maximum OCI payload transfer per operation",
+    )
+    root.add_argument(
+        "--borrowed-elan-root",
+        action="append",
+        default=[],
+        type=Path,
+        help="borrow toolchains from an existing Elan home (repeatable; never pruned)",
+    )
+    root.add_argument(
+        "--max-toolchain-bytes",
+        type=parse_byte_size,
+        help="maximum new unpacked toolchain bytes per operation",
+    )
+    root.add_argument(
+        "--max-dependency-bytes",
+        type=parse_byte_size,
+        help="maximum dependency-cache growth per operation (monitored)",
+    )
+    root.add_argument(
+        "--max-build-bytes",
+        type=parse_byte_size,
+        help="maximum build storage growth per operation (monitored)",
+    )
     commands = root.add_subparsers(dest="surface_command", required=True, metavar="COMMAND")
 
+    readiness = commands.add_parser("readiness", help="inspect exact local inputs across projects")
+    readiness.add_argument("paths", nargs="+", type=Path)
+    readiness.add_argument("--recursive", action="store_true")
+    readiness.add_argument("--json", action="store_true")
+    readiness.set_defaults(command="readiness")
+
     new = commands.add_parser("new", help="create a new Lean project")
+    new.add_argument("--env", dest="composed_environment", help="pin a named composed environment")
     new.add_argument("path", type=Path, help="directory to create the project in")
     new.add_argument(
         "--core", action="store_true", help="create a core Lean project without Mathlib"
+    )
+    new.add_argument(
+        "--mathlib",
+        dest="mathlib_version",
+        type=_mathlib_version,
+        default="latest",
+        metavar="VERSION",
+        help="Mathlib release to use (default: newest cataloged release)",
+    )
+    new.add_argument(
+        "--uncataloged",
+        action="store_true",
+        help="allow a --mathlib release that is not cataloged yet: resolve it from its tag "
+        "and build without published Lean Runtime artifacts",
     )
     new.add_argument(
         "--offline", action="store_true", help="use only local artifacts; never download"
@@ -1152,11 +1236,9 @@ Advanced namespaces:
     new.set_defaults(
         command="init",
         name=None,
-        mathlib_version="latest",
         toolchain=None,
         seed_from=None,
         plan=False,
-        max_download=None,
     )
 
     adopt = commands.add_parser("adopt", help="adopt existing Lake project(s)")
@@ -1248,7 +1330,7 @@ this without running Lean.""",
         "--offline", action="store_true", help="use only local artifacts; never download"
     )
     _add_common_output(update)
-    update.set_defaults(command="update", seed_from=None, plan=False, max_download=None)
+    update.set_defaults(command="update", seed_from=None, plan=False)
 
     publish = commands.add_parser("publish", help="configure publication for the current project")
     publish.add_argument(
@@ -1357,8 +1439,153 @@ first download.""",
     )
     completion.set_defaults(command="completion")
 
-    env = commands.add_parser("env", help="exact immutable environments")
+    env = commands.add_parser(
+        "env",
+        help="exact immutable environments",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Compose compatible repositories into one exact environment, or manage Git-only locks."
+        ),
+        epilog="""Repository workflow (use real repository paths and Lean module names):
+  lean-runtime --availability local env compose /path/A /path/B --name research
+  # Review compatibility and source-byte estimates; capture only after review:
+  lean-runtime --availability local env compose /path/A /path/B --name research --yes
+  lean-runtime --availability local env warm research --import A.Basic --import B.Basic
+  lean-runtime --availability local new ./MyResearch --env research
+  lean-runtime --availability local new ./MyResearch --env research --yes
+  lean-runtime --availability local build ./MyResearch
+  lean-runtime --availability local check ./MyResearch/Main.lean
+
+Safety and reuse:
+  Repositories must agree on toolchain and exact dependency pins. Missing path
+  dependencies, colliding modules and incompatible pins block composition;
+  registration alone does not make every repository jointly importable.
+  Originals are read-only; snapshots omit Git-ignored files and generated .lake.
+  Names are mutable aliases; consumer projects pin immutable environment IDs.
+  Warm imports first; --all-libraries is broader, --all-targets also builds defaults.
+  --availability local never acquires missing dependencies or toolchains.
+  Shared outputs are reused and writes serialized. Do not edit .lake/packages.
+
+Storage and portability:
+  compose defaults: 200000000 source bytes, 20000 files. Build/dependency growth
+  monitors are cooperative, not hard disk quotas; set global budget flags before env.
+  composed-refs inspects retention; composed-clean previews unreferenced cleanup.
+  Destructive actions require --yes. Build readiness is historical, not a promise
+  that externally deleted caches still exist.
+  composed-export/import carry source snapshots and exact pins, NOT toolchains
+  or compiled artifacts. A new machine still needs the exact dependencies.
+  composed-* commands manage repository snapshots; list/info/lock/acquire and
+  export/import (without composed-) manage the separate Git-only lock format.
+""",
+    )
     env_commands = env.add_subparsers(dest="env_command", required=True)
+    composed = env_commands.add_parser(
+        "compose",
+        help="preview or capture an exact repository composition",
+        description=(
+            "Preview compatibility and source storage without capturing. "
+            "Review, then repeat with --yes. Conflicts never trigger implicit pin upgrades."
+        ),
+    )
+    composed.add_argument(
+        "roots",
+        nargs="+",
+        type=Path,
+        help="repository roots; include required local path dependencies",
+    )
+    composed.add_argument(
+        "--name", help="alias to register on capture; existing consumers keep their exact pin"
+    )
+    composed.add_argument(
+        "--yes", action="store_true", help="capture reviewed sources and register alias"
+    )
+    composed.add_argument(
+        "--max-source-bytes",
+        type=int,
+        default=200_000_000,
+        help="maximum captured source bytes (default: %(default)s)",
+    )
+    composed.add_argument(
+        "--max-files", type=int, default=20000, help="maximum captured files (default: %(default)s)"
+    )
+    composed.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="additional source exclusion pattern (repeatable); Git ignores also apply",
+    )
+    _add_common_output(composed)
+    composed.set_defaults(command="composition-compose")
+    warm = env_commands.add_parser("warm", help="build imports or all libraries in a composition")
+    warm.add_argument("environment", help="composition alias or immutable composed_ ID")
+    warm.add_argument(
+        "--import",
+        dest="imports",
+        action="append",
+        default=[],
+        help="Lean module to warm, e.g. A.Basic (repeatable; preferred for small builds)",
+    )
+    warm.add_argument(
+        "--all-libraries",
+        action="store_true",
+        help="build every selected local library, excluding executable-only targets",
+    )
+    warm.add_argument(
+        "--all-targets", action="store_true", help="also build package defaults/executables"
+    )
+    warm.add_argument(
+        "--timeout",
+        type=float,
+        default=900,
+        help="compiler timeout in seconds (default: %(default)s)",
+    )
+    _add_common_output(warm)
+    warm.set_defaults(command="composition-warm")
+    composition_help = {
+        "list": "list captured repository compositions and aliases",
+        "info": "inspect exact source pins and historical build readiness",
+        "diff": "compare exact source and dependency identities",
+        "refs": "inspect retention; preview dropping an alias or project reference",
+        "clean": "preview cleanup of unreferenced compositions and owned package views",
+        "export": "write a verified source-and-pin ZIP, excluding toolchains and build artifacts",
+        "import": (
+            "preview a source capsule import; exact dependencies must be available separately"
+        ),
+        "attach": "preview restoring shared dependency links for an exactly pinned project",
+    }
+    for operation in ("list", "info", "diff", "refs", "clean", "export", "import", "attach"):
+        item = env_commands.add_parser(
+            "composed-" + operation,
+            help=composition_help[operation],
+            description=composition_help[operation] + ".",
+        )
+        if operation == "diff":
+            item.add_argument("left")
+            item.add_argument("right")
+        if operation in {"info", "export"}:
+            item.add_argument("environment")
+        if operation in {"import", "attach"}:
+            item.add_argument("path", type=Path)
+        if operation == "export":
+            item.add_argument("--output", required=True, type=Path)
+        if operation == "refs":
+            item.add_argument(
+                "--drop-alias", help="alias reference to drop after review; requires --yes"
+            )
+            item.add_argument(
+                "--drop-project",
+                help="project reference key from composed-refs to drop; requires --yes",
+            )
+        if operation == "import":
+            item.add_argument("--name")
+        if operation in {"clean", "refs", "import", "attach"}:
+            item.add_argument(
+                "--yes",
+                action="store_true",
+                help="apply the reviewed mutation; default is preview only",
+            )
+        _add_common_output(item)
+        item.set_defaults(command="composition-" + operation)
     env_list = env_commands.add_parser("list", help="list ready environments")
     _add_common_output(env_list)
     env_list.set_defaults(command="environments")
@@ -1586,6 +1813,12 @@ first download.""",
     _add_common_output(sv)
     sv.set_defaults(command="storage", verify=True)
 
+    sd = sc.add_parser("deduplicate", help="share identical build blocks without merging packages")
+    _add_common_output(sd)
+    sd.add_argument("--yes", action="store_true", help="apply copy-on-write compaction")
+    sd.add_argument("--dry-run", action="store_true", help="preview without replacing files")
+    sd.set_defaults(command="storage", verify=False)
+
     # Program and low-level publication retain operator-shaped flags, but live
     # under their object namespaces instead of polluting the daily surface.
     program = commands.add_parser("program", help="ready-to-run programs")
@@ -1679,6 +1912,28 @@ first download.""",
         help="prior catalog whose unchanged entries skip module re-inventory",
     )
     cb.set_defaults(command="catalog-build")
+    cr = cc.add_parser("refresh", help="fetch newly published catalog entries now")
+    _add_common_output(cr)
+    cr.set_defaults(command="catalog-refresh")
+    cp = cc.add_parser("publish", help="publish a catalog for existing Runtimes to pick up")
+    cp.add_argument("catalog", type=Path, help="validated catalog file to publish")
+    cp.add_argument("--to", required=True, dest="library", help="oci://HOST/REPOSITORY")
+    cp.add_argument("--sign", action="store_true", help="sign the manifest with Cosign")
+    cp.add_argument(
+        "--sequence",
+        type=int,
+        help="monotonic publication sequence (default: current time; CI uses the commit time)",
+    )
+    cp.add_argument("--yes", action="store_true", help="publish without a confirmation prompt")
+    cp.set_defaults(command="catalog-publish")
+    for subparser in (build, adopt, readiness):
+        subparser.add_argument("--max-download", type=parse_byte_size, default=argparse.SUPPRESS)
+    for subparser in (build, check, adopt, readiness):
+        subparser.add_argument(
+            "--borrowed-elan-root", action="append", type=Path, default=argparse.SUPPRESS
+        )
+        for flag in ("--max-toolchain-bytes", "--max-dependency-bytes", "--max-build-bytes"):
+            subparser.add_argument(flag, type=parse_byte_size, default=argparse.SUPPRESS)
     return root
 
 
@@ -1787,6 +2042,10 @@ def _standalone_check_args(args: argparse.Namespace, source: Path) -> argparse.N
         quiet=args.quiet,
         verbose=args.verbose,
         max_download=args.max_download,
+        borrowed_elan_root=args.borrowed_elan_root,
+        max_toolchain_bytes=args.max_toolchain_bytes,
+        max_dependency_bytes=args.max_dependency_bytes,
+        max_build_bytes=args.max_build_bytes,
         plan=args.plan,
         explain=False,
         timings=args.timings,
@@ -1905,6 +2164,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "toolchain":
         args.command = f"toolchain-{args.toolchain_operation}"
     if args.command == "init":
+        if args.core and (args.mathlib_version != "latest" or args.uncataloged):
+            print(
+                "lean-runtime: --core creates a project without Mathlib; "
+                "drop --mathlib/--uncataloged",
+                file=sys.stderr,
+            )
+            return 2
+        if args.uncataloged and args.mathlib_version == "latest":
+            print(
+                "lean-runtime: --uncataloged needs an explicit --mathlib VERSION", file=sys.stderr
+            )
+            return 2
         args.mathlib = None if args.core else args.mathlib_version
     operation_started = time.monotonic()
     display_path: str | None = None
@@ -1923,13 +2194,27 @@ def main(argv: list[str] | None = None) -> int:
                 if args.command in {"init", "update"} and args.offline
                 else args.availability
             )
-            selected_download_limit = (
-                parse_byte_size(args.max_download)
-                if args.command in {"init", "update"} and args.max_download is not None
-                else None
-            )
+            selected_download_limit = getattr(args, "max_download", None)
+            if isinstance(selected_download_limit, str):
+                selected_download_limit = parse_byte_size(selected_download_limit)
             runtime = Runtime(
                 home=args.home,
+                borrowed_elan_roots=args.borrowed_elan_root,
+                initialize_store=args.command
+                not in {
+                    "readiness",
+                    "toolchain-info",
+                    "toolchain-list",
+                    "composition-compose",
+                    "composition-info",
+                    "composition-list",
+                    "composition-refs",
+                    "composition-clean",
+                    "composition-import",
+                },
+                storage_limits=StorageLimits(
+                    args.max_toolchain_bytes, args.max_dependency_bytes, args.max_build_bytes
+                ),
                 on_event=renderer,
                 availability=selected_availability,
                 libraries=args.libraries,
@@ -1939,6 +2224,79 @@ def main(argv: list[str] | None = None) -> int:
                 trusted_issuer=args.trusted_issuer,
                 verification_tool=args.verification_tool,
             )
+            if args.command.startswith("composition-"):
+                manager = runtime.compositions
+                action = args.command.removeprefix("composition-")
+                if action == "compose":
+                    composition_report = manager.plan(
+                        args.roots,
+                        max_source_bytes=args.max_source_bytes,
+                        max_files=args.max_files,
+                        exclude=tuple(args.exclude),
+                    )
+                    if args.yes:
+                        composition_report = manager.compose(composition_report, name=args.name)
+                    _json(composition_report)
+                    return 0 if composition_report.get("ready", True) else 1
+                if action == "warm":
+                    result = manager.warm(
+                        args.environment,
+                        imports=args.imports,
+                        all_libraries=args.all_libraries,
+                        all_targets=args.all_targets,
+                        timeout=args.timeout,
+                    )
+                    _emit_result(result, args.json)
+                    return 0 if result.ok else 1
+                if action == "list":
+                    _json(manager.list())
+                elif action == "diff":
+                    _json(manager.compare(args.left, args.right).to_dict())
+                elif action == "info":
+                    _json(manager.inspect(args.environment))
+                elif action == "refs":
+                    _json(
+                        manager.references(
+                            alias=args.drop_alias, project=args.drop_project, apply=args.yes
+                        )
+                    )
+                elif action == "clean":
+                    _json(manager.clean(apply=args.yes))
+                elif action == "export":
+                    _json(manager.export(args.environment, args.output))
+                elif action == "import":
+                    _json(manager.import_sources(args.path, name=args.name, apply=args.yes))
+                elif action == "attach":
+                    _json(manager.attach(args.path, apply=args.yes))
+                return 0
+            if args.command == "init" and getattr(args, "composed_environment", None):
+                if args.core or args.ci or not args.agents:
+                    raise ProjectError("--env cannot be combined with --core, --ci or --no-agents")
+                _json(
+                    runtime.compositions.init_project(
+                        args.composed_environment,
+                        args.path,
+                        name=args.name or "Research",
+                        apply=args.yes,
+                    )
+                )
+                return 0
+            if args.command == "readiness":
+                readiness_report = runtime.readiness(args.paths, recursive=args.recursive)
+                if args.json:
+                    print(json.dumps(readiness_report))
+                else:
+                    for project in readiness_report["projects"]:
+                        print(
+                            f"{project['root']}: "
+                            + (
+                                "inputs local (artifacts unverified)"
+                                if project["inputs_ready"]
+                                else ", ".join(item["code"] for item in project["blockers"])
+                            )
+                        )
+                    print(f"Pool graph conflicts: {len(readiness_report['pool_conflicts'])}")
+                return 0 if readiness_report["inputs_ready"] else 2
             if args.command == "declaration-index-build":
                 lock = EnvironmentLock.load(args.lock)
                 built = build_declaration_index(
@@ -2013,6 +2371,47 @@ def main(argv: list[str] | None = None) -> int:
                     }
                 )
                 return 0
+            if args.command == "catalog-refresh":
+                refreshed = runtime.refresh_catalog(force=True)
+                if args.json:
+                    _json(refreshed.to_dict())
+                elif refreshed.status in {"offline", "disabled"}:
+                    print(f"Catalog refresh {refreshed.status}; using the bundled catalog")
+                elif refreshed.status == "unavailable":
+                    print("Catalog refresh failed; keeping the retained catalog")
+                    for refresh_error in refreshed.errors:
+                        print(f"  {refresh_error}")
+                else:
+                    added = ", ".join(refreshed.added) or "no new entries"
+                    print(f"Catalog {refreshed.status} from {refreshed.library}: {added}")
+                    if refreshed.rejected:
+                        print(
+                            "Rejected (untrusted source or tag mismatch): "
+                            + ", ".join(refreshed.rejected)
+                        )
+                    if refreshed.unverified:
+                        print(
+                            "Not offered yet (release tag unreachable; retried later): "
+                            + ", ".join(refreshed.unverified)
+                        )
+                return 0 if refreshed.status != "unavailable" else 1
+            if args.command == "catalog-publish":
+                catalog_repository = OCIRepository.parse(args.library)
+                declined = _gate_mutation(
+                    f"Publish {args.catalog} as {catalog_repository.display}:{CATALOG_REFERENCE}",
+                    yes=args.yes,
+                )
+                if declined is not None:
+                    return declined
+                published_catalog = publish_catalog(
+                    args.catalog, catalog_repository, sequence=args.sequence
+                )
+                if args.sign:
+                    CosignVerifier(executable=runtime.verification_executable).sign(
+                        catalog_repository, published_catalog.manifest_digest
+                    )
+                _json(published_catalog.to_dict())
+                return 0
             if args.command == "catalog-build":
                 os.environ.setdefault("MATHLIB_NO_CACHE_ON_UPDATE", "1")
                 catalog_result = build_catalog_file(
@@ -2028,13 +2427,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 0
             if args.command == "init":
+                if args.mathlib is not None:
+                    _refresh_catalog(runtime, args)
                 init_plan = runtime.plan_project_init(
                     args.path,
                     name=args.name,
                     mathlib=args.mathlib,
                     toolchain=args.toolchain,
                     seed_from=args.seed_from,
+                    uncataloged=args.uncataloged,
                 )
+                if init_plan.action == "create" and args.mathlib == "latest":
+                    _note_newer_upstream(runtime, args, init_plan.mathlib_version)
                 if args.plan:
                     if args.json:
                         _json(init_plan.to_dict())
@@ -2065,6 +2469,7 @@ def main(argv: list[str] | None = None) -> int:
                     agents=args.agents,
                     ci=args.ci,
                     seed_from=args.seed_from,
+                    uncataloged=args.uncataloged,
                 )
                 if args.json:
                     _json(init_result.to_dict())
@@ -2102,7 +2507,10 @@ def main(argv: list[str] | None = None) -> int:
                         print(f"  {project_root}")
                 return 0
             if args.command == "update":
+                _refresh_catalog(runtime, args)
                 update_plan = runtime.plan_project_update(args.path, seed_from=args.seed_from)
+                if update_plan.packages:
+                    _note_newer_upstream(runtime, args, update_plan.target_version)
                 if not args.json:
                     _render_update_plan(update_plan)
                 if args.plan or not update_plan.changed or not update_plan.ready:
@@ -2347,17 +2755,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.command in {"toolchain-list", "toolchain-info"}:
                 toolchains = runtime.toolchains.available_toolchains()
                 if args.command == "toolchain-info":
-                    selected = runtime.toolchains.ensure(args.toolchain)
+                    selected = normalize_toolchain(args.toolchain)
                     toolchains = (selected,)
                 toolchain_payload = [
-                    {
-                        "toolchain": name,
-                        "full": (
-                            runtime.toolchains._full_toolchain_dir(name) / "bin" / "lake"
-                        ).is_file(),
-                        "slim": runtime.toolchains.has_slim(name),
-                    }
-                    for name in toolchains
+                    runtime.toolchains.local_capabilities(name) for name in toolchains
                 ]
                 if args.json:
                     _json(toolchain_payload)
@@ -2666,6 +3067,19 @@ def main(argv: list[str] | None = None) -> int:
                     _render_environments(records)
                 return 0
             if args.command == "storage":
+                if args.storage_command == "deduplicate":
+                    from .storage_dedup import deduplicate
+
+                    if args.yes and args.dry_run:
+                        raise ValueError("--yes and --dry-run are mutually exclusive")
+                    with activated(runtime.events):
+                        dedup_report = deduplicate(runtime.home, dry_run=not args.yes)
+                    if args.json:
+                        _json(dedup_report.to_dict())
+                    else:
+                        print(json.dumps(dedup_report.to_dict(), indent=2))
+                        print("Byte counts describe shared content, not measured disk savings.")
+                    return 0
                 if args.verify and not args.json:
                     print("Verifying storage ledger…", file=sys.stderr)
                 status = runtime.store_status(verify=args.verify)

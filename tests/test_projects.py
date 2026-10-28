@@ -375,7 +375,10 @@ def test_runtime_check_file_can_require_an_explicit_context(tmp_path: Path) -> N
         runtime.check_file(source, discover=False)
 
 
-def test_check_builds_a_missing_local_import_then_retries(tmp_path: Path) -> None:
+@pytest.mark.parametrize("availability", ["auto", "local"])
+def test_check_builds_a_missing_local_import_then_retries(
+    tmp_path: Path, availability: str
+) -> None:
     importer = _project(tmp_path / "project")
     dependency = importer.parent / "Dependency.lean"
     dependency.write_text("def localValue : Nat := 1\n")
@@ -386,6 +389,7 @@ def test_check_builds_a_missing_local_import_then_retries(tmp_path: Path) -> Non
         toolchains=ImportBuildingToolchains(tmp_path / "runtime"),
         libraries=[],  # type: ignore[arg-type]
         on_event=events.append,
+        availability=availability,
     )
 
     result = runtime.check_file(importer)
@@ -587,7 +591,11 @@ def test_shared_project_build_uses_exact_external_package_override(tmp_path: Pat
 
     result = runtime.build(source, shared=True)
     assert result.ok
-    assert result.command[-2] == f"--packages={workspace.overrides_file}"
+    assert result.command[-2].startswith("--packages=")
+    used_overrides = Path(result.command[-2].removeprefix("--packages="))
+    viewed = Path(json.loads(used_overrides.read_text())["packages"][0]["dir"])
+    assert (viewed / "lakefile.toml").samefile(shared_dependency / "lakefile.toml")
+    assert viewed / ".lake" != shared_dependency / ".lake"
     assert result.command[-1] == "build"
     assert runtime.prepare_shared_project(source).reused
 

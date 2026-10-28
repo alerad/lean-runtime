@@ -5,9 +5,14 @@ on:
     - cron: "17 6 * * *"
   workflow_dispatch: {}
 
+# Pull requests opened with the default GITHUB_TOKEN need the repository setting
+# "Allow GitHub Actions to create and approve pull requests", and never trigger
+# CI on themselves. Set the CATALOG_UPDATE_TOKEN secret (a fine-grained token or
+# GitHub App token with contents + pull-requests write) to avoid both limits.
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 concurrency:
   group: lean-runtime-catalog-update
@@ -19,70 +24,116 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.CATALOG_UPDATE_TOKEN || github.token }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - name: Detect the newest stable Mathlib release
+      - name: Detect uncataloged stable Mathlib releases
         id: detect
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/catalog_update.py check >> "$GITHUB_OUTPUT"
 
-      - name: Skip when an update pull request is already open
+      # One rolling pull request carries every missing release, so successive
+      # releases never produce conflicting catalog pull requests.
+      - name: Skip when the open update pull request already covers them
         id: existing
         if: steps.detect.outputs.missing == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          ENTRY_ID: ${{ steps.detect.outputs.id }}
+          ENTRY_IDS: ${{ steps.detect.outputs.ids }}
         run: |
-          open="$(gh pr list --head "catalog/$ENTRY_ID" --state open --json number --jq length)"
+          open="$(gh pr list --head catalog/update --state open --json number --jq length)"
+          covered=false
+          if [ "$open" != "0" ] && git fetch --quiet origin catalog/update; then
+            covered=true
+            manifest="$(git show FETCH_HEAD:catalog/environments.toml)"
+            for id in $ENTRY_IDS; do
+              grep -qx "id = \"$id\"" <<<"$manifest" || covered=false
+            done
+          fi
           echo "open=$open" >> "$GITHUB_OUTPUT"
+          echo "covered=$covered" >> "$GITHUB_OUTPUT"
 
       - name: Restore retained sources
-        if: steps.detect.outputs.missing == 'true' && steps.existing.outputs.open == '0'
+        if: steps.detect.outputs.missing == 'true' && steps.existing.outputs.covered == 'false'
         uses: actions/cache@v4
         with:
           path: ~/.cache/lean-runtime/sources
-          key: catalog-update-sources-${{ steps.detect.outputs.id }}
+          key: catalog-update-sources-${{ steps.detect.outputs.ids }}
           restore-keys: |
             catalog-update-sources-
 
       - name: Install Lean Runtime
-        if: steps.detect.outputs.missing == 'true' && steps.existing.outputs.open == '0'
+        if: steps.detect.outputs.missing == 'true' && steps.existing.outputs.covered == 'false'
         run: python -m pip install -e .
 
-      - name: Freeze the lock and rebuild the bundled catalog
-        if: steps.detect.outputs.missing == 'true' && steps.existing.outputs.open == '0'
+      - name: Freeze the locks and rebuild the bundled catalog
+        if: steps.detect.outputs.missing == 'true' && steps.existing.outputs.covered == 'false'
         env:
-          ENTRY_TAG: ${{ steps.detect.outputs.tag }}
-        run: python scripts/catalog_update.py apply --tag "$ENTRY_TAG"
+          ENTRY_TAGS: ${{ steps.detect.outputs.tags }}
+        run: |
+          arguments=()
+          for tag in $ENTRY_TAGS; do arguments+=(--tag "$tag"); done
+          python scripts/catalog_update.py apply "${arguments[@]}"
 
-      - name: Open the update pull request
-        if: steps.detect.outputs.missing == 'true' && steps.existing.outputs.open == '0'
+      - name: Open or refresh the update pull request
+        if: steps.detect.outputs.missing == 'true' && steps.existing.outputs.covered == 'false'
         env:
-          GH_TOKEN: ${{ github.token }}
-          ENTRY_ID: ${{ steps.detect.outputs.id }}
-          ENTRY_TAG: ${{ steps.detect.outputs.tag }}
+          GH_TOKEN: ${{ secrets.CATALOG_UPDATE_TOKEN || github.token }}
+          ENTRY_IDS: ${{ steps.detect.outputs.ids }}
+          ENTRY_TAGS: ${{ steps.detect.outputs.tags }}
+          OPEN: ${{ steps.existing.outputs.open }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          branch="catalog/$ENTRY_ID"
-          git checkout -b "$branch"
+          title="catalog: add ${ENTRY_IDS// /, }"
+          git checkout -b catalog/update
           git add catalog lean_runtime/discovery/data/catalog.json
-          git commit -m "catalog: add $ENTRY_ID"
-          git push --force origin "$branch"
-          gh pr create \
-            --title "catalog: add $ENTRY_ID" \
-            --body "$(printf '%s\n' \
-              "Automated catalog update for Mathlib $ENTRY_TAG." \
-              "" \
-              "- \`catalog/environments.toml\`: new \`$ENTRY_ID\` entry" \
-              "- \`catalog/locks/$ENTRY_ID.lock.json\`: exact lock frozen from the release tag" \
-              "- \`lean_runtime/discovery/data/catalog.json\`: rebuilt bundled catalog" \
-              "" \
-              "Review the frozen toolchain and lock digest, then after merging publish the capsules:" \
-              "" \
-              '```' \
-              "gh workflow run publish-catalog-v4.yml -f entry=$ENTRY_ID" \
-              '```')"
+          git commit -m "$title"
+          git push --force origin catalog/update
+          body="$(printf '%s\n' \
+            "Automated catalog update for Mathlib ${ENTRY_TAGS// /, }." \
+            "" \
+            "- \`catalog/environments.toml\`: new entries" \
+            "- \`catalog/locks/\`: exact locks frozen from the release tags" \
+            "- \`lean_runtime/discovery/data/catalog.json\`: rebuilt bundled catalog" \
+            "" \
+            "Review the frozen toolchains and lock digests. Merging publishes the" \
+            "environment artifacts and then the catalog that existing Runtimes fetch.")"
+          if [ "$OPEN" = "0" ]; then
+            gh pr create --head catalog/update --title "$title" --body "$body"
+          else
+            gh pr edit catalog/update --title "$title" --body "$body"
+          fi
+
+      # A silently failing schedule leaves `lean-runtime new` pinned to an old
+      # Mathlib, so keep one open issue while the update is broken.
+      - name: Report the failing catalog update
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ENTRY_IDS: ${{ steps.detect.outputs.ids }}
+        run: |
+          title="Catalog update is failing"
+          existing="$(gh issue list --state open --search "\"$title\" in:title" \
+            --json number --jq '.[0].number // empty')"
+          body="The scheduled catalog update failed (targets: ${ENTRY_IDS:-unknown}): $RUN_URL"
+          if [ -z "$existing" ]; then
+            gh issue create --title "$title" --body "$body"
+          fi
+
+      - name: Close the failure report after a successful run
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Catalog update is failing"
+          for number in $(gh issue list --state open --search "\"$title\" in:title" \
+            --json number --jq '.[].number'); do
+            gh issue close "$number" --comment "Recovered in $RUN_URL"
+          done

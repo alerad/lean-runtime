@@ -27,6 +27,37 @@ reuse.
 [Read the documentation](https://alerad.github.io/lean-runtime/) ·
 [Explore the CLI](https://alerad.github.io/lean-runtime/reference/commands/)
 
+## Named multi-repository environments (prerelease)
+
+[Complete workflow, limits, cleanup and Anvil examples](docs/workflows/composed-environments.md).
+
+Compose compatible repositories once, warm the imports you need, then create
+ordinary Lake projects pinned to the immutable composition:
+
+```bash
+lean-runtime --availability local env compose /path/A /path/B --name research
+# Review conflicts and additional source bytes, then capture:
+lean-runtime --availability local env compose /path/A /path/B --name research --yes
+lean-runtime --availability local env warm research --import A.Basic --import B.Basic
+lean-runtime --availability local new ./MyResearch --env research       # preview
+lean-runtime --availability local new ./MyResearch --env research --yes
+lean-runtime --availability local build ./MyResearch
+```
+
+Original repositories are read-only inputs. Conflicting toolchains or dependency
+pins are blockers, never implicit upgrades. Consumer projects keep their exact
+pin when an alias changes. Stable linked dependency views share build outputs;
+unknown dynamic Lake configurations invalidate conservatively.
+
+Use `env composed-info`, `env composed-diff`, `env composed-refs`, and
+`env composed-clean` to inspect, compare, retain and preview cleanup. Cleanup,
+attachment and import apply only with `--yes`. `env composed-export research
+--output research.zip` captures verified source snapshots and exact pins, **not**
+toolchains or compiled artifacts; `env composed-import research.zip` previews
+restoration. These snapshot locks are separate from Git-only environment locks.
+Readiness records describe successful builds; warming revalidates sources,
+compiler identity and Lake traces. Budget monitors are cooperative, not quotas.
+
 ## The model
 
 | Noun | Meaning |

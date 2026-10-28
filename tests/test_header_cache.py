@@ -301,6 +301,10 @@ def test_shared_builds_record_workspace_lock_timing(tmp_path: Path) -> None:
     def build_lock(_workspace, *, cancel=None):
         yield
 
+    from lean_runtime.shared_projects import SharedProjectWorkspace
+
+    overrides = tmp_path / "overrides.json"
+    overrides.write_text('{"version":"1.1.0","packages":[]}')
     runtime = SimpleNamespace(
         toolchains=SimpleNamespace(
             command=lambda _toolchain, *args: list(args),
@@ -308,8 +312,8 @@ def test_shared_builds_record_workspace_lock_timing(tmp_path: Path) -> None:
         ),
         lake_cache=SimpleNamespace(environment=lambda _context: None),
         shared_projects=SimpleNamespace(
-            prepare=lambda _context, cancel=None: SimpleNamespace(
-                overrides_file=tmp_path / "overrides.json"
+            prepare=lambda _context, cancel=None: SharedProjectWorkspace(
+                "test", tmp_path, overrides, False, (), ()
             ),
             build_lock=build_lock,
         ),

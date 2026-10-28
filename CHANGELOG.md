@@ -2,6 +2,65 @@
 
 ## Unreleased
 
+- Compact byte-identical shared/composition build files with verified copy-on-write
+  snapshots (`storage deduplicate --dry-run/--yes`), preserving independent writes,
+  package paths and graph-sensitive build identities. Incrementally compact after
+  shared builds and use CoW copies for imported compiled outputs instead of full
+  copies. Unsupported filesystems never fall back to writable hard links.
+
+- Keep one composition-wide build/dependency growth guard active through raw
+  execution and shared preparation, preventing nested whole-store scans. Budget
+  the exact validated retained workspace (including nested-package/custom-output
+  directories), not a different compatible donor graph.
+
+- Add exact named multi-repository compositions with portable snapshot locks,
+  bounded Git-policy source capture, recursive path dependencies, explicit pin,
+  namespace and cycle conflicts, and source-only/check/full-build readiness.
+- Initialize ordinary Lake consumers with immutable composition pins and shared
+  package views. Coordinate shared writes, build imported dependency cones, and
+  preserve unrelated declarative-package artifacts across composition changes;
+  dynamic configurations use conservative whole-composition/consumer keys.
+- Add source-capsule export/import, semantic comparison, explicit consumer/name
+  references and preview/apply cleanup protected against active builds.
+- Scope composition storage monitors to their mutable dependency closure and new
+  shared objects; avoid full-store scans, deduplicate overlapping inventory roots
+  and support cancellation before Lean starts. Source/build growth remains
+  monitored rather than a filesystem quota.
+
+- Local acquisition policy is enforced by toolchain command construction, full
+  toolchain acquisition, Elan bootstrap, and source acquisition/resolution seams.
+  Toolchain inspection distinguishes check/build readiness and no longer installs.
+- Add read-only multi-project `readiness`, exact dependency/path diagnostics,
+  cross-project pin conflicts, and deduplicated adoption storage previews.
+- Add explicit borrowed Elan homes with ownership-aware inspection, plus
+  operation-scoped toolchain/dependency/build growth limits and aggregate OCI
+  payload reservations. Unknown Elan/Git acquisition sizes fail closed under
+  acquisition budgets. Storage limits are cooperative monitors, not disk quotas.
+- Shared builds isolate writable Lake configuration state in stable linked views
+  while retaining shared first-build outputs and package build coordination.
+
+- Catalog entries published after a release reach existing installs: `new` and
+  `update` fetch the published catalog from the environment library (at most every
+  six hours; `catalog refresh` forces it) and discovery uses the last fetched copy.
+  Published catalogs only add entries, never replace bundled ones, and follow the
+  `publisher_verification` policy. Added entries must use already cataloged or
+  Lean-organization package sources, and release-named entries must pin the commit
+  of their upstream tag. A monotonic publication sequence refuses replayed older
+  publications (on both publish and fetch) while letting newer ones retract
+  entries. Failed refreshes and upstream lookups back off for 30 minutes.
+  `LEAN_RUNTIME_CATALOG=bundled` pins the release catalog. `catalog publish
+  --sequence` publishes one.
+- `new --mathlib VERSION` selects a cataloged release; `--uncataloged` resolves an
+  uncataloged release from its tag and builds it without published artifacts.
+- `new` and `update` name a stable upstream Mathlib release newer than the catalog
+  on stderr. The best-effort lookup is skipped offline, never changes the selected
+  version, and can be disabled with `LEAN_RUNTIME_NO_UPSTREAM_CHECK=1`.
+- The scheduled catalog update catalogs every stable release newer than the newest
+  cataloged one in a single rolling pull request, can open it with a
+  `CATALOG_UPDATE_TOKEN` secret, and keeps one open issue while it is failing.
+- Merging catalog locks publishes their artifacts and then the catalog itself,
+  gated on every cataloged capsule and slim runtime being publicly downloadable.
+
 ## 4.33.0.1 - 2026-09-14
 
 - Refactor adoption into read-only action planning, component accounting, and report

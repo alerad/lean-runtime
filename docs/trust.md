@@ -24,6 +24,11 @@ Lean Runtime records exact identities, verifies retained content, and reports th
 - That package code cannot access the host system
 - That integrity verification provides process isolation
 - That a discovery proposal is compatible before Lean has accepted the file in it
+- That a published catalog entry came from a particular publisher, unless
+  `publisher_verification` is set to `required`. Published catalogs can only add
+  entries, never change the bundled ones; added entries must use already
+  cataloged or Lean-organization package sources, and release-named entries must
+  match the commit of their upstream tag
 
 Lake packages and build scripts can execute code during acquisition or compilation. Treat unfamiliar dependencies as code you are about to run on your machine.
 
@@ -40,8 +45,8 @@ interactive confirmation.
 | Command | Changes |
 | --- | --- |
 | `new`, `adopt`, `update`, `publish`, `project share`, `project unshare` | Your project directory |
-| `clean`, `doctor` repairs, `toolchain optimize --prune-original` | Local content under the runtime home |
-| `env publish`, `toolchain publish`, `program publish`, `declaration-index publish` | A remote library |
+| `clean`, `storage deduplicate --yes`, `doctor` repairs, `toolchain optimize --prune-original` | Local content under the runtime home |
+| `env publish`, `toolchain publish`, `program publish`, `declaration-index publish`, `catalog publish` | A remote library |
 
 In a non-interactive session these commands exit with code `2` unless `--yes`
 is given, so a script can never mutate or publish by accident.

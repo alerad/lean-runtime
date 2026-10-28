@@ -31,7 +31,7 @@ from .capsules import (
     setup_artifact_groups,
     source_import_roots,
 )
-from .errors import EnvironmentError, MaterializationError, PolicyError
+from .errors import DownloadLimitExceeded, EnvironmentError, MaterializationError, PolicyError
 from .events import EventEmitter, submit
 from .import_syntax import IMPORT_STATEMENT
 from .lake import ROOT_MODULE
@@ -46,6 +46,7 @@ from .models import (
 from .policies import ExecutionPolicy
 from .references import artifact_accelerators
 from .serialization import freeze_json, sha256_id, write_json_atomic
+from .storage_limits import StorageLimits, budgeted
 from .store import (
     EnvironmentStore,
     clone_tree,
@@ -60,6 +61,70 @@ EXECUTION_SCHEMA = "lean-runtime-execution/1"
 CAPTURE_SCHEMA = "lean-runtime-execution-capture/1"
 T = TypeVar("T")
 _STAGING_NONCE_LENGTH = 12
+
+# Check capsules are immutable once published, yet every check used to re-parse
+# the (multi-megabyte) manifest twice, re-stat every artifact of the import
+# closure, and rebuild the setup facets: several seconds per check for Mathlib.
+# These process-local caches are keyed by the manifest file's identity, so a
+# rewritten manifest is never served stale. A verified closure is re-verified
+# whenever Lean reports a missing module artifact (see `check_files`).
+_CAPSULE_CACHE_LOCK = threading.Lock()
+_CAPSULE_MANIFESTS: dict[tuple[Any, ...], CapsuleManifest] = {}
+_VERIFIED_CLOSURES: set[tuple[Any, ...]] = set()
+_SETUP_GROUPS: dict[tuple[Any, ...], dict[str, tuple[tuple[str, ...], ...]]] = {}
+_CAPSULE_CACHE_LIMIT = 8
+_VERIFIED_LIMIT = 4096
+_MISSING_ARTIFACT = re.compile(
+    r"object file .* does not exist|unknown module prefix|could not find (?:the )?(?:module|file)",
+    re.IGNORECASE,
+)
+
+
+def _capsule_identity(path: Path) -> tuple[Any, ...] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+def _bounded_put(cache: dict[Any, Any], key: Any, value: Any, limit: int) -> None:
+    while len(cache) >= limit:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
+
+
+def _load_capsule(path: Path) -> tuple[tuple[Any, ...] | None, CapsuleManifest]:
+    """Load a capsule manifest once per file identity."""
+    identity = _capsule_identity(path)
+    if identity is not None:
+        with _CAPSULE_CACHE_LOCK:
+            cached = _CAPSULE_MANIFESTS.get(identity)
+        if cached is not None:
+            return identity, cached
+    manifest = CapsuleManifest.load(path)
+    if identity is not None and _capsule_identity(path) == identity:
+        with _CAPSULE_CACHE_LOCK:
+            _bounded_put(_CAPSULE_MANIFESTS, identity, manifest, _CAPSULE_CACHE_LIMIT)
+    return identity, manifest
+
+
+def _forget_verified_closures(workspace: Path) -> bool:
+    """Drop cached verification for one workspace; report whether any existed."""
+    capsule = str(workspace / CAPSULE_MANIFEST)
+    with _CAPSULE_CACHE_LOCK:
+        stale = [key for key in _VERIFIED_CLOSURES if key[0][0] == capsule]
+        for key in stale:
+            _VERIFIED_CLOSURES.discard(key)
+        for key in [key for key in _SETUP_GROUPS if key[0][0] == capsule]:
+            _SETUP_GROUPS.pop(key, None)
+    return bool(stale)
+
+
+def _reports_missing_artifact(result: ExecutionResult) -> bool:
+    texts = [result.stderr or "", result.stdout or ""]
+    texts.extend(item.message for item in result.diagnostics)
+    return any(_MISSING_ARTIFACT.search(text) for text in texts)
 
 
 def _now() -> str:
@@ -193,9 +258,19 @@ def _capsule_setup(
     manifest_path = workspace / CAPSULE_MANIFEST
     if not manifest_path.is_file():
         return None
-    manifest = CapsuleManifest.load(manifest_path)
+    identity, manifest = _load_capsule(manifest_path)
     roots = source_import_roots(source)
-    artifact_groups = setup_artifact_groups(manifest, workspace, roots)
+    groups_key = (identity, str(workspace), tuple(roots)) if identity is not None else None
+    cached_groups = None
+    if groups_key is not None:
+        with _CAPSULE_CACHE_LOCK:
+            cached_groups = _SETUP_GROUPS.get(groups_key)
+    if cached_groups is None:
+        cached_groups = setup_artifact_groups(manifest, workspace, roots)
+        if groups_key is not None:
+            with _CAPSULE_CACHE_LOCK:
+                _bounded_put(_SETUP_GROUPS, groups_key, cached_groups, _CAPSULE_CACHE_LIMIT)
+    artifact_groups = dict(cached_groups)
     known = {module.name for module in manifest.modules}
     for root in roots:
         if root in known:
@@ -480,6 +555,7 @@ class Environment:
         record: dict[str, Any],
     ) -> None:
         self.manager = manager
+        self.storage_limits = getattr(manager, "storage_limits", StorageLimits())
         self.id = environment_id
         self.lock = lock
         self.root = root
@@ -589,6 +665,32 @@ class Environment:
             policy=policy or ExecutionPolicy(),
             cancel=cancel,
         )
+        if (
+            self.sparse
+            and not result.ok
+            and _reports_missing_artifact(result)
+            and _forget_verified_closures(self.workspace)
+            and not self.manager.sparse_closure_present(self.lock, roots, frozenset({"check"}))
+        ):
+            # A cached verification predated external removal of artifacts.
+            # Restore them (acquiring if permitted) and run once more. A missing
+            # module that is simply not in the capsule (e.g. a typo) never retries.
+            self.manager.ensure_sparse_modules(
+                self.lock,
+                roots,
+                frozenset({"check"}),
+                allow_acquisition=_allow_sparse_acquisition,
+                cancel=cancel,
+            )
+            result = self._execute_in_instance(
+                operation="check",
+                files=normalized,
+                entrypoint=selected_entrypoint,
+                targets=(),
+                requested_command=(),
+                policy=policy or ExecutionPolicy(),
+                cancel=cancel,
+            )
         if (
             _declaration_hints
             and not result.ok
@@ -843,6 +945,7 @@ class Environment:
             expected_ok=expected_ok,
         )
 
+    @budgeted("build", lambda self, _args: [self.manager.store.jobs])
     def _execute_in_instance(
         self,
         *,
@@ -1118,6 +1221,7 @@ class EnvironmentManager:
         events: EventEmitter | None = None,
     ) -> None:
         self.store = store
+        self.storage_limits = StorageLimits()
         self.toolchains = toolchains
         self.backend = backend
         self.events = events or EventEmitter()
@@ -1131,6 +1235,22 @@ class EnvironmentManager:
             Callable[[EnvironmentLock, ExecutionResult, threading.Event | None], ExecutionResult]
             | None
         ) = None
+
+    def sparse_closure_present(
+        self, lock: EnvironmentLock, roots: tuple[str, ...], capabilities: frozenset[str]
+    ) -> bool:
+        """Whether every capsule artifact of the import closure is on disk now."""
+        workspace = self.store.environment_path(environment_identity(lock)) / "workspace"
+        capsule = workspace / CAPSULE_MANIFEST
+        if not capsule.is_file():
+            return True
+        _, manifest = _load_capsule(capsule)
+        return all(
+            workspace.joinpath(*PurePosixPath(artifact.path).parts).is_file()
+            for module in manifest.closure(roots)
+            for artifact in module.artifacts
+            if artifact.capability in capabilities
+        )
 
     def ensure_sparse_modules(
         self,
@@ -1146,7 +1266,16 @@ class EnvironmentManager:
         workspace = self.store.environment_path(environment_id) / "workspace"
         capsule = workspace / CAPSULE_MANIFEST
         if capsule.is_file():
-            manifest = CapsuleManifest.load(capsule)
+            identity, manifest = _load_capsule(capsule)
+            verified_key = (
+                (identity, tuple(sorted(set(roots))), tuple(sorted(capabilities)))
+                if identity is not None
+                else None
+            )
+            if verified_key is not None:
+                with _CAPSULE_CACHE_LOCK:
+                    if verified_key in _VERIFIED_CLOSURES:
+                        return
             required = [
                 artifact
                 for module in manifest.closure(roots)
@@ -1157,6 +1286,11 @@ class EnvironmentManager:
                 workspace.joinpath(*PurePosixPath(artifact.path).parts).is_file()
                 for artifact in required
             ):
+                if verified_key is not None:
+                    with _CAPSULE_CACHE_LOCK:
+                        if len(_VERIFIED_CLOSURES) >= _VERIFIED_LIMIT:
+                            _VERIFIED_CLOSURES.clear()
+                        _VERIFIED_CLOSURES.add(verified_key)
                 return
             if not allow_acquisition:
                 raise EnvironmentError(
@@ -1282,7 +1416,11 @@ class EnvironmentManager:
             accelerators = artifact_accelerators() if accelerate else {}
             for package in lock.packages:
                 requested_command = package.artifact_command or accelerators.get(package.url, ())
-                if not requested_command:
+                if (
+                    not requested_command
+                    or not getattr(self.toolchains, "allow_download", True)
+                    or getattr(self.toolchains, "max_download_bytes", None) is not None
+                ):
                     continue
                 accelerated = not package.artifact_command
                 self.events.emit(
@@ -1391,6 +1529,10 @@ class EnvironmentManager:
                     source_id=package.source_id,
                 )
                 continue
+            if not getattr(self.toolchains, "allow_download", True):
+                raise EnvironmentError(f"locked source {package.name} is unavailable locally")
+            if getattr(self.toolchains, "max_download_bytes", None) is not None:
+                raise DownloadLimitExceeded("locked-source Git fetch has unknown transfer size")
             self.events.emit(
                 "source.fetch_started",
                 f"Fetching {package.name}",

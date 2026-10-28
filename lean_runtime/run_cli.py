@@ -18,9 +18,9 @@ from .discovery import (
     DiscoveryError,
     DiscoveryPolicy,
     DiscoveryResult,
-    default_catalog,
 )
 from .discovery.analyzer import SourceEvidence, analyze_source
+from .discovery.remote import effective_catalog
 from .errors import LeanRuntimeError, SpecificationError
 from .events import RuntimeEvent
 from .frontmatter import LeanFrontmatter, parse_frontmatter
@@ -28,6 +28,7 @@ from .lockfiles import EnvironmentLock
 from .models import ExecutionResult, PhaseTiming
 from .policies import ExecutionPolicy, format_byte_size, parse_byte_size
 from .runtime import Runtime
+from .storage_limits import StorageLimits
 from .timings import render_timings
 from .wire import envelope, error, serialize_execution_v1
 
@@ -170,8 +171,10 @@ def _selected_policy(arguments: argparse.Namespace) -> tuple[str, tuple[str, ...
     return availability, libraries
 
 
-def _catalog(path: Path | None) -> Catalog:
-    return Catalog.from_file(path.expanduser().resolve()) if path is not None else default_catalog()
+def _catalog(path: Path | None, home: str | None = None) -> Catalog:
+    if path is not None:
+        return Catalog.from_file(path.expanduser().resolve())
+    return effective_catalog(home)
 
 
 def _discovery_policy(arguments: argparse.Namespace) -> DiscoveryPolicy:
@@ -235,7 +238,7 @@ def _explain_discovery(
     evidence: SourceEvidence,
 ) -> dict[str, object]:
     plan = Discovery(
-        catalog=_catalog(arguments.catalog),
+        catalog=_catalog(arguments.catalog, arguments.home),
         policy=_discovery_policy(arguments),
     ).plan(source, evidence=evidence)
     return {
@@ -341,7 +344,7 @@ def _plan_lock(
         return EnvironmentLock.load(path), None
     if resolution.kind == "discovery":
         plan = Discovery(
-            catalog=_catalog(arguments.catalog),
+            catalog=_catalog(arguments.catalog, arguments.home),
             policy=_discovery_policy(arguments),
         ).plan(source, evidence=evidence)
         if not plan.candidates:
@@ -498,9 +501,16 @@ def run(
                     context_resolution,
                     evidence,
                 )
-                _, plan_libraries = _selected_policy(arguments)
+                plan_availability, plan_libraries = _selected_policy(arguments)
                 runtime = Runtime(
                     home=arguments.home,
+                    availability=plan_availability,
+                    borrowed_elan_roots=getattr(arguments, "borrowed_elan_root", ()),
+                    storage_limits=StorageLimits(
+                        getattr(arguments, "max_toolchain_bytes", None),
+                        getattr(arguments, "max_dependency_bytes", None),
+                        getattr(arguments, "max_build_bytes", None),
+                    ),
                     max_download_bytes=arguments.max_download,
                     libraries=plan_libraries,
                 )
@@ -524,6 +534,12 @@ def run(
             availability, libraries = _selected_policy(arguments)
             runtime = Runtime(
                 home=arguments.home,
+                borrowed_elan_roots=getattr(arguments, "borrowed_elan_root", ()),
+                storage_limits=StorageLimits(
+                    getattr(arguments, "max_toolchain_bytes", None),
+                    getattr(arguments, "max_dependency_bytes", None),
+                    getattr(arguments, "max_build_bytes", None),
+                ),
                 on_event=observe,
                 availability=availability,
                 libraries=libraries,
@@ -579,7 +595,7 @@ def run(
                 result = runtime.check_file(source_path, policy=policy)
             else:
                 discovery_started = time.monotonic()
-                discovery_catalog = _catalog(arguments.catalog)
+                discovery_catalog = _catalog(arguments.catalog, arguments.home)
                 discovery_policy = _discovery_policy(arguments)
                 discovery = Discovery(
                     catalog=discovery_catalog,

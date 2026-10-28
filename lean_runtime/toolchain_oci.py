@@ -373,7 +373,24 @@ class OCIToolchainLibrary:
         local_check = getattr(self.toolchains, "is_available_locally", None)
         if callable(local_check) and local_check(toolchain):
             return True
+        if not self.toolchains.allow_download:
+            raise ToolchainError("toolchain acquisition disabled in local-only mode")
         plan = self.plan(toolchain)
+        from .errors import DownloadLimitExceeded
+        from .storage_limits import StorageLimitExceeded, check_storage
+
+        limit = self.toolchains.max_download_bytes
+        if limit is not None and plan.download_bytes > limit:
+            raise DownloadLimitExceeded(
+                f"toolchain download needs {plan.download_bytes} bytes; limit {limit}"
+            )
+        limit = self.toolchains.storage_limits.toolchain_bytes
+        expanded = plan.slim_manifest.get("bytes")
+        if limit is not None:
+            if not isinstance(expanded, int) or expanded < 0:
+                raise ToolchainError("unpacked toolchain size unknown under storage budget")
+            if expanded > limit:
+                raise StorageLimitExceeded("toolchain", expanded, limit)
         if plan.download_bytes:
             self.events.emit(
                 "toolchain.download_planned",
@@ -439,6 +456,7 @@ class OCIToolchainLibrary:
                 if observed_commit != plan.lean_commit:
                     raise ToolchainError("published check toolchain Lean commit mismatch")
                 destination.parent.mkdir(parents=True, exist_ok=True)
+                check_storage()
                 staging.replace(destination)
             finally:
                 if staging.exists():

@@ -431,5 +431,12 @@ def git_output(
     cancel: threading.Event | None = None,
 ) -> str | None:
     """Stripped stdout of a Git query, or ``None`` when Git did not succeed."""
-    outcome = run_git(*arguments, cwd=cwd, timeout=timeout, cancel=cancel)
+    # Queries must not refresh/write a borrowed repository's index.
+    outcome = run_git(
+        *arguments,
+        cwd=cwd,
+        timeout=timeout,
+        cancel=cancel,
+        environment={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+    )
     return outcome.stdout.strip() if outcome.ok else None

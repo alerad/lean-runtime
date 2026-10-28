@@ -21,6 +21,7 @@ from pathlib import Path
 from ._paths import remove_tree
 from .errors import EnvironmentError
 from .locking import FileLock, LockPaths
+from .storage_limits import check_storage
 
 STAGING_PREFIX = ".staging-"
 TRASH_PREFIX = ".trash-"
@@ -75,6 +76,7 @@ def publish_tree(staging: Path, destination: Path, *, replace: bool = False) -> 
     the new complete tree. The displaced tree is deleted after the commit;
     a failure there is not a publication failure.
     """
+    check_storage()
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not replace:
         if destination.exists():

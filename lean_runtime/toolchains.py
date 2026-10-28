@@ -21,11 +21,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .backends import LocalBackend
-from .errors import ToolchainError
+from .errors import DownloadLimitExceeded, ToolchainError
 from .events import EventEmitter
 from .policies import ExecutionPolicy
 from .progress import OutputProgress, observer_arguments
 from .serialization import write_json_atomic
+from .storage_limits import StorageLimits, budgeted, download_budgeted
 from .toolchain_slim import (
     SLIM_PROFILE,
     SlimManifest,
@@ -173,9 +174,18 @@ class ToolchainManager:
         self,
         home: str | os.PathLike[str] | None = None,
         events: EventEmitter | None = None,
+        *,
+        allow_download: bool = True,
+        borrowed_elan_roots: tuple[str | os.PathLike[str], ...] = (),
     ) -> None:
         self.home = Path(home).expanduser().resolve() if home else default_runtime_home()
         self.elan_home = self.home / "elan"
+        self.allow_download = allow_download
+        self.storage_limits = StorageLimits()
+        self.max_download_bytes: int | None = None
+        configured = os.environ.get("LEAN_RUNTIME_BORROWED_ELAN_ROOTS", "")
+        roots = borrowed_elan_roots or tuple(filter(None, configured.split(os.pathsep)))
+        self.borrowed_elan_roots = tuple(Path(root).expanduser().resolve() for root in roots)
         self.events = events or EventEmitter()
         self.remote_ensure: Callable[[str, threading.Event | None], bool] | None = None
         self._executable_digests: dict[str, tuple[int, int, int, str]] = {}
@@ -242,6 +252,7 @@ class ToolchainManager:
 
     def bootstrap_elan(self) -> Path:
         """Install Elan under the runtime cache without touching user defaults."""
+        self._require_acquisition("Elan bootstrap")
         if os.name == "nt":
             raise ToolchainError(
                 "automatic Elan bootstrap currently supports macOS and Linux; "
@@ -284,6 +295,8 @@ class ToolchainManager:
 
     def is_installed(self, toolchain: str) -> bool:
         name = normalize_toolchain(toolchain)
+        if not self.allow_download:
+            return self.is_available_locally(name)
         process = subprocess.run(
             [str(self.elan_path()), "toolchain", "list"],
             env=self.environment,
@@ -310,9 +323,7 @@ class ToolchainManager:
     def available_toolchains(self) -> tuple[str, ...]:
         """List private, slim, and safely detected user toolchains."""
         roots = [self.elan_home / "toolchains", self.slim_root]
-        user_home = self._user_elan_home()
-        if user_home is not None:
-            roots.append(user_home / "toolchains")
+        roots.extend(root / "toolchains" for root in self._borrowed_homes())
         names: set[str] = set()
         for root in roots:
             if not root.is_dir():
@@ -347,12 +358,57 @@ class ToolchainManager:
                 return selected
         return None
 
+    def _borrowed_homes(self) -> tuple[Path, ...]:
+        # Explicit roots are independent of provider HOME and Elan overrides.
+        roots = list(self.borrowed_elan_roots)
+        detected = self._user_elan_home()
+        if detected is not None and detected not in roots:
+            roots.append(detected)
+        return tuple(roots)
+
     def _user_toolchain_dir(self, name: str) -> Path | None:
-        home = self._user_elan_home()
-        if home is None:
-            return None
-        directory = home / "toolchains" / self._toolchain_dir_name(name)
-        return directory if self._binary(directory, "lean").is_file() else None
+        for home in self._borrowed_homes():
+            directory = home / "toolchains" / self._toolchain_dir_name(name)
+            if self._binary(directory, "lean").is_file():
+                return directory
+        return None
+
+    def local_capabilities(self, toolchain: str) -> dict[str, object]:
+        """Read-only inventory: check-ready is not necessarily build-ready.
+
+        Borrowed installations are never owned or pruned by Runtime.
+        No Elan subprocess, bootstrap, or network access occurs here.
+        """
+        name = normalize_toolchain(toolchain)
+        full = self._full_toolchain_dir(name)
+        lean = self._binary(full, "lean").is_file()
+        build = lean and self._binary(full, "lake").is_file()
+        slim = self.has_slim(name)
+        return {
+            "toolchain": name,
+            "check_ready": lean or slim,
+            "build_ready": build,
+            "slim": slim,
+            "full": build,
+            "path": str(full) if lean else str(self.slim_path(name)) if slim else None,
+            "ownership": ("private" if full == self._elan_toolchain_dir(name) else "borrowed")
+            if lean
+            else "private"
+            if slim
+            else None,
+        }
+
+    def is_build_available_locally(self, toolchain: str) -> bool:
+        return bool(self.local_capabilities(toolchain)["build_ready"])
+
+    def _require_acquisition(self, operation: str) -> None:
+        if not self.allow_download:
+            raise ToolchainError(f"{operation} unavailable locally; downloads are disabled")
+        if self.max_download_bytes is not None or self.storage_limits.toolchain_bytes is not None:
+            raise DownloadLimitExceeded(
+                f"{operation}: Elan download/unpacked size is unknown; "
+                "refusing under acquisition budgets"
+            )
 
     def _full_toolchain_dir(self, name: str) -> Path:
         private = self._elan_toolchain_dir(name)
@@ -391,6 +447,7 @@ class ToolchainManager:
             raise ToolchainError(f"full toolchain is unavailable: {name}")
         return path
 
+    @budgeted("toolchain", lambda self, _args: [self.home / "elan", self.slim_root])
     def materialize_slim(self, toolchain: str, *, verify: bool = True) -> SlimManifest:
         """Materialize and verify a slim check-profile copy of one toolchain.
 
@@ -496,6 +553,7 @@ class ToolchainManager:
         happen when Elan's output shows a download problem rather than an
         unknown toolchain or a disk error.
         """
+        self._require_acquisition(f"toolchain {name}")
         attempts = len(self.install_retry_delays) + 1
         for attempt in range(1, attempts + 1):
             observer = OutputProgress(self.events.emit, label="elan")
@@ -534,11 +592,17 @@ class ToolchainManager:
             else:
                 time.sleep(delay)
 
+    @budgeted("toolchain", lambda self, _args: [self.home / "elan", self.slim_root])
+    @download_budgeted
     def ensure(self, toolchain: str, *, cancel: threading.Event | None = None) -> str:
         """Install a toolchain if necessary and return its normalized name."""
         name = normalize_toolchain(toolchain)
         if self.has_slim(name) or self._binary(self._full_toolchain_dir(name), "lean").is_file():
             return name
+        if not self.allow_download:
+            raise ToolchainError(
+                f"toolchain {name!r} is unavailable locally; offline mode does not permit downloads"
+            )
         if self.remote_ensure is not None and self.remote_ensure(name, cancel):
             if not self.has_slim(name):
                 raise ToolchainError("remote toolchain acquisition returned without a slim copy")
@@ -553,12 +617,15 @@ class ToolchainManager:
         self._install_with_elan(name, cancel=cancel)
         return name
 
+    @budgeted("toolchain", lambda self, _args: [self.home / "elan", self.slim_root])
+    @download_budgeted
     def ensure_full(self, toolchain: str, *, cancel: threading.Event | None = None) -> str:
         """Install the full Lake-capable toolchain even when a slim copy exists."""
         name = normalize_toolchain(toolchain)
         directory = self._full_toolchain_dir(name)
         if self._binary(directory, "lean").is_file() and self._binary(directory, "lake").is_file():
             return name
+        self._require_acquisition(f"full Lake-capable toolchain {name}")
         self.events.emit(
             "toolchain.install_started",
             f"Installing full Lean toolchain {name}",
